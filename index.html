@@ -1,0 +1,2072 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <!-- Google tag (gtag.js) -->
+        <script async src="https://www.googletagmanager.com/gtag/js?id=G-ZWPF7650WK"></script>
+        <script>
+            window.dataLayer = window.dataLayer || [];
+            function gtag() {
+                dataLayer.push(arguments);
+            }
+            gtag("js", new Date());
+
+            gtag("config", "G-ZWPF7650WK");
+        </script>
+        <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🖥️</text></svg>' />
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+        <meta name="theme-color" content="#23302A" />
+        <title>Little Ledger — POS &amp; Cash Flow</title>
+        <style>
+            :root {
+                --paper: #f6f1e4;
+                --paper-card: #fffdf8;
+                --ink: #23302a;
+                --ink-soft: #6b7268;
+                --green: #3f7a5c;
+                --green-soft: #e6efe7;
+                --rust: #b5502e;
+                --rust-soft: #f5e7e0;
+                --gold: #c99a3e;
+                --border: #dfd5bc;
+                --border-soft: #eae2cd;
+                --radius: 14px;
+                --mono: ui-monospace, "Cascadia Mono", "SFMono-Regular", "Consolas", "Liberation Mono", Menlo, monospace;
+                --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+            html,
+            body {
+                margin: 0;
+                padding: 0;
+            }
+            body {
+                background: var(--paper);
+                color: var(--ink);
+                font-family: var(--sans);
+                -webkit-font-smoothing: antialiased;
+                min-height: 100vh;
+            }
+            body::before {
+                content: "";
+                position: fixed;
+                inset: 0;
+                background-image: radial-gradient(rgba(35, 48, 42, 0.035) 1px, transparent 1px);
+                background-size: 3px 3px;
+                pointer-events: none;
+                z-index: 0;
+            }
+
+            #shell {
+                max-width: 480px;
+                margin: 0 auto;
+                min-height: 100vh;
+                min-height: 100dvh;
+                background: var(--paper);
+                position: relative;
+                box-shadow: 0 0 40px rgba(0, 0, 0, 0.06);
+                padding-bottom: calc(72px + env(safe-area-inset-bottom));
+            }
+
+            #app {
+                position: relative;
+                z-index: 1;
+            }
+
+            .page {
+                padding: 16px 16px 8px;
+                animation: fadein 0.18s ease;
+            }
+            @keyframes fadein {
+                from {
+                    opacity: 0;
+                    transform: translateY(4px);
+                }
+                to {
+                    opacity: 1;
+                    transform: none;
+                }
+            }
+
+            .page-title {
+                font-size: 22px;
+                font-weight: 700;
+                letter-spacing: -0.01em;
+                margin: 4px 0 14px;
+            }
+
+            /* ---------- Hero / receipt tape ---------- */
+            .hero {
+                background: var(--ink);
+                color: var(--paper);
+                border-radius: var(--radius) var(--radius) 0 0;
+                padding: 20px 20px 22px;
+                margin: 0 -16px;
+            }
+            .hero-top {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 14px;
+            }
+            .eyebrow {
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                font-size: 11px;
+                font-weight: 700;
+                color: var(--gold);
+            }
+            .eyebrow.muted {
+                color: rgba(246, 241, 228, 0.55);
+                font-weight: 600;
+            }
+            .hero-amount {
+                font-family: var(--mono);
+                font-size: 40px;
+                font-weight: 700;
+                letter-spacing: -0.01em;
+                line-height: 1.05;
+            }
+            .hero-label {
+                font-size: 10.5px;
+                letter-spacing: 0.12em;
+                color: rgba(246, 241, 228, 0.6);
+                margin-top: 4px;
+                font-weight: 700;
+            }
+            .hero-row {
+                display: flex;
+                gap: 10px;
+                margin-top: 18px;
+            }
+            .hero-stat {
+                flex: 1;
+                background: rgba(246, 241, 228, 0.08);
+                border-radius: 10px;
+                padding: 10px 12px;
+            }
+            .hs-label {
+                font-size: 10.5px;
+                color: rgba(246, 241, 228, 0.6);
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+                margin-bottom: 3px;
+            }
+            .hs-value {
+                font-family: var(--mono);
+                font-size: 17px;
+                font-weight: 700;
+            }
+            .hs-value.sales {
+                color: #8fd4ac;
+            }
+            .hs-value.expenses {
+                color: #f0a98a;
+            }
+
+            .tear {
+                height: 12px;
+                margin: 0 -16px;
+                background: radial-gradient(circle at 8px 0, transparent 7px, var(--ink) 7.5px) 0 0 / 16px 16px repeat-x;
+            }
+
+            /* ---------- Cash on hand card ---------- */
+            .cashcard {
+                background: var(--paper-card);
+                border: 1px dashed var(--border);
+                border-radius: 0 0 var(--radius) var(--radius);
+                margin: 0 -16px 18px;
+                padding: 14px 20px 16px;
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-end;
+            }
+            .cc-label {
+                font-size: 10.5px;
+                letter-spacing: 0.1em;
+                color: var(--ink-soft);
+                font-weight: 700;
+                margin-bottom: 2px;
+            }
+            .cc-value {
+                font-family: var(--mono);
+                font-size: 22px;
+                font-weight: 700;
+                color: var(--ink);
+            }
+            .cc-note {
+                font-size: 10.5px;
+                color: var(--ink-soft);
+                max-width: 130px;
+                text-align: right;
+                line-height: 1.3;
+            }
+
+            /* ---------- Quick actions ---------- */
+            .quickrow {
+                display: flex;
+                gap: 10px;
+                margin-bottom: 22px;
+            }
+            .quickbtn {
+                flex: 1;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 8px;
+                padding: 14px 10px;
+                border-radius: 12px;
+                text-decoration: none;
+                font-weight: 700;
+                font-size: 15px;
+                border: 1px solid var(--border);
+            }
+            .quickbtn-sale {
+                background: var(--green);
+                color: #fff;
+                border-color: var(--green);
+            }
+            .quickbtn-expense {
+                background: var(--paper-card);
+                color: var(--rust);
+                border-color: var(--rust);
+            }
+            .qb-icon {
+                font-size: 18px;
+                line-height: 1;
+            }
+
+            /* ---------- Sections & bars ---------- */
+            .section {
+                margin-bottom: 22px;
+            }
+            .section-title {
+                font-size: 11px;
+                letter-spacing: 0.1em;
+                font-weight: 700;
+                color: var(--ink-soft);
+                margin: 22px 0 10px;
+            }
+            .section .section-title {
+                margin-top: 0;
+            }
+
+            .barrow {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 10px;
+            }
+            .barrow-label {
+                width: 92px;
+                flex-shrink: 0;
+                font-size: 12.5px;
+                color: var(--ink-soft);
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .barrow-track {
+                flex: 1;
+                background: var(--border-soft);
+                border-radius: 6px;
+                height: 8px;
+                overflow: hidden;
+            }
+            .barrow-fill {
+                height: 100%;
+                background: var(--green);
+                border-radius: 6px;
+            }
+            .barrow-fill.alt {
+                background: var(--gold);
+            }
+            .barrow-amt {
+                font-family: var(--mono);
+                font-size: 12.5px;
+                font-weight: 600;
+                width: 68px;
+                text-align: right;
+                flex-shrink: 0;
+            }
+
+            /* ---------- Transaction rows ---------- */
+            .txrow {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 11px 2px;
+                border-bottom: 1px dotted var(--border);
+                cursor: pointer;
+            }
+            .txrow:last-child {
+                border-bottom: none;
+            }
+            .txrow-title {
+                font-size: 14.5px;
+                font-weight: 600;
+            }
+            .txrow-sub {
+                font-size: 11.5px;
+                color: var(--ink-soft);
+                margin-top: 2px;
+            }
+            .txrow-amt {
+                font-family: var(--mono);
+                font-weight: 700;
+                font-size: 14.5px;
+                flex-shrink: 0;
+                padding-left: 10px;
+            }
+            .txrow-amt.sales {
+                color: var(--green);
+            }
+            .txrow-amt.expenses {
+                color: var(--rust);
+            }
+
+            .daysep {
+                font-size: 11px;
+                letter-spacing: 0.06em;
+                font-weight: 700;
+                color: var(--ink-soft);
+                margin: 16px 0 4px;
+                text-transform: uppercase;
+            }
+            .daysep:first-child {
+                margin-top: 0;
+            }
+
+            .periodtotal {
+                display: flex;
+                justify-content: space-between;
+                font-family: var(--mono);
+                font-weight: 700;
+                font-size: 13px;
+                color: var(--ink-soft);
+                margin-bottom: 6px;
+                padding: 0 2px;
+            }
+            .periodtotal .sales {
+                color: var(--green);
+            }
+            .periodtotal .expenses {
+                color: var(--rust);
+            }
+
+            /* ---------- Empty states ---------- */
+            .empty {
+                text-align: center;
+                padding: 28px 12px;
+                color: var(--ink-soft);
+            }
+            .empty.small {
+                padding: 14px 4px;
+                font-size: 12.5px;
+            }
+            .empty-title {
+                font-weight: 700;
+                color: var(--ink);
+                margin-bottom: 4px;
+            }
+            .empty-sub {
+                font-size: 12.5px;
+            }
+
+            /* ---------- Cards & forms ---------- */
+            .card {
+                background: var(--paper-card);
+                border: 1px solid var(--border);
+                border-radius: var(--radius);
+                padding: 16px;
+                margin-bottom: 16px;
+            }
+            .form {
+                display: flex;
+                flex-direction: column;
+            }
+            .flabel {
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0.05em;
+                text-transform: uppercase;
+                color: var(--ink-soft);
+                margin: 12px 0 6px;
+            }
+            .flabel:first-child {
+                margin-top: 0;
+            }
+            .finput {
+                width: 100%;
+                padding: 11px 12px;
+                border-radius: 10px;
+                border: 1px solid var(--border);
+                background: #fff;
+                font-size: 15px;
+                color: var(--ink);
+                font-family: var(--sans);
+            }
+            .finput:focus {
+                outline: 2px solid var(--gold);
+                outline-offset: 1px;
+            }
+            .famount {
+                font-family: var(--mono);
+                font-weight: 700;
+                font-size: 20px;
+            }
+
+            .frow {
+                display: flex;
+                gap: 10px;
+            }
+            .fcol {
+                flex: 1;
+            }
+
+            .stepper {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+            .step-btn {
+                width: 38px;
+                height: 38px;
+                border-radius: 10px;
+                border: 1px solid var(--border);
+                background: #fff;
+                font-size: 18px;
+                font-weight: 700;
+                color: var(--ink);
+                flex-shrink: 0;
+            }
+            .steppernum {
+                text-align: center;
+                padding: 11px 4px;
+            }
+
+            .chiprow {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-bottom: 4px;
+            }
+            .chip {
+                border: 1px solid var(--border);
+                background: #fff;
+                color: var(--ink);
+                padding: 8px 13px;
+                border-radius: 20px;
+                font-size: 13px;
+                font-weight: 600;
+                white-space: nowrap;
+            }
+            .chip.active {
+                background: var(--ink);
+                color: var(--paper);
+                border-color: var(--ink);
+            }
+            .chip.pay.active {
+                background: var(--green);
+                border-color: var(--green);
+                color: #fff;
+            }
+            .chip.preset {
+                background: var(--green-soft);
+                border-color: var(--border);
+                font-weight: 600;
+            }
+            .chip.removable {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding-right: 8px;
+            }
+            .chip-x {
+                background: none;
+                border: none;
+                font-size: 16px;
+                color: var(--rust);
+                font-weight: 700;
+                line-height: 1;
+                padding: 0 2px;
+            }
+
+            .tabbar {
+                display: flex;
+                gap: 8px;
+                margin-bottom: 14px;
+            }
+            .tab {
+                flex: 1;
+                padding: 11px;
+                border-radius: 12px;
+                border: 1px solid var(--border);
+                background: #fff;
+                font-weight: 700;
+                font-size: 14px;
+                color: var(--ink-soft);
+            }
+            .tab.active.sale {
+                background: var(--green);
+                color: #fff;
+                border-color: var(--green);
+            }
+            .tab.active.expense {
+                background: var(--rust);
+                color: #fff;
+                border-color: var(--rust);
+            }
+
+            .bigbtn {
+                width: 100%;
+                padding: 14px;
+                border-radius: 12px;
+                border: none;
+                font-weight: 700;
+                font-size: 15.5px;
+                margin-top: 18px;
+                color: #fff;
+                background: var(--ink);
+            }
+            .bigbtn.sale {
+                background: var(--green);
+            }
+            .bigbtn.expense {
+                background: var(--rust);
+            }
+            .bigbtn.ghost {
+                background: #fff;
+                color: var(--ink);
+                border: 1px solid var(--border);
+                margin-top: 10px;
+            }
+            .bigbtn.danger {
+                background: #fff;
+                color: var(--rust);
+                border: 1px solid var(--rust);
+                margin-top: 10px;
+            }
+            .filelabel {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                cursor: pointer;
+            }
+            .hidden-file {
+                display: none;
+            }
+
+            .addrow {
+                display: flex;
+                gap: 8px;
+                margin-top: 10px;
+                align-items: center;
+            }
+            .addrow .finput {
+                flex: 1;
+            }
+            .smallbtn {
+                padding: 10px 16px;
+                border-radius: 10px;
+                border: none;
+                background: var(--ink);
+                color: #fff;
+                font-weight: 700;
+                font-size: 13px;
+                flex-shrink: 0;
+            }
+            .help-text {
+                font-size: 12.5px;
+                color: var(--ink-soft);
+                line-height: 1.5;
+                margin-bottom: 6px;
+            }
+            .footnote {
+                text-align: center;
+                font-size: 11.5px;
+                color: var(--ink-soft);
+                margin: 20px 0 8px;
+            }
+
+            .presetlist {
+                margin: 8px 0;
+            }
+            .presetrow {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 8px 0;
+                border-bottom: 1px dotted var(--border);
+            }
+            .presetrow:last-child {
+                border-bottom: none;
+            }
+            .presetrow-name {
+                flex: 1;
+                font-size: 13.5px;
+                font-weight: 600;
+            }
+            .presetrow-price {
+                font-family: var(--mono);
+                font-size: 13px;
+                color: var(--ink-soft);
+            }
+
+            /* ---------- Summary grid (Reports) ---------- */
+            .summary-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+                margin-bottom: 8px;
+            }
+            .summary-card {
+                background: var(--paper-card);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 12px 14px;
+            }
+            .sc-label {
+                font-size: 10.5px;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+                color: var(--ink-soft);
+                margin-bottom: 4px;
+                font-weight: 700;
+            }
+            .sc-value {
+                font-family: var(--mono);
+                font-size: 18px;
+                font-weight: 700;
+            }
+            .sc-value.sales {
+                color: var(--green);
+            }
+            .sc-value.expenses {
+                color: var(--rust);
+            }
+
+            .toprow {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                padding: 8px 0;
+                border-bottom: 1px dotted var(--border);
+            }
+            .toprow:last-child {
+                border-bottom: none;
+            }
+            .toprow-rank {
+                width: 20px;
+                height: 20px;
+                border-radius: 50%;
+                background: var(--gold);
+                color: #fff;
+                font-size: 11px;
+                font-weight: 700;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                flex-shrink: 0;
+            }
+            .toprow-name {
+                flex: 1;
+                font-size: 13.5px;
+                font-weight: 600;
+            }
+            .toprow-amt {
+                font-family: var(--mono);
+                font-size: 13px;
+                font-weight: 700;
+                color: var(--ink-soft);
+            }
+
+            /* ---------- Modal ---------- */
+            .overlay {
+                position: fixed;
+                inset: 0;
+                background: rgba(35, 48, 42, 0.45);
+                display: flex;
+                align-items: flex-end;
+                justify-content: center;
+                z-index: 100;
+            }
+            .modal {
+                background: var(--paper-card);
+                width: 100%;
+                max-width: 480px;
+                border-radius: 18px 18px 0 0;
+                padding: 18px 18px 24px;
+                max-height: 88vh;
+                overflow-y: auto;
+                animation: slideup 0.2s ease;
+            }
+            @keyframes slideup {
+                from {
+                    transform: translateY(16px);
+                    opacity: 0;
+                }
+                to {
+                    transform: none;
+                    opacity: 1;
+                }
+            }
+            .modal-title {
+                font-size: 17px;
+                font-weight: 700;
+                margin-bottom: 6px;
+            }
+            .modal-btnrow {
+                display: flex;
+                gap: 8px;
+                margin-top: 18px;
+            }
+            .modal-btnrow .bigbtn {
+                margin-top: 0;
+                flex: 1;
+            }
+
+            /* ---------- Bottom nav (lives outside #shell so no ancestor can clip it) ---------- */
+            #bottomnav {
+                position: fixed;
+                bottom: 0;
+                left: 50%;
+                transform: translateX(-50%);
+                width: 100%;
+                max-width: 480px;
+                background: var(--paper-card);
+                border-top: 1px solid var(--border);
+                display: flex;
+                z-index: 500;
+                padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+            }
+            .navbtn {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 2px;
+                background: none;
+                border: none;
+                color: var(--ink-soft);
+                font-size: 10.5px;
+                font-weight: 700;
+                padding: 6px 2px;
+                border-radius: 10px;
+                text-decoration: none;
+            }
+            .navbtn .navicon {
+                font-size: 18px;
+                line-height: 1;
+            }
+            .navbtn.active {
+                color: var(--green);
+            }
+            .navbtn.active .navicon {
+                transform: scale(1.05);
+            }
+            .nav-brand {
+                display: none;
+            }
+
+            /* ---------- Toasts ---------- */
+            #toastHost {
+                position: fixed;
+                top: 14px;
+                left: 50%;
+                transform: translateX(-50%);
+                z-index: 200;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                align-items: center;
+                width: 100%;
+                max-width: 440px;
+                padding: 0 16px;
+                pointer-events: none;
+            }
+            .toast {
+                background: var(--ink);
+                color: var(--paper);
+                padding: 10px 18px;
+                border-radius: 30px;
+                font-size: 13px;
+                font-weight: 600;
+                opacity: 0;
+                transform: translateY(-8px);
+                transition:
+                    opacity 0.2s ease,
+                    transform 0.2s ease;
+                box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+            }
+            .toast.show {
+                opacity: 1;
+                transform: none;
+            }
+
+            /* ---------- Focus visibility ---------- */
+            button:focus-visible,
+            input:focus-visible,
+            a:focus-visible {
+                outline: 2px solid var(--gold);
+                outline-offset: 2px;
+            }
+
+            /* ---------- Reduced motion ---------- */
+            @media (prefers-reduced-motion: reduce) {
+                * {
+                    animation: none !important;
+                    transition: none !important;
+                }
+            }
+
+            /* ---------- Wide screens: 480–859px gets a comfortably centered phone-width column ---------- */
+            @media (min-width: 481px) and (max-width: 859px) {
+                #shell {
+                    margin-top: 24px;
+                    margin-bottom: 24px;
+                    min-height: calc(100dvh - 48px);
+                    border-radius: 20px;
+                }
+            }
+
+            /* ---------- Wide screens: 860px+ gets a real desktop layout — sidebar nav, wider content ---------- */
+            @media (min-width: 860px) {
+                #shell {
+                    max-width: none;
+                    margin: 0 0 0 220px;
+                    min-height: 100vh;
+                    min-height: 100dvh;
+                    box-shadow: none;
+                    padding-bottom: 40px;
+                }
+                #app {
+                    max-width: 640px;
+                    margin: 0 auto;
+                    padding: 8px 24px 0;
+                }
+                .page {
+                    padding: 20px 0 8px;
+                }
+
+                #bottomnav {
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    bottom: 0;
+                    transform: none;
+                    width: 220px;
+                    max-width: none;
+                    height: 100vh;
+                    height: 100dvh;
+                    flex-direction: column;
+                    align-items: stretch;
+                    justify-content: flex-start;
+                    gap: 4px;
+                    border-top: none;
+                    border-right: 1px solid var(--border);
+                    padding: 0 12px 24px;
+                }
+                .nav-brand {
+                    display: block;
+                    font-family: var(--mono);
+                    font-weight: 700;
+                    font-size: 13px;
+                    letter-spacing: 0.06em;
+                    color: var(--ink);
+                    padding: 22px 10px 18px;
+                    text-transform: uppercase;
+                }
+                .nav-brand span {
+                    color: var(--gold);
+                }
+                .navbtn {
+                    flex-direction: row;
+                    justify-content: flex-start;
+                    gap: 12px;
+                    padding: 11px 12px;
+                    font-size: 14px;
+                    border-radius: 10px;
+                }
+                .navbtn.active {
+                    background: var(--green-soft);
+                }
+                .navbtn .navicon {
+                    font-size: 17px;
+                    width: 20px;
+                    text-align: center;
+                }
+
+                .summary-grid {
+                    grid-template-columns: repeat(4, 1fr);
+                }
+                .hero {
+                    padding: 26px 28px 28px;
+                }
+                .hero-amount {
+                    font-size: 46px;
+                }
+                .card {
+                    padding: 20px 22px;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div id="shell">
+            <div id="toastHost"></div>
+            <main id="app"></main>
+        </div>
+
+        <nav id="bottomnav">
+            <div class="nav-brand">Little<span>Ledger</span></div>
+            <a href="#/home" class="navbtn" data-route="home"><span class="navicon">&#8962;</span><span>Home</span></a>
+            <a href="#/add" class="navbtn" data-route="add"><span class="navicon">&#43;</span><span>Add</span></a>
+            <a href="#/history" class="navbtn" data-route="history"><span class="navicon">&#8801;</span><span>History</span></a>
+            <a href="#/reports" class="navbtn" data-route="reports"><span class="navicon">&#9776;</span><span>Reports</span></a>
+            <a href="#/settings" class="navbtn" data-route="settings"><span class="navicon">&#9881;</span><span>Settings</span></a>
+        </nav>
+
+        <script>
+            /* ============ Little Ledger POS — app logic ============ */
+            (function () {
+                "use strict";
+
+                /* ---------- IndexedDB layer ---------- */
+                const DB_NAME = "littleLedgerDB";
+                const DB_VERSION = 1;
+                let dbPromise = null;
+
+                function openDB() {
+                    if (dbPromise) return dbPromise;
+                    dbPromise = new Promise((resolve, reject) => {
+                        const req = indexedDB.open(DB_NAME, DB_VERSION);
+                        req.onupgradeneeded = (e) => {
+                            const db = e.target.result;
+                            if (!db.objectStoreNames.contains("transactions")) {
+                                const store = db.createObjectStore("transactions", { keyPath: "id", autoIncrement: true });
+                                store.createIndex("date", "date");
+                                store.createIndex("type", "type");
+                                store.createIndex("category", "category");
+                            }
+                            if (!db.objectStoreNames.contains("presets")) {
+                                db.createObjectStore("presets", { keyPath: "id", autoIncrement: true });
+                            }
+                            if (!db.objectStoreNames.contains("settings")) {
+                                db.createObjectStore("settings", { keyPath: "key" });
+                            }
+                        };
+                        req.onsuccess = (e) => resolve(e.target.result);
+                        req.onerror = (e) => reject(e.target.error);
+                    });
+                    return dbPromise;
+                }
+
+                function reqP(req) {
+                    return new Promise((resolve, reject) => {
+                        req.onsuccess = () => resolve(req.result);
+                        req.onerror = () => reject(req.error);
+                    });
+                }
+
+                async function dbAdd(storeName, value) {
+                    const db = await openDB();
+                    const tx = db.transaction(storeName, "readwrite");
+                    const p = reqP(tx.objectStore(storeName).add(value));
+                    return p;
+                }
+                async function dbPut(storeName, value) {
+                    const db = await openDB();
+                    const tx = db.transaction(storeName, "readwrite");
+                    return reqP(tx.objectStore(storeName).put(value));
+                }
+                async function dbDelete(storeName, key) {
+                    const db = await openDB();
+                    const tx = db.transaction(storeName, "readwrite");
+                    return reqP(tx.objectStore(storeName).delete(key));
+                }
+                async function dbGetAll(storeName) {
+                    const db = await openDB();
+                    const tx = db.transaction(storeName, "readonly");
+                    return reqP(tx.objectStore(storeName).getAll());
+                }
+                async function dbClear(storeName) {
+                    const db = await openDB();
+                    const tx = db.transaction(storeName, "readwrite");
+                    return reqP(tx.objectStore(storeName).clear());
+                }
+                async function dbGet(storeName, key) {
+                    const db = await openDB();
+                    const tx = db.transaction(storeName, "readonly");
+                    return reqP(tx.objectStore(storeName).get(key));
+                }
+
+                /* ---------- Settings helpers ---------- */
+                const DEFAULT_SALE_CATEGORIES = ["Document Printing", "Ukay-Ukay", "School Supplies"];
+                const DEFAULT_EXPENSE_CATEGORIES = ["Restock", "Supplies & Materials", "Utilities", "Rent", "Transportation", "Other"];
+
+                async function getSetting(key, fallback) {
+                    const rec = await dbGet("settings", key);
+                    return rec ? rec.value : fallback;
+                }
+                async function setSetting(key, value) {
+                    return dbPut("settings", { key, value });
+                }
+
+                async function seedIfEmpty() {
+                    const cats = await dbGet("settings", "categories");
+                    if (!cats) {
+                        await setSetting("categories", { sale: DEFAULT_SALE_CATEGORIES.slice(), expense: DEFAULT_EXPENSE_CATEGORIES.slice() });
+                    }
+                    const name = await dbGet("settings", "businessName");
+                    if (!name) {
+                        await setSetting("businessName", "My Shop");
+                    }
+                    const cash = await dbGet("settings", "startingCash");
+                    if (!cash) {
+                        await setSetting("startingCash", 0);
+                    }
+                    const presets = await dbGetAll("presets");
+                    if (presets.length === 0) {
+                        const seedList = [
+                            { type: "sale", category: "Document Printing", name: "Photocopy (B&W)", price: 2 },
+                            { type: "sale", category: "Document Printing", name: "Print — Colored", price: 10 },
+                            { type: "sale", category: "Document Printing", name: "Print — B&W", price: 5 },
+                            { type: "sale", category: "Document Printing", name: "Scan to file", price: 10 },
+                            { type: "sale", category: "School Supplies", name: "Ballpen", price: 10 },
+                            { type: "sale", category: "School Supplies", name: "Notebook", price: 25 },
+                            { type: "sale", category: "School Supplies", name: "Bond Paper (per sheet)", price: 2 },
+                        ];
+                        for (const p of seedList) await dbAdd("presets", p);
+                    }
+                }
+
+                /* ---------- Utils ---------- */
+                function fmtPeso(n) {
+                    const v = Number(n) || 0;
+                    return "\u20b1" + v.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                }
+                function pad2(n) {
+                    return String(n).padStart(2, "0");
+                }
+                function toLocalInputValue(d) {
+                    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + "T" + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+                }
+                function fmtDateHeader(dateStr) {
+                    const d = new Date(dateStr);
+                    const today = new Date();
+                    today.setHours(0, 0, 0, 0);
+                    const that = new Date(d);
+                    that.setHours(0, 0, 0, 0);
+                    const diffDays = Math.round((today - that) / 86400000);
+                    const opts = { weekday: "short", month: "short", day: "numeric" };
+                    if (diffDays === 0) return "Today · " + d.toLocaleDateString("en-PH", opts);
+                    if (diffDays === 1) return "Yesterday · " + d.toLocaleDateString("en-PH", opts);
+                    return d.toLocaleDateString("en-PH", opts);
+                }
+                function fmtTime(dateStr) {
+                    const d = new Date(dateStr);
+                    return d.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit" });
+                }
+                function startOfDay(d) {
+                    const x = new Date(d);
+                    x.setHours(0, 0, 0, 0);
+                    return x;
+                }
+                function endOfDay(d) {
+                    const x = new Date(d);
+                    x.setHours(23, 59, 59, 999);
+                    return x;
+                }
+                function startOfWeek(d) {
+                    const x = startOfDay(d);
+                    const day = x.getDay();
+                    const diff = day === 0 ? 6 : day - 1;
+                    x.setDate(x.getDate() - diff);
+                    return x;
+                }
+                function startOfMonth(d) {
+                    const x = startOfDay(d);
+                    x.setDate(1);
+                    return x;
+                }
+
+                function uid() {
+                    return "id" + Date.now() + Math.random().toString(16).slice(2);
+                }
+
+                function el(tag, attrs, children) {
+                    const node = document.createElement(tag);
+                    if (attrs)
+                        for (const k in attrs) {
+                            if (k === "class") node.className = attrs[k];
+                            else if (k === "html") node.innerHTML = attrs[k];
+                            else if (k.startsWith("on") && typeof attrs[k] === "function") node.addEventListener(k.slice(2), attrs[k]);
+                            else node.setAttribute(k, attrs[k]);
+                        }
+                    if (children)
+                        for (const c of [].concat(children)) {
+                            if (c == null) continue;
+                            node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+                        }
+                    return node;
+                }
+                function qs(sel, root) {
+                    return (root || document).querySelector(sel);
+                }
+                function qsa(sel, root) {
+                    return Array.from((root || document).querySelectorAll(sel));
+                }
+
+                function toast(msg) {
+                    const host = qs("#toastHost");
+                    const t = el("div", { class: "toast" }, msg);
+                    host.appendChild(t);
+                    requestAnimationFrame(() => t.classList.add("show"));
+                    setTimeout(() => {
+                        t.classList.remove("show");
+                        setTimeout(() => t.remove(), 250);
+                    }, 2200);
+                }
+
+                /* ---------- App state ---------- */
+                const App = {
+                    addType: "sale", // 'sale' | 'expense'
+                    selectedCategory: null,
+                    historyFilters: { range: "today", type: "all", category: "all", search: "", from: null, to: null },
+                    reportRange: "today",
+                    reportCustom: { from: null, to: null },
+                    editingId: null,
+                };
+
+                /* ---------- Routing ---------- */
+                function currentRoute() {
+                    const h = location.hash.replace("#/", "") || "home";
+                    return h.split("?")[0];
+                }
+                window.addEventListener("hashchange", render);
+
+                async function render() {
+                    const route = currentRoute();
+                    qsa(".navbtn").forEach((b) => b.classList.toggle("active", b.dataset.route === route));
+                    const main = qs("#app");
+                    main.innerHTML = "";
+                    if (route === "home") main.appendChild(await renderHome());
+                    else if (route === "add") main.appendChild(await renderAdd());
+                    else if (route === "history") main.appendChild(await renderHistory());
+                    else if (route === "reports") main.appendChild(await renderReports());
+                    else if (route === "settings") main.appendChild(await renderSettings());
+                    else main.appendChild(await renderHome());
+                    window.scrollTo(0, 0);
+                }
+
+                /* ---------- Data queries ---------- */
+                async function allTx() {
+                    return dbGetAll("transactions");
+                }
+
+                async function computeCashOnHand() {
+                    const start = await getSetting("startingCash", 0);
+                    const txs = await allTx();
+                    let total = Number(start) || 0;
+                    for (const t of txs) {
+                        if (t.payment !== "cash") continue;
+                        total += t.type === "sale" ? t.amount : -t.amount;
+                    }
+                    return total;
+                }
+
+                function inRange(dateStr, from, to) {
+                    const d = new Date(dateStr).getTime();
+                    return d >= from.getTime() && d <= to.getTime();
+                }
+
+                function sumBy(txs, pred) {
+                    return txs.filter(pred).reduce((s, t) => s + Number(t.amount || 0), 0);
+                }
+
+                /* ---------- HOME ---------- */
+                async function renderHome() {
+                    const txs = await allTx();
+                    const businessName = await getSetting("businessName", "My Shop");
+                    const now = new Date();
+                    const todayFrom = startOfDay(now),
+                        todayTo = endOfDay(now);
+                    const todayTx = txs.filter((t) => inRange(t.date, todayFrom, todayTo));
+                    const todaySales = sumBy(todayTx, (t) => t.type === "sale");
+                    const todayExpenses = sumBy(todayTx, (t) => t.type === "expense");
+                    const todayNet = todaySales - todayExpenses;
+                    const cashOnHand = await computeCashOnHand();
+
+                    const wrap = el("div", { class: "page" });
+
+                    wrap.appendChild(
+                        el("div", { class: "hero" }, [
+                            el("div", { class: "hero-top" }, [
+                                el("span", { class: "eyebrow" }, businessName),
+                                el("span", { class: "eyebrow muted" }, now.toLocaleDateString("en-PH", { weekday: "long", month: "long", day: "numeric" })),
+                            ]),
+                            el("div", { class: "hero-amount" }, fmtPeso(todayNet)),
+                            el("div", { class: "hero-label" }, "TODAY'S NET CASH FLOW"),
+                            el("div", { class: "hero-row" }, [
+                                el("div", { class: "hero-stat" }, [el("div", { class: "hs-label" }, "Sales"), el("div", { class: "hs-value sales" }, fmtPeso(todaySales))]),
+                                el("div", { class: "hero-stat" }, [el("div", { class: "hs-label" }, "Expenses"), el("div", { class: "hs-value expenses" }, fmtPeso(todayExpenses))]),
+                            ]),
+                        ]),
+                    );
+                    wrap.appendChild(el("div", { class: "tear" }));
+
+                    wrap.appendChild(
+                        el("div", { class: "cashcard" }, [
+                            el("div", {}, [el("div", { class: "cc-label" }, "CASH ON HAND"), el("div", { class: "cc-value" }, fmtPeso(cashOnHand))]),
+                            el("div", { class: "cc-note" }, "Physical cash only — GCash & other payments excluded"),
+                        ]),
+                    );
+
+                    const quick = el("div", { class: "quickrow" }, [
+                        el(
+                            "a",
+                            {
+                                href: "#/add",
+                                class: "quickbtn quickbtn-sale",
+                                onclick: () => {
+                                    App.addType = "sale";
+                                },
+                            },
+                            [el("span", { class: "qb-icon" }, "+"), el("span", {}, "New Sale")],
+                        ),
+                        el(
+                            "a",
+                            {
+                                href: "#/add",
+                                class: "quickbtn quickbtn-expense",
+                                onclick: () => {
+                                    App.addType = "expense";
+                                },
+                            },
+                            [el("span", { class: "qb-icon" }, "−"), el("span", {}, "New Expense")],
+                        ),
+                    ]);
+                    wrap.appendChild(quick);
+
+                    // category breakdown for today
+                    const catTotals = {};
+                    todayTx
+                        .filter((t) => t.type === "sale")
+                        .forEach((t) => {
+                            catTotals[t.category] = (catTotals[t.category] || 0) + t.amount;
+                        });
+                    const catEntries = Object.entries(catTotals).sort((a, b) => b[1] - a[1]);
+                    if (catEntries.length) {
+                        const max = Math.max(...catEntries.map((e) => e[1]));
+                        const section = el("div", { class: "section" }, [el("div", { class: "section-title" }, "TODAY BY CATEGORY")]);
+                        catEntries.forEach(([cat, amt]) => {
+                            section.appendChild(
+                                el("div", { class: "barrow" }, [
+                                    el("div", { class: "barrow-label" }, cat),
+                                    el("div", { class: "barrow-track" }, [el("div", { class: "barrow-fill", style: `width:${((amt / max) * 100).toFixed(0)}%` })]),
+                                    el("div", { class: "barrow-amt" }, fmtPeso(amt)),
+                                ]),
+                            );
+                        });
+                        wrap.appendChild(section);
+                    }
+
+                    // recent transactions
+                    const recent = txs
+                        .slice()
+                        .sort((a, b) => new Date(b.date) - new Date(a.date))
+                        .slice(0, 6);
+                    const recSection = el("div", { class: "section" }, [el("div", { class: "section-title" }, "RECENT ACTIVITY")]);
+                    if (recent.length === 0) {
+                        recSection.appendChild(
+                            el("div", { class: "empty" }, [
+                                el("div", { class: "empty-title" }, "Nothing recorded yet"),
+                                el("div", { class: "empty-sub" }, "Tap “New Sale” to log your first transaction."),
+                            ]),
+                        );
+                    } else {
+                        recent.forEach((t) => recSection.appendChild(txRow(t)));
+                    }
+                    wrap.appendChild(recSection);
+
+                    return wrap;
+                }
+
+                function txRow(t) {
+                    const isSale = t.type === "sale";
+                    const row = el("div", { class: "txrow", "data-id": t.id });
+                    row.appendChild(
+                        el("div", { class: "txrow-main" }, [
+                            el("div", { class: "txrow-title" }, t.item),
+                            el("div", { class: "txrow-sub" }, `${t.category} · ${fmtTime(t.date)} · ${paymentLabel(t.payment)}`),
+                        ]),
+                    );
+                    row.appendChild(el("div", { class: "txrow-amt " + (isSale ? "sales" : "expenses") }, (isSale ? "+" : "−") + fmtPeso(t.amount)));
+                    row.addEventListener("click", () => openEditModal(t.id));
+                    return row;
+                }
+                function paymentLabel(p) {
+                    if (p === "cash") return "Cash";
+                    if (p === "gcash") return "GCash";
+                    return "Other";
+                }
+
+                /* ---------- ADD ---------- */
+                async function renderAdd() {
+                    const cats = await getSetting("categories", { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES });
+                    const presetsAll = await dbGetAll("presets");
+                    if (!App.selectedCategory || !cats[App.addType].includes(App.selectedCategory)) {
+                        App.selectedCategory = cats[App.addType][0];
+                    }
+
+                    const wrap = el("div", { class: "page" });
+
+                    const tabs = el("div", { class: "tabbar" }, [
+                        el(
+                            "button",
+                            {
+                                class: "tab" + (App.addType === "sale" ? " active sale" : ""),
+                                onclick: () => {
+                                    App.addType = "sale";
+                                    App.selectedCategory = null;
+                                    render();
+                                },
+                            },
+                            "Sale",
+                        ),
+                        el(
+                            "button",
+                            {
+                                class: "tab" + (App.addType === "expense" ? " active expense" : ""),
+                                onclick: () => {
+                                    App.addType = "expense";
+                                    App.selectedCategory = null;
+                                    render();
+                                },
+                            },
+                            "Expense",
+                        ),
+                    ]);
+                    wrap.appendChild(tabs);
+
+                    const form = el("form", { class: "card form" });
+
+                    // Category chips
+                    const chipRow = el("div", { class: "chiprow" });
+                    cats[App.addType].forEach((c) => {
+                        const chip = el("button", { type: "button", class: "chip" + (c === App.selectedCategory ? " active" : "") }, c);
+                        chip.addEventListener("click", () => {
+                            App.selectedCategory = c;
+                            render();
+                        });
+                        chipRow.appendChild(chip);
+                    });
+                    form.appendChild(el("label", { class: "flabel" }, "Category"));
+                    form.appendChild(chipRow);
+
+                    // Presets (sale only)
+                    if (App.addType === "sale") {
+                        const presets = presetsAll.filter((p) => p.type === "sale" && p.category === App.selectedCategory);
+                        if (presets.length) {
+                            form.appendChild(el("label", { class: "flabel" }, "Quick items"));
+                            const presetRow = el("div", { class: "chiprow" });
+                            presets.forEach((p) => {
+                                const chip = el("button", { type: "button", class: "chip preset" }, `${p.name} · ${fmtPeso(p.price)}`);
+                                chip.addEventListener("click", () => {
+                                    qs("#f-item").value = p.name;
+                                    qs("#f-price").value = p.price;
+                                    qs("#f-qty").value = qs("#f-qty").value || 1;
+                                    recalcAmount();
+                                });
+                                presetRow.appendChild(chip);
+                            });
+                            form.appendChild(presetRow);
+                        }
+                    }
+
+                    const itemLabel = App.addType === "sale" ? "Item / Service" : "Description";
+                    form.appendChild(el("label", { class: "flabel" }, itemLabel));
+                    form.appendChild(
+                        el("input", {
+                            id: "f-item",
+                            type: "text",
+                            class: "finput",
+                            placeholder: App.addType === "sale" ? "e.g. Photocopy, Used shirt..." : "e.g. Restock ballpens",
+                            required: "required",
+                            autocomplete: "off",
+                        }),
+                    );
+
+                    if (App.addType === "sale") {
+                        const row = el("div", { class: "frow" });
+                        const qtyBlock = el("div", { class: "fcol" }, [
+                            el("label", { class: "flabel" }, "Qty"),
+                            el("div", { class: "stepper" }, [
+                                el(
+                                    "button",
+                                    {
+                                        type: "button",
+                                        class: "step-btn",
+                                        onclick: (e) => {
+                                            e.preventDefault();
+                                            stepQty(-1);
+                                        },
+                                    },
+                                    "−",
+                                ),
+                                el("input", { id: "f-qty", type: "number", class: "finput steppernum", value: "1", min: "0", step: "any", oninput: recalcAmount }),
+                                el(
+                                    "button",
+                                    {
+                                        type: "button",
+                                        class: "step-btn",
+                                        onclick: (e) => {
+                                            e.preventDefault();
+                                            stepQty(1);
+                                        },
+                                    },
+                                    "+",
+                                ),
+                            ]),
+                        ]);
+                        const priceBlock = el("div", { class: "fcol" }, [
+                            el("label", { class: "flabel" }, "Unit Price"),
+                            el("input", { id: "f-price", type: "number", class: "finput", placeholder: "0.00", min: "0", step: "0.01", inputmode: "decimal", oninput: recalcAmount }),
+                        ]);
+                        row.appendChild(qtyBlock);
+                        row.appendChild(priceBlock);
+                        form.appendChild(row);
+                    }
+
+                    form.appendChild(el("label", { class: "flabel" }, "Amount"));
+                    form.appendChild(el("input", { id: "f-amount", type: "number", class: "finput famount", placeholder: "0.00", min: "0", step: "0.01", inputmode: "decimal", required: "required" }));
+
+                    form.appendChild(el("label", { class: "flabel" }, "Payment Method"));
+                    const payRow = el("div", { class: "chiprow", id: "f-payment-row" });
+                    ["cash", "gcash", "other"].forEach((p, i) => {
+                        const chip = el("button", { type: "button", class: "chip pay" + (i === 0 ? " active" : "") }, paymentLabel(p));
+                        chip.dataset.value = p;
+                        chip.addEventListener("click", () => {
+                            qsa(".chip.pay", payRow).forEach((c) => c.classList.remove("active"));
+                            chip.classList.add("active");
+                        });
+                        payRow.appendChild(chip);
+                    });
+                    form.appendChild(payRow);
+
+                    form.appendChild(el("label", { class: "flabel" }, "Date & Time"));
+                    form.appendChild(el("input", { id: "f-date", type: "datetime-local", class: "finput", value: toLocalInputValue(new Date()) }));
+
+                    form.appendChild(el("label", { class: "flabel" }, "Note (optional)"));
+                    form.appendChild(el("input", { id: "f-note", type: "text", class: "finput", placeholder: "Optional note..." }));
+
+                    const saveBtn = el("button", { type: "submit", class: "bigbtn " + (App.addType === "sale" ? "sale" : "expense") }, App.addType === "sale" ? "Save Sale" : "Save Expense");
+                    form.appendChild(saveBtn);
+
+                    form.addEventListener("submit", async (e) => {
+                        e.preventDefault();
+                        const item = qs("#f-item").value.trim();
+                        const amount = parseFloat(qs("#f-amount").value);
+                        if (!item) {
+                            toast("Please enter an item or description");
+                            return;
+                        }
+                        if (!amount || amount <= 0) {
+                            toast("Please enter a valid amount");
+                            return;
+                        }
+                        const payChip = qs(".chip.pay.active", payRow);
+                        const record = {
+                            type: App.addType,
+                            category: App.selectedCategory,
+                            item,
+                            qty: App.addType === "sale" ? parseFloat(qs("#f-qty").value) || 1 : null,
+                            unitPrice: App.addType === "sale" ? parseFloat(qs("#f-price").value) || null : null,
+                            amount,
+                            payment: payChip ? payChip.dataset.value : "cash",
+                            date: new Date(qs("#f-date").value || Date.now()).toISOString(),
+                            note: qs("#f-note").value.trim(),
+                            createdAt: new Date().toISOString(),
+                        };
+                        await dbAdd("transactions", record);
+                        toast((App.addType === "sale" ? "Sale" : "Expense") + " saved");
+                        App.selectedCategory = App.selectedCategory; // keep category for rapid re-entry
+                        render();
+                    });
+
+                    wrap.appendChild(form);
+                    return wrap;
+                }
+
+                function stepQty(delta) {
+                    const inp = qs("#f-qty");
+                    const v = Math.max(0, (parseFloat(inp.value) || 0) + delta);
+                    inp.value = v;
+                    recalcAmount();
+                }
+                function recalcAmount() {
+                    const qty = parseFloat(qs("#f-qty") ? qs("#f-qty").value : "") || 0;
+                    const price = parseFloat(qs("#f-price") ? qs("#f-price").value : "") || 0;
+                    if (qty && price) {
+                        qs("#f-amount").value = (qty * price).toFixed(2);
+                    }
+                }
+
+                /* ---------- HISTORY ---------- */
+                async function renderHistory() {
+                    const cats = await getSetting("categories", { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES });
+                    const wrap = el("div", { class: "page" });
+                    wrap.appendChild(el("div", { class: "page-title" }, "History"));
+
+                    const filterCard = el("div", { class: "card filters" });
+                    const rangeRow = el("div", { class: "chiprow" });
+                    [
+                        ["today", "Today"],
+                        ["week", "This Week"],
+                        ["month", "This Month"],
+                        ["all", "All Time"],
+                    ].forEach(([val, label]) => {
+                        const chip = el("button", { type: "button", class: "chip" + (App.historyFilters.range === val ? " active" : "") }, label);
+                        chip.addEventListener("click", () => {
+                            App.historyFilters.range = val;
+                            render();
+                        });
+                        rangeRow.appendChild(chip);
+                    });
+                    filterCard.appendChild(rangeRow);
+
+                    const typeRow = el("div", { class: "chiprow" });
+                    [
+                        ["all", "All"],
+                        ["sale", "Sales"],
+                        ["expense", "Expenses"],
+                    ].forEach(([val, label]) => {
+                        const chip = el("button", { type: "button", class: "chip" + (App.historyFilters.type === val ? " active" : "") }, label);
+                        chip.addEventListener("click", () => {
+                            App.historyFilters.type = val;
+                            render();
+                        });
+                        typeRow.appendChild(chip);
+                    });
+                    filterCard.appendChild(typeRow);
+
+                    const search = el("input", { type: "text", class: "finput", placeholder: "Search item or note...", value: App.historyFilters.search });
+                    search.addEventListener("input", (e) => {
+                        App.historyFilters.search = e.target.value;
+                        renderHistoryList();
+                    });
+                    filterCard.appendChild(search);
+
+                    wrap.appendChild(filterCard);
+
+                    const listHost = el("div", { id: "historyList" });
+                    wrap.appendChild(listHost);
+
+                    async function renderHistoryList() {
+                        listHost.innerHTML = "";
+                        let txs = await allTx();
+                        const now = new Date();
+                        const f = App.historyFilters;
+                        if (f.range === "today") txs = txs.filter((t) => inRange(t.date, startOfDay(now), endOfDay(now)));
+                        else if (f.range === "week") txs = txs.filter((t) => inRange(t.date, startOfWeek(now), endOfDay(now)));
+                        else if (f.range === "month") txs = txs.filter((t) => inRange(t.date, startOfMonth(now), endOfDay(now)));
+                        if (f.type !== "all") txs = txs.filter((t) => t.type === f.type);
+                        if (f.search) {
+                            const s = f.search.toLowerCase();
+                            txs = txs.filter((t) => (t.item || "").toLowerCase().includes(s) || (t.note || "").toLowerCase().includes(s) || (t.category || "").toLowerCase().includes(s));
+                        }
+                        txs.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+                        if (txs.length === 0) {
+                            listHost.appendChild(
+                                el("div", { class: "empty" }, [
+                                    el("div", { class: "empty-title" }, "No transactions found"),
+                                    el("div", { class: "empty-sub" }, "Try a different filter or date range."),
+                                ]),
+                            );
+                            return;
+                        }
+
+                        let lastHeader = null;
+                        let periodTotal = 0;
+                        txs.forEach((t) => (t.type === "sale" ? (periodTotal += t.amount) : (periodTotal -= t.amount)));
+                        listHost.appendChild(
+                            el("div", { class: "periodtotal" }, [
+                                el("span", {}, `${txs.length} transaction${txs.length === 1 ? "" : "s"}`),
+                                el("span", { class: periodTotal >= 0 ? "sales" : "expenses" }, (periodTotal >= 0 ? "+" : "") + fmtPeso(periodTotal)),
+                            ]),
+                        );
+
+                        txs.forEach((t) => {
+                            const header = fmtDateHeader(t.date);
+                            if (header !== lastHeader) {
+                                listHost.appendChild(el("div", { class: "daysep" }, header));
+                                lastHeader = header;
+                            }
+                            listHost.appendChild(txRow(t));
+                        });
+                    }
+
+                    await renderHistoryList();
+                    return wrap;
+                }
+
+                /* ---------- Edit / Delete Modal ---------- */
+                async function openEditModal(id) {
+                    const t = await dbGet("transactions", id);
+                    if (!t) return;
+                    const overlay = el("div", { class: "overlay" });
+                    const modal = el("div", { class: "modal" });
+
+                    modal.appendChild(el("div", { class: "modal-title" }, t.type === "sale" ? "Edit Sale" : "Edit Expense"));
+
+                    modal.appendChild(el("label", { class: "flabel" }, t.type === "sale" ? "Item / Service" : "Description"));
+                    const itemInp = el("input", { type: "text", class: "finput", value: t.item });
+                    modal.appendChild(itemInp);
+
+                    modal.appendChild(el("label", { class: "flabel" }, "Amount"));
+                    const amtInp = el("input", { type: "number", class: "finput", value: t.amount, min: "0", step: "0.01" });
+                    modal.appendChild(amtInp);
+
+                    modal.appendChild(el("label", { class: "flabel" }, "Payment Method"));
+                    const payRow = el("div", { class: "chiprow" });
+                    ["cash", "gcash", "other"].forEach((p) => {
+                        const chip = el("button", { type: "button", class: "chip pay" + (t.payment === p ? " active" : "") }, paymentLabel(p));
+                        chip.dataset.value = p;
+                        chip.addEventListener("click", () => {
+                            qsa(".chip.pay", payRow).forEach((c) => c.classList.remove("active"));
+                            chip.classList.add("active");
+                        });
+                        payRow.appendChild(chip);
+                    });
+                    modal.appendChild(payRow);
+
+                    modal.appendChild(el("label", { class: "flabel" }, "Date & Time"));
+                    const dateInp = el("input", { type: "datetime-local", class: "finput", value: toLocalInputValue(new Date(t.date)) });
+                    modal.appendChild(dateInp);
+
+                    modal.appendChild(el("label", { class: "flabel" }, "Note"));
+                    const noteInp = el("input", { type: "text", class: "finput", value: t.note || "" });
+                    modal.appendChild(noteInp);
+
+                    const btnRow = el("div", { class: "modal-btnrow" }, [
+                        el("button", { type: "button", class: "bigbtn ghost" }, "Cancel"),
+                        el("button", { type: "button", class: "bigbtn danger" }, "Delete"),
+                        el("button", { type: "button", class: "bigbtn sale" }, "Save"),
+                    ]);
+                    modal.appendChild(btnRow);
+
+                    const [cancelBtn, delBtn, saveBtn] = btnRow.children;
+                    cancelBtn.addEventListener("click", () => overlay.remove());
+                    overlay.addEventListener("click", (e) => {
+                        if (e.target === overlay) overlay.remove();
+                    });
+                    delBtn.addEventListener("click", async () => {
+                        if (confirm("Delete this transaction? This cannot be undone.")) {
+                            await dbDelete("transactions", id);
+                            overlay.remove();
+                            toast("Transaction deleted");
+                            render();
+                        }
+                    });
+                    saveBtn.addEventListener("click", async () => {
+                        const amount = parseFloat(amtInp.value);
+                        if (!itemInp.value.trim() || !amount || amount <= 0) {
+                            toast("Please check item and amount");
+                            return;
+                        }
+                        const payChip = qs(".chip.pay.active", payRow);
+                        const updated = Object.assign({}, t, {
+                            item: itemInp.value.trim(),
+                            amount,
+                            payment: payChip ? payChip.dataset.value : t.payment,
+                            date: new Date(dateInp.value).toISOString(),
+                            note: noteInp.value.trim(),
+                        });
+                        await dbPut("transactions", updated);
+                        overlay.remove();
+                        toast("Transaction updated");
+                        render();
+                    });
+
+                    overlay.appendChild(modal);
+                    document.body.appendChild(overlay);
+                }
+
+                /* ---------- REPORTS ---------- */
+                async function renderReports() {
+                    const wrap = el("div", { class: "page" });
+                    wrap.appendChild(el("div", { class: "page-title" }, "Reports"));
+
+                    const rangeCard = el("div", { class: "card" });
+                    const rangeRow = el("div", { class: "chiprow" });
+                    [
+                        ["today", "Today"],
+                        ["week", "This Week"],
+                        ["month", "This Month"],
+                        ["all", "All Time"],
+                    ].forEach(([val, label]) => {
+                        const chip = el("button", { type: "button", class: "chip" + (App.reportRange === val ? " active" : "") }, label);
+                        chip.addEventListener("click", () => {
+                            App.reportRange = val;
+                            render();
+                        });
+                        rangeRow.appendChild(chip);
+                    });
+                    rangeCard.appendChild(rangeRow);
+                    wrap.appendChild(rangeCard);
+
+                    let txs = await allTx();
+                    const now = new Date();
+                    if (App.reportRange === "today") txs = txs.filter((t) => inRange(t.date, startOfDay(now), endOfDay(now)));
+                    else if (App.reportRange === "week") txs = txs.filter((t) => inRange(t.date, startOfWeek(now), endOfDay(now)));
+                    else if (App.reportRange === "month") txs = txs.filter((t) => inRange(t.date, startOfMonth(now), endOfDay(now)));
+
+                    const sales = sumBy(txs, (t) => t.type === "sale");
+                    const expenses = sumBy(txs, (t) => t.type === "expense");
+                    const net = sales - expenses;
+                    const cashNet = sumBy(txs, (t) => t.type === "sale" && t.payment === "cash") - sumBy(txs, (t) => t.type === "expense" && t.payment === "cash");
+
+                    const summary = el("div", { class: "summary-grid" }, [
+                        summaryCard("Total Sales", sales, "sales"),
+                        summaryCard("Total Expenses", expenses, "expenses"),
+                        summaryCard("Net Cash Flow", net, net >= 0 ? "sales" : "expenses"),
+                        summaryCard("Cash Movement", cashNet, cashNet >= 0 ? "sales" : "expenses"),
+                    ]);
+                    wrap.appendChild(summary);
+
+                    // category breakdown (sales)
+                    const catTotals = {};
+                    txs.filter((t) => t.type === "sale").forEach((t) => {
+                        catTotals[t.category] = (catTotals[t.category] || 0) + t.amount;
+                    });
+                    const catEntries = Object.entries(catTotals).sort((a, b) => b[1] - a[1]);
+                    const catSection = el("div", { class: "section" }, [el("div", { class: "section-title" }, "SALES BY CATEGORY")]);
+                    if (catEntries.length === 0) {
+                        catSection.appendChild(el("div", { class: "empty small" }, "No sales in this period yet."));
+                    } else {
+                        const max = Math.max(...catEntries.map((e) => e[1]));
+                        catEntries.forEach(([cat, amt]) => {
+                            catSection.appendChild(
+                                el("div", { class: "barrow" }, [
+                                    el("div", { class: "barrow-label" }, cat),
+                                    el("div", { class: "barrow-track" }, [el("div", { class: "barrow-fill", style: `width:${((amt / max) * 100).toFixed(0)}%` })]),
+                                    el("div", { class: "barrow-amt" }, fmtPeso(amt)),
+                                ]),
+                            );
+                        });
+                    }
+                    wrap.appendChild(catSection);
+
+                    // payment method breakdown
+                    const payTotals = { cash: 0, gcash: 0, other: 0 };
+                    txs.filter((t) => t.type === "sale").forEach((t) => {
+                        payTotals[t.payment] = (payTotals[t.payment] || 0) + t.amount;
+                    });
+                    const paySection = el("div", { class: "section" }, [el("div", { class: "section-title" }, "SALES BY PAYMENT METHOD")]);
+                    const payMax = Math.max(1, ...Object.values(payTotals));
+                    Object.entries(payTotals).forEach(([p, amt]) => {
+                        paySection.appendChild(
+                            el("div", { class: "barrow" }, [
+                                el("div", { class: "barrow-label" }, paymentLabel(p)),
+                                el("div", { class: "barrow-track" }, [el("div", { class: "barrow-fill alt", style: `width:${((amt / payMax) * 100).toFixed(0)}%` })]),
+                                el("div", { class: "barrow-amt" }, fmtPeso(amt)),
+                            ]),
+                        );
+                    });
+                    wrap.appendChild(paySection);
+
+                    // top items
+                    const itemTotals = {};
+                    txs.filter((t) => t.type === "sale").forEach((t) => {
+                        itemTotals[t.item] = (itemTotals[t.item] || 0) + t.amount;
+                    });
+                    const topItems = Object.entries(itemTotals)
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 5);
+                    if (topItems.length) {
+                        const topSection = el("div", { class: "section" }, [el("div", { class: "section-title" }, "TOP ITEMS")]);
+                        topItems.forEach(([name, amt], i) => {
+                            topSection.appendChild(
+                                el("div", { class: "toprow" }, [
+                                    el("span", { class: "toprow-rank" }, String(i + 1)),
+                                    el("span", { class: "toprow-name" }, name),
+                                    el("span", { class: "toprow-amt" }, fmtPeso(amt)),
+                                ]),
+                            );
+                        });
+                        wrap.appendChild(topSection);
+                    }
+
+                    return wrap;
+                }
+                function summaryCard(label, amount, cls) {
+                    return el("div", { class: "summary-card" }, [el("div", { class: "sc-label" }, label), el("div", { class: "sc-value " + cls }, fmtPeso(amount))]);
+                }
+
+                /* ---------- SETTINGS ---------- */
+                async function renderSettings() {
+                    const wrap = el("div", { class: "page" });
+                    wrap.appendChild(el("div", { class: "page-title" }, "Settings"));
+
+                    const businessName = await getSetting("businessName", "My Shop");
+                    const startingCash = await getSetting("startingCash", 0);
+                    const cats = await getSetting("categories", { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES });
+
+                    // Business card
+                    const bizCard = el("div", { class: "card form" });
+                    bizCard.appendChild(el("label", { class: "flabel" }, "Shop Name"));
+                    const nameInp = el("input", { type: "text", class: "finput", value: businessName });
+                    nameInp.addEventListener("change", async () => {
+                        await setSetting("businessName", nameInp.value.trim() || "My Shop");
+                        toast("Shop name saved");
+                    });
+                    bizCard.appendChild(nameInp);
+
+                    bizCard.appendChild(el("label", { class: "flabel" }, "Starting Cash (cash drawer float)"));
+                    const cashInp = el("input", { type: "number", class: "finput", value: startingCash, min: "0", step: "0.01" });
+                    cashInp.addEventListener("change", async () => {
+                        await setSetting("startingCash", parseFloat(cashInp.value) || 0);
+                        toast("Starting cash saved");
+                        render();
+                    });
+                    bizCard.appendChild(cashInp);
+                    wrap.appendChild(bizCard);
+
+                    // Categories
+                    wrap.appendChild(el("div", { class: "section-title" }, "SALE CATEGORIES"));
+                    wrap.appendChild(categoryManager(cats, "sale"));
+                    wrap.appendChild(el("div", { class: "section-title" }, "EXPENSE CATEGORIES"));
+                    wrap.appendChild(categoryManager(cats, "expense"));
+
+                    // Presets
+                    wrap.appendChild(el("div", { class: "section-title" }, "QUICK-ITEM PRESETS"));
+                    wrap.appendChild(await presetManager(cats));
+
+                    // Data management
+                    wrap.appendChild(el("div", { class: "section-title" }, "BACKUP & TRANSFER"));
+                    const dataCard = el("div", { class: "card form" });
+                    dataCard.appendChild(
+                        el("div", { class: "help-text" }, "Export your data to move it to another phone or computer, or to keep a safety backup. Importing replaces all current data on this device."),
+                    );
+                    const exportBtn = el("button", { type: "button", class: "bigbtn sale" }, "Export Database (.json)");
+                    exportBtn.addEventListener("click", exportDB);
+                    dataCard.appendChild(exportBtn);
+
+                    const importLabel = el("label", { class: "bigbtn ghost filelabel" }, "Import Database (.json)");
+                    const importInp = el("input", { type: "file", accept: "application/json", class: "hidden-file" });
+                    importLabel.appendChild(importInp);
+                    importInp.addEventListener("change", (e) => {
+                        if (e.target.files[0]) importDB(e.target.files[0]);
+                    });
+                    dataCard.appendChild(importLabel);
+
+                    const clearBtn = el("button", { type: "button", class: "bigbtn danger" }, "Clear All Data");
+                    clearBtn.addEventListener("click", async () => {
+                        if (confirm("This will permanently delete ALL transactions, presets and settings on this device. Continue?")) {
+                            if (confirm("Are you absolutely sure? This cannot be undone.")) {
+                                await dbClear("transactions");
+                                await dbClear("presets");
+                                await dbClear("settings");
+                                await seedIfEmpty();
+                                toast("All data cleared");
+                                location.hash = "#/home";
+                                render();
+                            }
+                        }
+                    });
+                    dataCard.appendChild(clearBtn);
+                    wrap.appendChild(dataCard);
+
+                    wrap.appendChild(el("div", { class: "footnote" }, "Little Ledger — all data stays on this device unless you export it."));
+
+                    return wrap;
+                }
+
+                function categoryManager(cats, type) {
+                    const card = el("div", { class: "card" });
+                    const list = el("div", { class: "chiprow" });
+                    function refreshList() {
+                        list.innerHTML = "";
+                        cats[type].forEach((c) => {
+                            const chip = el("span", { class: "chip removable" }, [el("span", {}, c), el("button", { type: "button", class: "chip-x" }, "×")]);
+                            chip.querySelector(".chip-x").addEventListener("click", async () => {
+                                if (cats[type].length <= 1) {
+                                    toast("Keep at least one category");
+                                    return;
+                                }
+                                cats[type] = cats[type].filter((x) => x !== c);
+                                await setSetting("categories", cats);
+                                refreshList();
+                            });
+                            list.appendChild(chip);
+                        });
+                    }
+                    refreshList();
+                    card.appendChild(list);
+
+                    const addRow = el("div", { class: "addrow" });
+                    const inp = el("input", { type: "text", class: "finput", placeholder: "Add category..." });
+                    const addBtn = el("button", { type: "button", class: "smallbtn" }, "Add");
+                    addBtn.addEventListener("click", async () => {
+                        const v = inp.value.trim();
+                        if (!v) return;
+                        if (cats[type].includes(v)) {
+                            toast("Category already exists");
+                            return;
+                        }
+                        cats[type].push(v);
+                        await setSetting("categories", cats);
+                        inp.value = "";
+                        refreshList();
+                    });
+                    addRow.appendChild(inp);
+                    addRow.appendChild(addBtn);
+                    card.appendChild(addRow);
+                    return card;
+                }
+
+                async function presetManager(cats) {
+                    const card = el("div", { class: "card" });
+                    const catSelect = el("select", { class: "finput" });
+                    cats.sale.forEach((c) => catSelect.appendChild(el("option", { value: c }, c)));
+                    card.appendChild(el("label", { class: "flabel" }, "Category"));
+                    card.appendChild(catSelect);
+
+                    const list = el("div", { class: "presetlist" });
+                    card.appendChild(list);
+
+                    async function refresh() {
+                        list.innerHTML = "";
+                        const presets = (await dbGetAll("presets")).filter((p) => p.category === catSelect.value);
+                        if (presets.length === 0) {
+                            list.appendChild(el("div", { class: "empty small" }, "No quick items yet for this category."));
+                        }
+                        presets.forEach((p) => {
+                            const row = el("div", { class: "presetrow" }, [
+                                el("span", { class: "presetrow-name" }, p.name),
+                                el("span", { class: "presetrow-price" }, fmtPeso(p.price)),
+                                el("button", { type: "button", class: "chip-x" }, "×"),
+                            ]);
+                            row.querySelector(".chip-x").addEventListener("click", async () => {
+                                await dbDelete("presets", p.id);
+                                refresh();
+                            });
+                            list.appendChild(row);
+                        });
+                    }
+                    catSelect.addEventListener("change", refresh);
+                    await refresh();
+
+                    const addRow = el("div", { class: "addrow" });
+                    const nameInp = el("input", { type: "text", class: "finput", placeholder: "Item name" });
+                    const priceInp = el("input", { type: "number", class: "finput", placeholder: "Price", min: "0", step: "0.01", style: "max-width:100px" });
+                    const addBtn = el("button", { type: "button", class: "smallbtn" }, "Add");
+                    addBtn.addEventListener("click", async () => {
+                        const name = nameInp.value.trim();
+                        const price = parseFloat(priceInp.value);
+                        if (!name || !price) {
+                            toast("Enter a name and price");
+                            return;
+                        }
+                        await dbAdd("presets", { type: "sale", category: catSelect.value, name, price });
+                        nameInp.value = "";
+                        priceInp.value = "";
+                        refresh();
+                    });
+                    addRow.appendChild(nameInp);
+                    addRow.appendChild(priceInp);
+                    addRow.appendChild(addBtn);
+                    card.appendChild(addRow);
+
+                    return card;
+                }
+
+                /* ---------- Export / Import ---------- */
+                async function exportDB() {
+                    const [transactions, presets, settingsArr] = await Promise.all([dbGetAll("transactions"), dbGetAll("presets"), dbGetAll("settings")]);
+                    const payload = {
+                        app: "little-ledger-pos",
+                        exportedAt: new Date().toISOString(),
+                        version: 1,
+                        transactions,
+                        presets,
+                        settings: settingsArr,
+                    };
+                    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+                    a.href = url;
+                    a.download = `little-ledger-backup-${stamp}.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    URL.revokeObjectURL(url);
+                    toast("Database exported");
+                }
+
+                async function importDB(file) {
+                    try {
+                        const text = await file.text();
+                        const data = JSON.parse(text);
+                        if (!data || !Array.isArray(data.transactions) || !Array.isArray(data.presets) || !Array.isArray(data.settings)) {
+                            toast("This file doesn\u2019t look like a valid backup");
+                            return;
+                        }
+                        if (!confirm(`Import ${data.transactions.length} transaction(s)? This replaces ALL data currently on this device.`)) return;
+
+                        await dbClear("transactions");
+                        await dbClear("presets");
+                        await dbClear("settings");
+                        for (const t of data.transactions) await dbPut("transactions", t);
+                        for (const p of data.presets) await dbPut("presets", p);
+                        for (const s of data.settings) await dbPut("settings", s);
+                        toast("Database imported successfully");
+                        location.hash = "#/home";
+                        render();
+                    } catch (err) {
+                        console.error(err);
+                        toast("Could not read that file");
+                    }
+                }
+
+                /* ---------- Init ---------- */
+                async function init() {
+                    await openDB();
+                    await seedIfEmpty();
+                    if (!location.hash) location.hash = "#/home";
+                    qsa(".navbtn").forEach((b) =>
+                        b.addEventListener("click", (e) => {
+                            if (b.dataset.route === "add") App.selectedCategory = null;
+                        }),
+                    );
+                    render();
+                }
+
+                document.addEventListener("DOMContentLoaded", init);
+            })();
+        </script>
+        <script>
+            if ("serviceWorker" in navigator) {
+                window.addEventListener("load", () => {
+                    navigator.serviceWorker.register("sw.js").catch((err) => {
+                        console.error("SW registration failed:", err);
+                    });
+                });
+
+                // Auto-refresh once when a new SW version takes control.
+                let refreshing = false;
+                navigator.serviceWorker.addEventListener("controllerchange", () => {
+                    if (refreshing) return;
+                    refreshing = true;
+                    window.location.reload();
+                });
+            }
+        </script>
+    </body>
+</html>
