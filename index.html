@@ -1,18 +1,6 @@
 <!doctype html>
 <html lang="en">
     <head>
-        <!-- Google tag (gtag.js) -->
-        <script async src="https://www.googletagmanager.com/gtag/js?id=G-ZWPF7650WK"></script>
-        <script>
-            window.dataLayer = window.dataLayer || [];
-            function gtag() {
-                dataLayer.push(arguments);
-            }
-            gtag("js", new Date());
-
-            gtag("config", "G-ZWPF7650WK");
-        </script>
-        <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🖥️</text></svg>' />
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
         <meta name="theme-color" content="#23302A" />
@@ -173,42 +161,50 @@
                 background: radial-gradient(circle at 8px 0, transparent 7px, var(--ink) 7.5px) 0 0 / 16px 16px repeat-x;
             }
 
-            /* ---------- Cash on hand card ---------- */
-            .cashcard {
+            /* ---------- Account balance strip ---------- */
+            .balancecard {
                 background: var(--paper-card);
                 border: 1px dashed var(--border);
                 border-radius: 0 0 var(--radius) var(--radius);
                 margin: 0 -16px 18px;
-                padding: 14px 20px 16px;
                 display: flex;
-                justify-content: space-between;
-                align-items: flex-end;
             }
-            .cc-label {
-                font-size: 10.5px;
-                letter-spacing: 0.1em;
+            .balitem {
+                flex: 1;
+                padding: 13px 12px 15px;
+                min-width: 0;
+            }
+            .balitem + .balitem {
+                border-left: 1px dotted var(--border);
+            }
+            .bal-label {
+                font-size: 10px;
+                letter-spacing: 0.08em;
                 color: var(--ink-soft);
                 font-weight: 700;
-                margin-bottom: 2px;
+                margin-bottom: 3px;
+                text-transform: uppercase;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
             }
-            .cc-value {
+            .bal-value {
                 font-family: var(--mono);
-                font-size: 22px;
                 font-weight: 700;
                 color: var(--ink);
+                font-size: 15px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
             }
-            .cc-note {
-                font-size: 10.5px;
-                color: var(--ink-soft);
-                max-width: 130px;
-                text-align: right;
-                line-height: 1.3;
+            .balitem.lead .bal-value {
+                font-size: 19px;
             }
 
             /* ---------- Quick actions ---------- */
             .quickrow {
                 display: flex;
-                gap: 10px;
+                gap: 8px;
                 margin-bottom: 22px;
             }
             .quickbtn {
@@ -216,12 +212,12 @@
                 display: flex;
                 align-items: center;
                 justify-content: center;
-                gap: 8px;
-                padding: 14px 10px;
+                gap: 6px;
+                padding: 14px 6px;
                 border-radius: 12px;
                 text-decoration: none;
                 font-weight: 700;
-                font-size: 15px;
+                font-size: 14px;
                 border: 1px solid var(--border);
             }
             .quickbtn-sale {
@@ -234,8 +230,13 @@
                 color: var(--rust);
                 border-color: var(--rust);
             }
+            .quickbtn-transfer {
+                background: var(--paper-card);
+                color: var(--gold);
+                border-color: var(--gold);
+            }
             .qb-icon {
-                font-size: 18px;
+                font-size: 17px;
                 line-height: 1;
             }
 
@@ -326,6 +327,9 @@
             }
             .txrow-amt.expenses {
                 color: var(--rust);
+            }
+            .txrow-amt.transfer {
+                color: var(--gold);
             }
 
             .daysep {
@@ -520,6 +524,11 @@
                 color: #fff;
                 border-color: var(--rust);
             }
+            .tab.active.transfer {
+                background: var(--gold);
+                color: #fff;
+                border-color: var(--gold);
+            }
 
             .bigbtn {
                 width: 100%;
@@ -537,6 +546,9 @@
             }
             .bigbtn.expense {
                 background: var(--rust);
+            }
+            .bigbtn.transfer {
+                background: var(--gold);
             }
             .bigbtn.ghost {
                 background: #fff;
@@ -692,7 +704,7 @@
                 display: flex;
                 align-items: flex-end;
                 justify-content: center;
-                z-index: 100;
+                z-index: 800;
             }
             .modal {
                 background: var(--paper-card);
@@ -778,7 +790,7 @@
                 top: 14px;
                 left: 50%;
                 transform: translateX(-50%);
-                z-index: 200;
+                z-index: 900;
                 display: flex;
                 flex-direction: column;
                 gap: 8px;
@@ -1029,6 +1041,14 @@
                     if (!cash) {
                         await setSetting("startingCash", 0);
                     }
+                    const gcash = await dbGet("settings", "startingGcash");
+                    if (!gcash) {
+                        await setSetting("startingGcash", 0);
+                    }
+                    const bank = await dbGet("settings", "startingBank");
+                    if (!bank) {
+                        await setSetting("startingBank", 0);
+                    }
                     const presets = await dbGetAll("presets");
                     if (presets.length === 0) {
                         const seedList = [
@@ -1134,8 +1154,10 @@
 
                 /* ---------- App state ---------- */
                 const App = {
-                    addType: "sale", // 'sale' | 'expense'
+                    addType: "sale", // 'sale' | 'expense' | 'transfer'
                     selectedCategory: null,
+                    transferFrom: "gcash",
+                    transferTo: "cash",
                     historyFilters: { range: "today", type: "all", category: "all", search: "", from: null, to: null },
                     reportRange: "today",
                     reportCustom: { from: null, to: null },
@@ -1168,15 +1190,19 @@
                     return dbGetAll("transactions");
                 }
 
-                async function computeCashOnHand() {
-                    const start = await getSetting("startingCash", 0);
-                    const txs = await allTx();
-                    let total = Number(start) || 0;
+                async function computeAccountBalances(txsOverride) {
+                    const [startCash, startGcash, startBank] = await Promise.all([getSetting("startingCash", 0), getSetting("startingGcash", 0), getSetting("startingBank", 0)]);
+                    const txs = txsOverride || (await allTx());
+                    const bal = { cash: Number(startCash) || 0, gcash: Number(startGcash) || 0, bank: Number(startBank) || 0 };
                     for (const t of txs) {
-                        if (t.payment !== "cash") continue;
-                        total += t.type === "sale" ? t.amount : -t.amount;
+                        if (t.type === "sale" && bal.hasOwnProperty(t.payment)) bal[t.payment] += Number(t.amount) || 0;
+                        else if (t.type === "expense" && bal.hasOwnProperty(t.payment)) bal[t.payment] -= Number(t.amount) || 0;
+                        else if (t.type === "transfer") {
+                            if (bal.hasOwnProperty(t.fromAccount)) bal[t.fromAccount] -= Number(t.amount) || 0;
+                            if (bal.hasOwnProperty(t.toAccount)) bal[t.toAccount] += Number(t.amount) || 0;
+                        }
                     }
-                    return total;
+                    return bal;
                 }
 
                 function inRange(dateStr, from, to) {
@@ -1199,7 +1225,7 @@
                     const todaySales = sumBy(todayTx, (t) => t.type === "sale");
                     const todayExpenses = sumBy(todayTx, (t) => t.type === "expense");
                     const todayNet = todaySales - todayExpenses;
-                    const cashOnHand = await computeCashOnHand();
+                    const bal = await computeAccountBalances(txs);
 
                     const wrap = el("div", { class: "page" });
 
@@ -1220,9 +1246,10 @@
                     wrap.appendChild(el("div", { class: "tear" }));
 
                     wrap.appendChild(
-                        el("div", { class: "cashcard" }, [
-                            el("div", {}, [el("div", { class: "cc-label" }, "CASH ON HAND"), el("div", { class: "cc-value" }, fmtPeso(cashOnHand))]),
-                            el("div", { class: "cc-note" }, "Physical cash only — GCash & other payments excluded"),
+                        el("div", { class: "balancecard" }, [
+                            el("div", { class: "balitem lead" }, [el("div", { class: "bal-label" }, "Cash on Hand"), el("div", { class: "bal-value" }, fmtPeso(bal.cash))]),
+                            el("div", { class: "balitem" }, [el("div", { class: "bal-label" }, "GCash"), el("div", { class: "bal-value" }, fmtPeso(bal.gcash))]),
+                            el("div", { class: "balitem" }, [el("div", { class: "bal-label" }, "Bank"), el("div", { class: "bal-value" }, fmtPeso(bal.bank))]),
                         ]),
                     );
 
@@ -1236,7 +1263,7 @@
                                     App.addType = "sale";
                                 },
                             },
-                            [el("span", { class: "qb-icon" }, "+"), el("span", {}, "New Sale")],
+                            [el("span", { class: "qb-icon" }, "+"), el("span", {}, "Sale")],
                         ),
                         el(
                             "a",
@@ -1247,7 +1274,18 @@
                                     App.addType = "expense";
                                 },
                             },
-                            [el("span", { class: "qb-icon" }, "−"), el("span", {}, "New Expense")],
+                            [el("span", { class: "qb-icon" }, "−"), el("span", {}, "Expense")],
+                        ),
+                        el(
+                            "a",
+                            {
+                                href: "#/add",
+                                class: "quickbtn quickbtn-transfer",
+                                onclick: () => {
+                                    App.addType = "transfer";
+                                },
+                            },
+                            [el("span", { class: "qb-icon" }, "\u21c4"), el("span", {}, "Transfer")],
                         ),
                     ]);
                     wrap.appendChild(quick);
@@ -1298,28 +1336,62 @@
 
                 function txRow(t) {
                     const isSale = t.type === "sale";
+                    const isTransfer = t.type === "transfer";
                     const row = el("div", { class: "txrow", "data-id": t.id });
-                    row.appendChild(
-                        el("div", { class: "txrow-main" }, [
-                            el("div", { class: "txrow-title" }, t.item),
-                            el("div", { class: "txrow-sub" }, `${t.category} · ${fmtTime(t.date)} · ${paymentLabel(t.payment)}`),
-                        ]),
-                    );
-                    row.appendChild(el("div", { class: "txrow-amt " + (isSale ? "sales" : "expenses") }, (isSale ? "+" : "−") + fmtPeso(t.amount)));
+                    const subtitle = isTransfer
+                        ? `${accountLabel(t.fromAccount)} \u2192 ${accountLabel(t.toAccount)} · ${fmtTime(t.date)}`
+                        : `${t.category} · ${fmtTime(t.date)} · ${paymentLabel(t.payment)}`;
+                    row.appendChild(el("div", { class: "txrow-main" }, [el("div", { class: "txrow-title" }, t.item), el("div", { class: "txrow-sub" }, subtitle)]));
+                    const amtClass = isSale ? "sales" : isTransfer ? "transfer" : "expenses";
+                    const sign = isSale ? "+" : isTransfer ? "" : "\u2212";
+                    row.appendChild(el("div", { class: "txrow-amt " + amtClass }, sign + fmtPeso(t.amount)));
                     row.addEventListener("click", () => openEditModal(t.id));
                     return row;
                 }
                 function paymentLabel(p) {
                     if (p === "cash") return "Cash";
                     if (p === "gcash") return "GCash";
+                    if (p === "bank") return "Bank";
                     return "Other";
+                }
+                function accountLabel(a) {
+                    if (a === "cash") return "Cash";
+                    if (a === "gcash") return "GCash";
+                    if (a === "bank") return "Bank";
+                    if (a === "owner") return "Owner";
+                    return a || "";
+                }
+                function buildAccountChips(selectedValue, onChange, opts) {
+                    const accounts = (opts && opts.accounts) || ["cash", "gcash", "bank", "owner"];
+                    const row = el("div", { class: "chiprow" });
+                    accounts.forEach((a) => {
+                        const chip = el("button", { type: "button", class: "chip" + (a === selectedValue ? " active" : "") }, accountLabel(a));
+                        chip.dataset.value = a;
+                        chip.addEventListener("click", () => {
+                            qsa(".chip", row).forEach((c) => c.classList.remove("active"));
+                            chip.classList.add("active");
+                            onChange(a);
+                        });
+                        row.appendChild(chip);
+                    });
+                    return row;
                 }
 
                 /* ---------- ADD ---------- */
+                const TRANSFER_QUICK_TYPES = [
+                    { label: "GCash Cash-out", from: "gcash", to: "cash" },
+                    { label: "Cash-in to GCash", from: "cash", to: "gcash" },
+                    { label: "Bank Withdrawal", from: "bank", to: "cash" },
+                    { label: "Bank Deposit", from: "cash", to: "bank" },
+                    { label: "Owner Withdrawal", from: "cash", to: "owner" },
+                    { label: "Owner Investment", from: "owner", to: "cash" },
+                ];
+
                 async function renderAdd() {
                     const cats = await getSetting("categories", { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES });
                     const presetsAll = await dbGetAll("presets");
-                    if (!App.selectedCategory || !cats[App.addType].includes(App.selectedCategory)) {
+                    const isTransfer = App.addType === "transfer";
+                    if (!isTransfer && (!App.selectedCategory || !cats[App.addType].includes(App.selectedCategory))) {
                         App.selectedCategory = cats[App.addType][0];
                     }
 
@@ -1350,53 +1422,93 @@
                             },
                             "Expense",
                         ),
+                        el(
+                            "button",
+                            {
+                                class: "tab" + (App.addType === "transfer" ? " active transfer" : ""),
+                                onclick: () => {
+                                    App.addType = "transfer";
+                                    render();
+                                },
+                            },
+                            "Transfer",
+                        ),
                     ]);
                     wrap.appendChild(tabs);
 
                     const form = el("form", { class: "card form" });
 
-                    // Category chips
-                    const chipRow = el("div", { class: "chiprow" });
-                    cats[App.addType].forEach((c) => {
-                        const chip = el("button", { type: "button", class: "chip" + (c === App.selectedCategory ? " active" : "") }, c);
-                        chip.addEventListener("click", () => {
-                            App.selectedCategory = c;
-                            render();
-                        });
-                        chipRow.appendChild(chip);
-                    });
-                    form.appendChild(el("label", { class: "flabel" }, "Category"));
-                    form.appendChild(chipRow);
-
-                    // Presets (sale only)
-                    if (App.addType === "sale") {
-                        const presets = presetsAll.filter((p) => p.type === "sale" && p.category === App.selectedCategory);
-                        if (presets.length) {
-                            form.appendChild(el("label", { class: "flabel" }, "Quick items"));
-                            const presetRow = el("div", { class: "chiprow" });
-                            presets.forEach((p) => {
-                                const chip = el("button", { type: "button", class: "chip preset" }, `${p.name} · ${fmtPeso(p.price)}`);
-                                chip.addEventListener("click", () => {
-                                    qs("#f-item").value = p.name;
-                                    qs("#f-price").value = p.price;
-                                    qs("#f-qty").value = qs("#f-qty").value || 1;
-                                    recalcAmount();
-                                });
-                                presetRow.appendChild(chip);
+                    if (isTransfer) {
+                        form.appendChild(el("label", { class: "flabel" }, "Quick Type"));
+                        const typeRow = el("div", { class: "chiprow" });
+                        TRANSFER_QUICK_TYPES.forEach((tp) => {
+                            const chip = el("button", { type: "button", class: "chip" }, tp.label);
+                            chip.addEventListener("click", () => {
+                                App.transferFrom = tp.from;
+                                App.transferTo = tp.to;
+                                render();
+                                const itemInp = qs("#f-item");
+                                if (itemInp && !itemInp.value.trim()) itemInp.value = tp.label;
                             });
-                            form.appendChild(presetRow);
+                            typeRow.appendChild(chip);
+                        });
+                        form.appendChild(typeRow);
+
+                        form.appendChild(el("label", { class: "flabel" }, "From"));
+                        form.appendChild(
+                            buildAccountChips(App.transferFrom, (v) => {
+                                App.transferFrom = v;
+                            }),
+                        );
+                        form.appendChild(el("label", { class: "flabel" }, "To"));
+                        form.appendChild(
+                            buildAccountChips(App.transferTo, (v) => {
+                                App.transferTo = v;
+                            }),
+                        );
+                    } else {
+                        // Category chips
+                        const chipRow = el("div", { class: "chiprow" });
+                        cats[App.addType].forEach((c) => {
+                            const chip = el("button", { type: "button", class: "chip" + (c === App.selectedCategory ? " active" : "") }, c);
+                            chip.addEventListener("click", () => {
+                                App.selectedCategory = c;
+                                render();
+                            });
+                            chipRow.appendChild(chip);
+                        });
+                        form.appendChild(el("label", { class: "flabel" }, "Category"));
+                        form.appendChild(chipRow);
+
+                        // Presets (sale only)
+                        if (App.addType === "sale") {
+                            const presets = presetsAll.filter((p) => p.type === "sale" && p.category === App.selectedCategory);
+                            if (presets.length) {
+                                form.appendChild(el("label", { class: "flabel" }, "Quick items"));
+                                const presetRow = el("div", { class: "chiprow" });
+                                presets.forEach((p) => {
+                                    const chip = el("button", { type: "button", class: "chip preset" }, `${p.name} · ${fmtPeso(p.price)}`);
+                                    chip.addEventListener("click", () => {
+                                        qs("#f-item").value = p.name;
+                                        qs("#f-price").value = p.price;
+                                        qs("#f-qty").value = qs("#f-qty").value || 1;
+                                        recalcAmount();
+                                    });
+                                    presetRow.appendChild(chip);
+                                });
+                                form.appendChild(presetRow);
+                            }
                         }
                     }
 
-                    const itemLabel = App.addType === "sale" ? "Item / Service" : "Description";
+                    const itemLabel = App.addType === "sale" ? "Item / Service" : isTransfer ? "Description (optional)" : "Description";
                     form.appendChild(el("label", { class: "flabel" }, itemLabel));
                     form.appendChild(
                         el("input", {
                             id: "f-item",
                             type: "text",
                             class: "finput",
-                            placeholder: App.addType === "sale" ? "e.g. Photocopy, Used shirt..." : "e.g. Restock ballpens",
-                            required: "required",
+                            placeholder: App.addType === "sale" ? "e.g. Photocopy, Used shirt..." : isTransfer ? "e.g. Cashed out for restock" : "e.g. Restock ballpens",
                             autocomplete: "off",
                         }),
                     );
@@ -1445,18 +1557,21 @@
                     form.appendChild(el("label", { class: "flabel" }, "Amount"));
                     form.appendChild(el("input", { id: "f-amount", type: "number", class: "finput famount", placeholder: "0.00", min: "0", step: "0.01", inputmode: "decimal", required: "required" }));
 
-                    form.appendChild(el("label", { class: "flabel" }, "Payment Method"));
-                    const payRow = el("div", { class: "chiprow", id: "f-payment-row" });
-                    ["cash", "gcash", "other"].forEach((p, i) => {
-                        const chip = el("button", { type: "button", class: "chip pay" + (i === 0 ? " active" : "") }, paymentLabel(p));
-                        chip.dataset.value = p;
-                        chip.addEventListener("click", () => {
-                            qsa(".chip.pay", payRow).forEach((c) => c.classList.remove("active"));
-                            chip.classList.add("active");
+                    let payRow = null;
+                    if (!isTransfer) {
+                        form.appendChild(el("label", { class: "flabel" }, "Payment Method"));
+                        payRow = el("div", { class: "chiprow", id: "f-payment-row" });
+                        ["cash", "gcash", "bank", "other"].forEach((p, i) => {
+                            const chip = el("button", { type: "button", class: "chip pay" + (i === 0 ? " active" : "") }, paymentLabel(p));
+                            chip.dataset.value = p;
+                            chip.addEventListener("click", () => {
+                                qsa(".chip.pay", payRow).forEach((c) => c.classList.remove("active"));
+                                chip.classList.add("active");
+                            });
+                            payRow.appendChild(chip);
                         });
-                        payRow.appendChild(chip);
-                    });
-                    form.appendChild(payRow);
+                        form.appendChild(payRow);
+                    }
 
                     form.appendChild(el("label", { class: "flabel" }, "Date & Time"));
                     form.appendChild(el("input", { id: "f-date", type: "datetime-local", class: "finput", value: toLocalInputValue(new Date()) }));
@@ -1464,19 +1579,47 @@
                     form.appendChild(el("label", { class: "flabel" }, "Note (optional)"));
                     form.appendChild(el("input", { id: "f-note", type: "text", class: "finput", placeholder: "Optional note..." }));
 
-                    const saveBtn = el("button", { type: "submit", class: "bigbtn " + (App.addType === "sale" ? "sale" : "expense") }, App.addType === "sale" ? "Save Sale" : "Save Expense");
+                    const saveLabel = App.addType === "sale" ? "Save Sale" : App.addType === "expense" ? "Save Expense" : "Save Transfer";
+                    const saveBtn = el("button", { type: "submit", class: "bigbtn " + App.addType }, saveLabel);
                     form.appendChild(saveBtn);
 
                     form.addEventListener("submit", async (e) => {
                         e.preventDefault();
-                        const item = qs("#f-item").value.trim();
                         const amount = parseFloat(qs("#f-amount").value);
-                        if (!item) {
-                            toast("Please enter an item or description");
-                            return;
-                        }
                         if (!amount || amount <= 0) {
                             toast("Please enter a valid amount");
+                            return;
+                        }
+
+                        if (isTransfer) {
+                            if (App.transferFrom === App.transferTo) {
+                                toast("Choose two different accounts");
+                                return;
+                            }
+                            const item = qs("#f-item").value.trim() || `${accountLabel(App.transferFrom)} \u2192 ${accountLabel(App.transferTo)}`;
+                            const record = {
+                                type: "transfer",
+                                category: "Transfer",
+                                item,
+                                qty: null,
+                                unitPrice: null,
+                                amount,
+                                payment: null,
+                                fromAccount: App.transferFrom,
+                                toAccount: App.transferTo,
+                                date: new Date(qs("#f-date").value || Date.now()).toISOString(),
+                                note: qs("#f-note").value.trim(),
+                                createdAt: new Date().toISOString(),
+                            };
+                            await dbAdd("transactions", record);
+                            toast("Transfer saved");
+                            render();
+                            return;
+                        }
+
+                        const item = qs("#f-item").value.trim();
+                        if (!item) {
+                            toast("Please enter an item or description");
                             return;
                         }
                         const payChip = qs(".chip.pay.active", payRow);
@@ -1488,13 +1631,14 @@
                             unitPrice: App.addType === "sale" ? parseFloat(qs("#f-price").value) || null : null,
                             amount,
                             payment: payChip ? payChip.dataset.value : "cash",
+                            fromAccount: null,
+                            toAccount: null,
                             date: new Date(qs("#f-date").value || Date.now()).toISOString(),
                             note: qs("#f-note").value.trim(),
                             createdAt: new Date().toISOString(),
                         };
                         await dbAdd("transactions", record);
                         toast((App.addType === "sale" ? "Sale" : "Expense") + " saved");
-                        App.selectedCategory = App.selectedCategory; // keep category for rapid re-entry
                         render();
                     });
 
@@ -1544,6 +1688,7 @@
                         ["all", "All"],
                         ["sale", "Sales"],
                         ["expense", "Expenses"],
+                        ["transfer", "Transfers"],
                     ].forEach(([val, label]) => {
                         const chip = el("button", { type: "button", class: "chip" + (App.historyFilters.type === val ? " active" : "") }, label);
                         chip.addEventListener("click", () => {
@@ -1593,7 +1738,10 @@
 
                         let lastHeader = null;
                         let periodTotal = 0;
-                        txs.forEach((t) => (t.type === "sale" ? (periodTotal += t.amount) : (periodTotal -= t.amount)));
+                        txs.forEach((t) => {
+                            if (t.type === "sale") periodTotal += t.amount;
+                            else if (t.type === "expense") periodTotal -= t.amount;
+                        });
                         listHost.appendChild(
                             el("div", { class: "periodtotal" }, [
                                 el("span", {}, `${txs.length} transaction${txs.length === 1 ? "" : "s"}`),
@@ -1619,12 +1767,14 @@
                 async function openEditModal(id) {
                     const t = await dbGet("transactions", id);
                     if (!t) return;
+                    const isTransfer = t.type === "transfer";
                     const overlay = el("div", { class: "overlay" });
                     const modal = el("div", { class: "modal" });
 
-                    modal.appendChild(el("div", { class: "modal-title" }, t.type === "sale" ? "Edit Sale" : "Edit Expense"));
+                    const titleMap = { sale: "Edit Sale", expense: "Edit Expense", transfer: "Edit Transfer" };
+                    modal.appendChild(el("div", { class: "modal-title" }, titleMap[t.type] || "Edit Transaction"));
 
-                    modal.appendChild(el("label", { class: "flabel" }, t.type === "sale" ? "Item / Service" : "Description"));
+                    modal.appendChild(el("label", { class: "flabel" }, isTransfer ? "Description" : t.type === "sale" ? "Item / Service" : "Description"));
                     const itemInp = el("input", { type: "text", class: "finput", value: t.item });
                     modal.appendChild(itemInp);
 
@@ -1632,18 +1782,36 @@
                     const amtInp = el("input", { type: "number", class: "finput", value: t.amount, min: "0", step: "0.01" });
                     modal.appendChild(amtInp);
 
-                    modal.appendChild(el("label", { class: "flabel" }, "Payment Method"));
-                    const payRow = el("div", { class: "chiprow" });
-                    ["cash", "gcash", "other"].forEach((p) => {
-                        const chip = el("button", { type: "button", class: "chip pay" + (t.payment === p ? " active" : "") }, paymentLabel(p));
-                        chip.dataset.value = p;
-                        chip.addEventListener("click", () => {
-                            qsa(".chip.pay", payRow).forEach((c) => c.classList.remove("active"));
-                            chip.classList.add("active");
+                    let payRow = null,
+                        fromRow = null,
+                        toRow = null;
+                    let editFrom = t.fromAccount,
+                        editTo = t.toAccount;
+                    if (isTransfer) {
+                        modal.appendChild(el("label", { class: "flabel" }, "From"));
+                        fromRow = buildAccountChips(editFrom, (v) => {
+                            editFrom = v;
                         });
-                        payRow.appendChild(chip);
-                    });
-                    modal.appendChild(payRow);
+                        modal.appendChild(fromRow);
+                        modal.appendChild(el("label", { class: "flabel" }, "To"));
+                        toRow = buildAccountChips(editTo, (v) => {
+                            editTo = v;
+                        });
+                        modal.appendChild(toRow);
+                    } else {
+                        modal.appendChild(el("label", { class: "flabel" }, "Payment Method"));
+                        payRow = el("div", { class: "chiprow" });
+                        ["cash", "gcash", "bank", "other"].forEach((p) => {
+                            const chip = el("button", { type: "button", class: "chip pay" + (t.payment === p ? " active" : "") }, paymentLabel(p));
+                            chip.dataset.value = p;
+                            chip.addEventListener("click", () => {
+                                qsa(".chip.pay", payRow).forEach((c) => c.classList.remove("active"));
+                                chip.classList.add("active");
+                            });
+                            payRow.appendChild(chip);
+                        });
+                        modal.appendChild(payRow);
+                    }
 
                     modal.appendChild(el("label", { class: "flabel" }, "Date & Time"));
                     const dateInp = el("input", { type: "datetime-local", class: "finput", value: toLocalInputValue(new Date(t.date)) });
@@ -1675,18 +1843,38 @@
                     });
                     saveBtn.addEventListener("click", async () => {
                         const amount = parseFloat(amtInp.value);
-                        if (!itemInp.value.trim() || !amount || amount <= 0) {
-                            toast("Please check item and amount");
+                        if (!amount || amount <= 0) {
+                            toast("Please enter a valid amount");
                             return;
                         }
-                        const payChip = qs(".chip.pay.active", payRow);
-                        const updated = Object.assign({}, t, {
-                            item: itemInp.value.trim(),
-                            amount,
-                            payment: payChip ? payChip.dataset.value : t.payment,
-                            date: new Date(dateInp.value).toISOString(),
-                            note: noteInp.value.trim(),
-                        });
+                        if (isTransfer && editFrom === editTo) {
+                            toast("Choose two different accounts");
+                            return;
+                        }
+                        if (!isTransfer && !itemInp.value.trim()) {
+                            toast("Please check the description");
+                            return;
+                        }
+                        let updated;
+                        if (isTransfer) {
+                            updated = Object.assign({}, t, {
+                                item: itemInp.value.trim() || `${accountLabel(editFrom)} \u2192 ${accountLabel(editTo)}`,
+                                amount,
+                                fromAccount: editFrom,
+                                toAccount: editTo,
+                                date: new Date(dateInp.value).toISOString(),
+                                note: noteInp.value.trim(),
+                            });
+                        } else {
+                            const payChip = qs(".chip.pay.active", payRow);
+                            updated = Object.assign({}, t, {
+                                item: itemInp.value.trim(),
+                                amount,
+                                payment: payChip ? payChip.dataset.value : t.payment,
+                                date: new Date(dateInp.value).toISOString(),
+                                note: noteInp.value.trim(),
+                            });
+                        }
                         await dbPut("transactions", updated);
                         overlay.remove();
                         toast("Transaction updated");
@@ -1729,7 +1917,9 @@
                     const sales = sumBy(txs, (t) => t.type === "sale");
                     const expenses = sumBy(txs, (t) => t.type === "expense");
                     const net = sales - expenses;
-                    const cashNet = sumBy(txs, (t) => t.type === "sale" && t.payment === "cash") - sumBy(txs, (t) => t.type === "expense" && t.payment === "cash");
+                    const cashIn = sumBy(txs, (t) => t.type === "sale" && t.payment === "cash") + sumBy(txs, (t) => t.type === "transfer" && t.toAccount === "cash");
+                    const cashOut = sumBy(txs, (t) => t.type === "expense" && t.payment === "cash") + sumBy(txs, (t) => t.type === "transfer" && t.fromAccount === "cash");
+                    const cashNet = cashIn - cashOut;
 
                     const summary = el("div", { class: "summary-grid" }, [
                         summaryCard("Total Sales", sales, "sales"),
@@ -1738,6 +1928,25 @@
                         summaryCard("Cash Movement", cashNet, cashNet >= 0 ? "sales" : "expenses"),
                     ]);
                     wrap.appendChild(summary);
+
+                    // account balances (all-time, not period-scoped — this is a point-in-time snapshot)
+                    const allTxs = await allTx();
+                    const bal = await computeAccountBalances(allTxs);
+                    const balSection = el("div", { class: "section" }, [el("div", { class: "section-title" }, "ACCOUNT BALANCES (ALL-TIME)")]);
+                    balSection.appendChild(
+                        el("div", { class: "summary-grid" }, [summaryCard("Cash", bal.cash, "sales"), summaryCard("GCash", bal.gcash, "sales"), summaryCard("Bank", bal.bank, "sales")]),
+                    );
+                    wrap.appendChild(balSection);
+
+                    // fund transfers this period
+                    const transfers = txs.filter((t) => t.type === "transfer").sort((a, b) => new Date(b.date) - new Date(a.date));
+                    const transferSection = el("div", { class: "section" }, [el("div", { class: "section-title" }, "FUND TRANSFERS THIS PERIOD")]);
+                    if (transfers.length === 0) {
+                        transferSection.appendChild(el("div", { class: "empty small" }, "No GCash, bank, or owner transfers in this period."));
+                    } else {
+                        transfers.forEach((t) => transferSection.appendChild(txRow(t)));
+                    }
+                    wrap.appendChild(transferSection);
 
                     // category breakdown (sales)
                     const catTotals = {};
@@ -1763,7 +1972,7 @@
                     wrap.appendChild(catSection);
 
                     // payment method breakdown
-                    const payTotals = { cash: 0, gcash: 0, other: 0 };
+                    const payTotals = { cash: 0, gcash: 0, bank: 0, other: 0 };
                     txs.filter((t) => t.type === "sale").forEach((t) => {
                         payTotals[t.payment] = (payTotals[t.payment] || 0) + t.amount;
                     });
@@ -1815,6 +2024,8 @@
 
                     const businessName = await getSetting("businessName", "My Shop");
                     const startingCash = await getSetting("startingCash", 0);
+                    const startingGcash = await getSetting("startingGcash", 0);
+                    const startingBank = await getSetting("startingBank", 0);
                     const cats = await getSetting("categories", { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES });
 
                     // Business card
@@ -1827,14 +2038,49 @@
                     });
                     bizCard.appendChild(nameInp);
 
-                    bizCard.appendChild(el("label", { class: "flabel" }, "Starting Cash (cash drawer float)"));
-                    const cashInp = el("input", { type: "number", class: "finput", value: startingCash, min: "0", step: "0.01" });
-                    cashInp.addEventListener("change", async () => {
-                        await setSetting("startingCash", parseFloat(cashInp.value) || 0);
-                        toast("Starting cash saved");
-                        render();
-                    });
-                    bizCard.appendChild(cashInp);
+                    bizCard.appendChild(el("label", { class: "flabel" }, "Starting Balances"));
+                    bizCard.appendChild(el("div", { class: "help-text" }, "These are added to sales, expenses, and transfers to calculate the running balance shown on Home and Reports."));
+                    const row = el("div", { class: "frow" });
+                    const cashCol = el("div", { class: "fcol" }, [
+                        el("label", { class: "flabel" }, "Cash"),
+                        (function () {
+                            const inp = el("input", { type: "number", class: "finput", value: startingCash, min: "0", step: "0.01" });
+                            inp.addEventListener("change", async () => {
+                                await setSetting("startingCash", parseFloat(inp.value) || 0);
+                                toast("Starting cash saved");
+                                render();
+                            });
+                            return inp;
+                        })(),
+                    ]);
+                    const gcashCol = el("div", { class: "fcol" }, [
+                        el("label", { class: "flabel" }, "GCash"),
+                        (function () {
+                            const inp = el("input", { type: "number", class: "finput", value: startingGcash, min: "0", step: "0.01" });
+                            inp.addEventListener("change", async () => {
+                                await setSetting("startingGcash", parseFloat(inp.value) || 0);
+                                toast("Starting GCash saved");
+                                render();
+                            });
+                            return inp;
+                        })(),
+                    ]);
+                    const bankCol = el("div", { class: "fcol" }, [
+                        el("label", { class: "flabel" }, "Bank"),
+                        (function () {
+                            const inp = el("input", { type: "number", class: "finput", value: startingBank, min: "0", step: "0.01" });
+                            inp.addEventListener("change", async () => {
+                                await setSetting("startingBank", parseFloat(inp.value) || 0);
+                                toast("Starting bank balance saved");
+                                render();
+                            });
+                            return inp;
+                        })(),
+                    ]);
+                    row.appendChild(cashCol);
+                    row.appendChild(gcashCol);
+                    row.appendChild(bankCol);
+                    bizCard.appendChild(row);
                     wrap.appendChild(bizCard);
 
                     // Categories
@@ -2050,23 +2296,6 @@
 
                 document.addEventListener("DOMContentLoaded", init);
             })();
-        </script>
-        <script>
-            if ("serviceWorker" in navigator) {
-                window.addEventListener("load", () => {
-                    navigator.serviceWorker.register("sw.js").catch((err) => {
-                        console.error("SW registration failed:", err);
-                    });
-                });
-
-                // Auto-refresh once when a new SW version takes control.
-                let refreshing = false;
-                navigator.serviceWorker.addEventListener("controllerchange", () => {
-                    if (refreshing) return;
-                    refreshing = true;
-                    window.location.reload();
-                });
-            }
         </script>
     </body>
 </html>
