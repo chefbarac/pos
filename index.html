@@ -1,18 +1,6 @@
 <!doctype html>
 <html lang="en">
     <head>
-        <!-- Google tag (gtag.js) -->
-        <script async src="https://www.googletagmanager.com/gtag/js?id=G-ZWPF7650WK"></script>
-        <script>
-            window.dataLayer = window.dataLayer || [];
-            function gtag() {
-                dataLayer.push(arguments);
-            }
-            gtag("js", new Date());
-
-            gtag("config", "G-ZWPF7650WK");
-        </script>
-        <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🖥️</text></svg>' />
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
         <meta name="theme-color" content="#23302A" />
@@ -961,7 +949,7 @@
 
                 /* ---------- IndexedDB layer ---------- */
                 const DB_NAME = "littleLedgerDB";
-                const DB_VERSION = 1;
+                const DB_VERSION = 2;
                 let dbPromise = null;
 
                 function openDB() {
@@ -970,17 +958,30 @@
                         const req = indexedDB.open(DB_NAME, DB_VERSION);
                         req.onupgradeneeded = (e) => {
                             const db = e.target.result;
+                            const tx = e.target.transaction;
+                            let txStore, presetStore;
                             if (!db.objectStoreNames.contains("transactions")) {
-                                const store = db.createObjectStore("transactions", { keyPath: "id", autoIncrement: true });
-                                store.createIndex("date", "date");
-                                store.createIndex("type", "type");
-                                store.createIndex("category", "category");
+                                txStore = db.createObjectStore("transactions", { keyPath: "id", autoIncrement: true });
+                                txStore.createIndex("date", "date");
+                                txStore.createIndex("type", "type");
+                                txStore.createIndex("category", "category");
+                                txStore.createIndex("companyId", "companyId");
+                            } else {
+                                txStore = tx.objectStore("transactions");
+                                if (!txStore.indexNames.contains("companyId")) txStore.createIndex("companyId", "companyId");
                             }
                             if (!db.objectStoreNames.contains("presets")) {
-                                db.createObjectStore("presets", { keyPath: "id", autoIncrement: true });
+                                presetStore = db.createObjectStore("presets", { keyPath: "id", autoIncrement: true });
+                                presetStore.createIndex("companyId", "companyId");
+                            } else {
+                                presetStore = tx.objectStore("presets");
+                                if (!presetStore.indexNames.contains("companyId")) presetStore.createIndex("companyId", "companyId");
                             }
                             if (!db.objectStoreNames.contains("settings")) {
                                 db.createObjectStore("settings", { keyPath: "key" });
+                            }
+                            if (!db.objectStoreNames.contains("companies")) {
+                                db.createObjectStore("companies", { keyPath: "id", autoIncrement: true });
                             }
                         };
                         req.onsuccess = (e) => resolve(e.target.result);
@@ -1028,9 +1029,18 @@
                     return reqP(tx.objectStore(storeName).get(key));
                 }
 
-                /* ---------- Settings helpers ---------- */
+                /* ---------- Settings & company helpers ---------- */
                 const DEFAULT_SALE_CATEGORIES = ["Document Printing", "Ukay-Ukay", "School Supplies"];
                 const DEFAULT_EXPENSE_CATEGORIES = ["Restock", "Supplies & Materials", "Utilities", "Rent", "Transportation", "Other"];
+                const DEFAULT_PRESET_SEED = [
+                    { type: "sale", category: "Document Printing", name: "Photocopy (B&W)", price: 2 },
+                    { type: "sale", category: "Document Printing", name: "Print — Colored", price: 10 },
+                    { type: "sale", category: "Document Printing", name: "Print — B&W", price: 5 },
+                    { type: "sale", category: "Document Printing", name: "Scan to file", price: 10 },
+                    { type: "sale", category: "School Supplies", name: "Ballpen", price: 10 },
+                    { type: "sale", category: "School Supplies", name: "Notebook", price: 25 },
+                    { type: "sale", category: "School Supplies", name: "Bond Paper (per sheet)", price: 2 },
+                ];
 
                 async function getSetting(key, fallback) {
                     const rec = await dbGet("settings", key);
@@ -1040,39 +1050,98 @@
                     return dbPut("settings", { key, value });
                 }
 
+                async function listCompanies() {
+                    const all = await dbGetAll("companies");
+                    return all.sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+                }
+                async function getActiveCompanyId() {
+                    let id = await getSetting("activeCompanyId", null);
+                    const companies = await listCompanies();
+                    if (id == null || !companies.some((c) => c.id === id)) {
+                        id = companies.length ? companies[0].id : null;
+                        if (id != null) await setSetting("activeCompanyId", id);
+                    }
+                    return id;
+                }
+                async function getActiveCompany() {
+                    const id = await getActiveCompanyId();
+                    if (id == null) return null;
+                    return dbGet("companies", id);
+                }
+                async function updateActiveCompany(patch) {
+                    const company = await getActiveCompany();
+                    if (!company) return null;
+                    const updated = Object.assign({}, company, patch);
+                    await dbPut("companies", updated);
+                    return updated;
+                }
+                async function seedDefaultPresetsForCompany(companyId) {
+                    for (const p of DEFAULT_PRESET_SEED) await dbAdd("presets", Object.assign({ companyId }, p));
+                }
+                async function createCompany(name) {
+                    const company = {
+                        name: (name || "").trim() || "New Company",
+                        categories: { sale: DEFAULT_SALE_CATEGORIES.slice(), expense: DEFAULT_EXPENSE_CATEGORIES.slice() },
+                        startingCash: 0,
+                        startingGcash: 0,
+                        startingBank: 0,
+                        createdAt: new Date().toISOString(),
+                    };
+                    const id = await dbAdd("companies", company);
+                    await seedDefaultPresetsForCompany(id);
+                    return id;
+                }
+
                 async function seedIfEmpty() {
-                    const cats = await dbGet("settings", "categories");
-                    if (!cats) {
-                        await setSetting("categories", { sale: DEFAULT_SALE_CATEGORIES.slice(), expense: DEFAULT_EXPENSE_CATEGORIES.slice() });
-                    }
-                    const name = await dbGet("settings", "businessName");
-                    if (!name) {
-                        await setSetting("businessName", "My Shop");
-                    }
-                    const cash = await dbGet("settings", "startingCash");
-                    if (!cash) {
-                        await setSetting("startingCash", 0);
-                    }
-                    const gcash = await dbGet("settings", "startingGcash");
-                    if (!gcash) {
-                        await setSetting("startingGcash", 0);
-                    }
-                    const bank = await dbGet("settings", "startingBank");
-                    if (!bank) {
-                        await setSetting("startingBank", 0);
-                    }
-                    const presets = await dbGetAll("presets");
-                    if (presets.length === 0) {
-                        const seedList = [
-                            { type: "sale", category: "Document Printing", name: "Photocopy (B&W)", price: 2 },
-                            { type: "sale", category: "Document Printing", name: "Print — Colored", price: 10 },
-                            { type: "sale", category: "Document Printing", name: "Print — B&W", price: 5 },
-                            { type: "sale", category: "Document Printing", name: "Scan to file", price: 10 },
-                            { type: "sale", category: "School Supplies", name: "Ballpen", price: 10 },
-                            { type: "sale", category: "School Supplies", name: "Notebook", price: 25 },
-                            { type: "sale", category: "School Supplies", name: "Bond Paper (per sheet)", price: 2 },
-                        ];
-                        for (const p of seedList) await dbAdd("presets", p);
+                    const companies = await dbGetAll("companies");
+                    if (companies.length === 0) {
+                        // One-time migration from the old single-tenant schema (global settings) into the first company.
+                        const legacyName = await dbGet("settings", "businessName");
+                        const legacyCats = await dbGet("settings", "categories");
+                        const legacyCash = await dbGet("settings", "startingCash");
+                        const legacyGcash = await dbGet("settings", "startingGcash");
+                        const legacyBank = await dbGet("settings", "startingBank");
+                        const company = {
+                            name: (legacyName && legacyName.value) || "My Shop",
+                            categories: (legacyCats && legacyCats.value) || { sale: DEFAULT_SALE_CATEGORIES.slice(), expense: DEFAULT_EXPENSE_CATEGORIES.slice() },
+                            startingCash: (legacyCash && legacyCash.value) || 0,
+                            startingGcash: (legacyGcash && legacyGcash.value) || 0,
+                            startingBank: (legacyBank && legacyBank.value) || 0,
+                            createdAt: new Date().toISOString(),
+                        };
+                        const id = await dbAdd("companies", company);
+                        await setSetting("activeCompanyId", id);
+
+                        // Carry over any pre-existing transactions/presets (from the old single-tenant version) into this company.
+                        const oldTx = await dbGetAll("transactions");
+                        for (const t of oldTx) {
+                            if (t.companyId == null) {
+                                t.companyId = id;
+                                await dbPut("transactions", t);
+                            }
+                        }
+                        const oldPresets = await dbGetAll("presets");
+                        for (const p of oldPresets) {
+                            if (p.companyId == null) {
+                                p.companyId = id;
+                                await dbPut("presets", p);
+                            }
+                        }
+
+                        for (const k of ["businessName", "categories", "startingCash", "startingGcash", "startingBank"]) {
+                            const rec = await dbGet("settings", k);
+                            if (rec) await dbDelete("settings", k);
+                        }
+
+                        if (oldPresets.length === 0) await seedDefaultPresetsForCompany(id);
+                    } else {
+                        // Make sure there's always a valid active company pointer.
+                        await getActiveCompanyId();
+                        // Guard: a company created before preset seeding existed shouldn't be stuck empty.
+                        const cid = await getActiveCompanyId();
+                        const presets = (await dbGetAll("presets")).filter((p) => p.companyId === cid);
+                        const anyTx = (await dbGetAll("transactions")).some((t) => t.companyId === cid);
+                        if (presets.length === 0 && !anyTx) await seedDefaultPresetsForCompany(cid);
                     }
                 }
 
@@ -1199,11 +1268,21 @@
 
                 /* ---------- Data queries ---------- */
                 async function allTx() {
-                    return dbGetAll("transactions");
+                    const cid = await getActiveCompanyId();
+                    const all = await dbGetAll("transactions");
+                    return all.filter((t) => t.companyId === cid);
+                }
+                async function companyPresets() {
+                    const cid = await getActiveCompanyId();
+                    const all = await dbGetAll("presets");
+                    return all.filter((p) => p.companyId === cid);
                 }
 
                 async function computeAccountBalances(txsOverride) {
-                    const [startCash, startGcash, startBank] = await Promise.all([getSetting("startingCash", 0), getSetting("startingGcash", 0), getSetting("startingBank", 0)]);
+                    const company = await getActiveCompany();
+                    const startCash = company ? company.startingCash : 0;
+                    const startGcash = company ? company.startingGcash : 0;
+                    const startBank = company ? company.startingBank : 0;
                     const txs = txsOverride || (await allTx());
                     const bal = { cash: Number(startCash) || 0, gcash: Number(startGcash) || 0, bank: Number(startBank) || 0 };
                     for (const t of txs) {
@@ -1229,7 +1308,8 @@
                 /* ---------- HOME ---------- */
                 async function renderHome() {
                     const txs = await allTx();
-                    const businessName = await getSetting("businessName", "My Shop");
+                    const company = await getActiveCompany();
+                    const businessName = company ? company.name : "My Shop";
                     const now = new Date();
                     const todayFrom = startOfDay(now),
                         todayTo = endOfDay(now);
@@ -1400,8 +1480,9 @@
                 ];
 
                 async function renderAdd() {
-                    const cats = await getSetting("categories", { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES });
-                    const presetsAll = await dbGetAll("presets");
+                    const company = await getActiveCompany();
+                    const cats = company ? company.categories : { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES };
+                    const presetsAll = await companyPresets();
                     const isTransfer = App.addType === "transfer";
                     if (!isTransfer && (!App.selectedCategory || !cats[App.addType].includes(App.selectedCategory))) {
                         App.selectedCategory = cats[App.addType][0];
@@ -1611,6 +1692,7 @@
                             const item = qs("#f-item").value.trim() || `${accountLabel(App.transferFrom)} \u2192 ${accountLabel(App.transferTo)}`;
                             const record = {
                                 type: "transfer",
+                                companyId: await getActiveCompanyId(),
                                 category: "Transfer",
                                 item,
                                 qty: null,
@@ -1637,6 +1719,7 @@
                         const payChip = qs(".chip.pay.active", payRow);
                         const record = {
                             type: App.addType,
+                            companyId: await getActiveCompanyId(),
                             category: App.selectedCategory,
                             item,
                             qty: App.addType === "sale" ? parseFloat(qs("#f-qty").value) || 1 : null,
@@ -1674,7 +1757,6 @@
 
                 /* ---------- HISTORY ---------- */
                 async function renderHistory() {
-                    const cats = await getSetting("categories", { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES });
                     const wrap = el("div", { class: "page" });
                     wrap.appendChild(el("div", { class: "page-title" }, "History"));
 
@@ -2034,18 +2116,75 @@
                     const wrap = el("div", { class: "page" });
                     wrap.appendChild(el("div", { class: "page-title" }, "Settings"));
 
-                    const businessName = await getSetting("businessName", "My Shop");
-                    const startingCash = await getSetting("startingCash", 0);
-                    const startingGcash = await getSetting("startingGcash", 0);
-                    const startingBank = await getSetting("startingBank", 0);
-                    const cats = await getSetting("categories", { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES });
+                    const companies = await listCompanies();
+                    const company = await getActiveCompany();
+                    const startingCash = company ? company.startingCash : 0;
+                    const startingGcash = company ? company.startingGcash : 0;
+                    const startingBank = company ? company.startingBank : 0;
+                    const cats = company ? company.categories : { sale: DEFAULT_SALE_CATEGORIES.slice(), expense: DEFAULT_EXPENSE_CATEGORIES.slice() };
 
-                    // Business card
+                    // Companies card — switch between businesses/branches, each with its own isolated cash flow
+                    wrap.appendChild(el("div", { class: "section-title" }, "COMPANIES / BRANCHES"));
+                    const coCard = el("div", { class: "card" });
+                    coCard.appendChild(el("div", { class: "help-text" }, "Each company keeps its own sales, expenses, transfers, and balances. Tap one to switch."));
+                    const coList = el("div", { class: "chiprow" });
+                    companies.forEach((c) => {
+                        const chip = el("button", { type: "button", class: "chip" + (company && c.id === company.id ? " active" : "") }, c.name);
+                        chip.addEventListener("click", async () => {
+                            if (company && c.id === company.id) return;
+                            await setSetting("activeCompanyId", c.id);
+                            App.selectedCategory = null;
+                            toast(`Switched to ${c.name}`);
+                            location.hash = "#/home";
+                        });
+                        coList.appendChild(chip);
+                    });
+                    coCard.appendChild(coList);
+
+                    const coAddRow = el("div", { class: "addrow" });
+                    const coInp = el("input", { type: "text", class: "finput", placeholder: "New company or branch name..." });
+                    const coAddBtn = el("button", { type: "button", class: "smallbtn" }, "Add");
+                    coAddBtn.addEventListener("click", async () => {
+                        const name = coInp.value.trim();
+                        if (!name) {
+                            toast("Enter a company name");
+                            return;
+                        }
+                        const newId = await createCompany(name);
+                        await setSetting("activeCompanyId", newId);
+                        App.selectedCategory = null;
+                        toast(`${name} created`);
+                        render();
+                    });
+                    coAddRow.appendChild(coInp);
+                    coAddRow.appendChild(coAddBtn);
+                    coCard.appendChild(coAddRow);
+
+                    if (companies.length > 1 && company) {
+                        const delCoBtn = el("button", { type: "button", class: "bigbtn danger" }, `Delete "${company.name}"`);
+                        delCoBtn.addEventListener("click", async () => {
+                            if (!confirm(`Delete "${company.name}" and ALL of its transactions and presets? This cannot be undone.`)) return;
+                            if (!confirm("Are you absolutely sure? There is no way to recover this data afterward.")) return;
+                            const allTxAll = await dbGetAll("transactions");
+                            for (const t of allTxAll) if (t.companyId === company.id) await dbDelete("transactions", t.id);
+                            const allPresetsAll = await dbGetAll("presets");
+                            for (const p of allPresetsAll) if (p.companyId === company.id) await dbDelete("presets", p.id);
+                            await dbDelete("companies", company.id);
+                            const remaining = await listCompanies();
+                            await setSetting("activeCompanyId", remaining[0].id);
+                            toast(`"${company.name}" deleted`);
+                            location.hash = "#/home";
+                        });
+                        coCard.appendChild(delCoBtn);
+                    }
+                    wrap.appendChild(coCard);
+
+                    // Business card — settings for the active company
                     const bizCard = el("div", { class: "card form" });
                     bizCard.appendChild(el("label", { class: "flabel" }, "Shop Name"));
-                    const nameInp = el("input", { type: "text", class: "finput", value: businessName });
+                    const nameInp = el("input", { type: "text", class: "finput", value: company ? company.name : "" });
                     nameInp.addEventListener("change", async () => {
-                        await setSetting("businessName", nameInp.value.trim() || "My Shop");
+                        await updateActiveCompany({ name: nameInp.value.trim() || "My Shop" });
                         toast("Shop name saved");
                     });
                     bizCard.appendChild(nameInp);
@@ -2058,7 +2197,7 @@
                         (function () {
                             const inp = el("input", { type: "number", class: "finput", value: startingCash, min: "0", step: "0.01" });
                             inp.addEventListener("change", async () => {
-                                await setSetting("startingCash", parseFloat(inp.value) || 0);
+                                await updateActiveCompany({ startingCash: parseFloat(inp.value) || 0 });
                                 toast("Starting cash saved");
                                 render();
                             });
@@ -2070,7 +2209,7 @@
                         (function () {
                             const inp = el("input", { type: "number", class: "finput", value: startingGcash, min: "0", step: "0.01" });
                             inp.addEventListener("change", async () => {
-                                await setSetting("startingGcash", parseFloat(inp.value) || 0);
+                                await updateActiveCompany({ startingGcash: parseFloat(inp.value) || 0 });
                                 toast("Starting GCash saved");
                                 render();
                             });
@@ -2082,7 +2221,7 @@
                         (function () {
                             const inp = el("input", { type: "number", class: "finput", value: startingBank, min: "0", step: "0.01" });
                             inp.addEventListener("change", async () => {
-                                await setSetting("startingBank", parseFloat(inp.value) || 0);
+                                await updateActiveCompany({ startingBank: parseFloat(inp.value) || 0 });
                                 toast("Starting bank balance saved");
                                 render();
                             });
@@ -2125,15 +2264,15 @@
 
                     const clearBtn = el("button", { type: "button", class: "bigbtn danger" }, "Clear All Data");
                     clearBtn.addEventListener("click", async () => {
-                        if (confirm("This will permanently delete ALL transactions, presets and settings on this device. Continue?")) {
+                        if (confirm("This will permanently delete ALL companies, transactions, presets and settings on this device. Continue?")) {
                             if (confirm("Are you absolutely sure? This cannot be undone.")) {
                                 await dbClear("transactions");
                                 await dbClear("presets");
                                 await dbClear("settings");
+                                await dbClear("companies");
                                 await seedIfEmpty();
                                 toast("All data cleared");
                                 location.hash = "#/home";
-                                render();
                             }
                         }
                     });
@@ -2158,7 +2297,7 @@
                                     return;
                                 }
                                 cats[type] = cats[type].filter((x) => x !== c);
-                                await setSetting("categories", cats);
+                                await updateActiveCompany({ categories: cats });
                                 refreshList();
                             });
                             list.appendChild(chip);
@@ -2178,7 +2317,7 @@
                             return;
                         }
                         cats[type].push(v);
-                        await setSetting("categories", cats);
+                        await updateActiveCompany({ categories: cats });
                         inp.value = "";
                         refreshList();
                     });
@@ -2200,7 +2339,7 @@
 
                     async function refresh() {
                         list.innerHTML = "";
-                        const presets = (await dbGetAll("presets")).filter((p) => p.category === catSelect.value);
+                        const presets = (await companyPresets()).filter((p) => p.category === catSelect.value);
                         if (presets.length === 0) {
                             list.appendChild(el("div", { class: "empty small" }, "No quick items yet for this category."));
                         }
@@ -2231,7 +2370,8 @@
                             toast("Enter a name and price");
                             return;
                         }
-                        await dbAdd("presets", { type: "sale", category: catSelect.value, name, price });
+                        const cid = await getActiveCompanyId();
+                        await dbAdd("presets", { type: "sale", category: catSelect.value, name, price, companyId: cid });
                         nameInp.value = "";
                         priceInp.value = "";
                         refresh();
@@ -2246,14 +2386,15 @@
 
                 /* ---------- Export / Import ---------- */
                 async function exportDB() {
-                    const [transactions, presets, settingsArr] = await Promise.all([dbGetAll("transactions"), dbGetAll("presets"), dbGetAll("settings")]);
+                    const [transactions, presets, settingsArr, companies] = await Promise.all([dbGetAll("transactions"), dbGetAll("presets"), dbGetAll("settings"), dbGetAll("companies")]);
                     const payload = {
                         app: "little-ledger-pos",
                         exportedAt: new Date().toISOString(),
-                        version: 1,
+                        version: 2,
                         transactions,
                         presets,
                         settings: settingsArr,
+                        companies,
                     };
                     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
                     const url = URL.createObjectURL(blob);
@@ -2281,12 +2422,39 @@
                         await dbClear("transactions");
                         await dbClear("presets");
                         await dbClear("settings");
-                        for (const t of data.transactions) await dbPut("transactions", t);
-                        for (const p of data.presets) await dbPut("presets", p);
-                        for (const s of data.settings) await dbPut("settings", s);
+                        await dbClear("companies");
+
+                        const hasCompanies = Array.isArray(data.companies) && data.companies.length > 0;
+                        if (hasCompanies) {
+                            for (const c of data.companies) await dbPut("companies", c);
+                            for (const t of data.transactions) await dbPut("transactions", t);
+                            for (const p of data.presets) await dbPut("presets", p);
+                            for (const s of data.settings) await dbPut("settings", s);
+                        } else {
+                            // Old single-tenant backup (no companies array) — wrap everything into one company.
+                            const legacySettings = {};
+                            for (const s of data.settings) legacySettings[s.key] = s.value;
+                            const company = {
+                                name: legacySettings.businessName || "My Shop",
+                                categories: legacySettings.categories || { sale: DEFAULT_SALE_CATEGORIES.slice(), expense: DEFAULT_EXPENSE_CATEGORIES.slice() },
+                                startingCash: legacySettings.startingCash || 0,
+                                startingGcash: legacySettings.startingGcash || 0,
+                                startingBank: legacySettings.startingBank || 0,
+                                createdAt: new Date().toISOString(),
+                            };
+                            const cid = await dbAdd("companies", company);
+                            for (const t of data.transactions) {
+                                t.companyId = cid;
+                                await dbPut("transactions", t);
+                            }
+                            for (const p of data.presets) {
+                                p.companyId = cid;
+                                await dbPut("presets", p);
+                            }
+                            await setSetting("activeCompanyId", cid);
+                        }
                         toast("Database imported successfully");
                         location.hash = "#/home";
-                        render();
                     } catch (err) {
                         console.error(err);
                         toast("Could not read that file");
@@ -2297,34 +2465,23 @@
                 async function init() {
                     await openDB();
                     await seedIfEmpty();
-                    if (!location.hash) location.hash = "#/home";
                     qsa(".navbtn").forEach((b) =>
                         b.addEventListener("click", (e) => {
                             if (b.dataset.route === "add") App.selectedCategory = null;
                         }),
                     );
-                    render();
+                    if (!location.hash) {
+                        // Setting the hash triggers the 'hashchange' listener, which calls render() itself —
+                        // don't also call render() here or the first page loads (and re-queries IndexedDB) twice.
+                        location.hash = "#/home";
+                    } else {
+                        // Hash was already set (e.g. reload/deep link) — no hashchange event will fire, so render directly.
+                        render();
+                    }
                 }
 
                 document.addEventListener("DOMContentLoaded", init);
             })();
-        </script>
-        <script>
-            if ("serviceWorker" in navigator) {
-                window.addEventListener("load", () => {
-                    navigator.serviceWorker.register("sw.js").catch((err) => {
-                        console.error("SW registration failed:", err);
-                    });
-                });
-
-                // Auto-refresh once when a new SW version takes control.
-                let refreshing = false;
-                navigator.serviceWorker.addEventListener("controllerchange", () => {
-                    if (refreshing) return;
-                    refreshing = true;
-                    window.location.reload();
-                });
-            }
         </script>
     </body>
 </html>
