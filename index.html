@@ -574,6 +574,11 @@
                 border: 1px solid var(--rust);
                 margin-top: 10px;
             }
+            .bigbtn.small2 {
+                padding: 11px;
+                font-size: 13.5px;
+                margin-top: 10px;
+            }
             .filelabel {
                 display: flex;
                 align-items: center;
@@ -638,6 +643,87 @@
                 font-family: var(--mono);
                 font-size: 13px;
                 color: var(--ink-soft);
+            }
+
+            /* ---------- Line items (receipt builder) ---------- */
+            .linelist {
+                margin: 4px 0 2px;
+            }
+            .linerow {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 9px 0;
+                border-bottom: 1px dotted var(--border);
+            }
+            .linerow:last-child {
+                border-bottom: none;
+            }
+            .linerow-main {
+                flex: 1;
+                min-width: 0;
+            }
+            .linerow-title {
+                font-size: 13.5px;
+                font-weight: 600;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .linerow-sub {
+                font-size: 11.5px;
+                color: var(--ink-soft);
+                margin-top: 1px;
+            }
+            .linerow-amt {
+                font-family: var(--mono);
+                font-weight: 700;
+                font-size: 13.5px;
+                flex-shrink: 0;
+            }
+            .lineentry {
+                border: 1px dashed var(--border);
+                border-radius: 12px;
+                padding: 12px;
+                margin-top: 4px;
+                background: var(--green-soft);
+            }
+            .totalsblock {
+                margin-top: 4px;
+                padding-top: 10px;
+                border-top: 1px solid var(--border);
+            }
+            .totalsrow {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 4px 0;
+                font-size: 13.5px;
+                color: var(--ink-soft);
+            }
+            .totalsrow .val {
+                font-family: var(--mono);
+                font-weight: 600;
+                color: var(--ink);
+            }
+            .totalsrow.grand {
+                font-size: 16px;
+                font-weight: 700;
+                color: var(--ink);
+                padding-top: 8px;
+                margin-top: 4px;
+                border-top: 1px dotted var(--border);
+            }
+            .totalsrow.grand .val {
+                font-family: var(--mono);
+                font-weight: 700;
+                font-size: 18px;
+            }
+            .totalsrow.change .val {
+                color: var(--green);
+            }
+            .totalsrow.change.short .val {
+                color: var(--rust);
             }
 
             /* ---------- Summary grid (Reports) ---------- */
@@ -1211,6 +1297,17 @@
                     return "id" + Date.now() + Math.random().toString(16).slice(2);
                 }
 
+                /* Return the line items for a transaction. Sale/expense records created before the
+                   multi-line-item feature only had a single item/category/qty/unitPrice/amount on the
+                   record itself — treat that as a one-line list so every render path can just use .lines(). */
+                function txLines(t) {
+                    if (Array.isArray(t.items) && t.items.length) return t.items;
+                    if (t.type === "sale" || t.type === "expense") {
+                        return [{ category: t.category, item: t.item, qty: t.qty, unitPrice: t.unitPrice, amount: t.amount }];
+                    }
+                    return [];
+                }
+
                 function el(tag, attrs, children) {
                     const node = document.createElement(tag);
                     if (attrs)
@@ -1251,6 +1348,7 @@
                     selectedCategory: null,
                     transferFrom: "gcash",
                     transferTo: "cash",
+                    saleLines: [], // line items staged for the transaction currently being built on the Add page
                     historyFilters: { range: "today", type: "all", category: "all", search: "", from: null, to: null },
                     reportRange: "today",
                     reportCustom: { from: null, to: null },
@@ -1365,6 +1463,7 @@
                                 class: "quickbtn quickbtn-sale",
                                 onclick: () => {
                                     App.addType = "sale";
+                                    App.saleLines = [];
                                 },
                             },
                             [el("span", { class: "qb-icon" }, "+"), el("span", {}, "Sale")],
@@ -1376,6 +1475,7 @@
                                 class: "quickbtn quickbtn-expense",
                                 onclick: () => {
                                     App.addType = "expense";
+                                    App.saleLines = [];
                                 },
                             },
                             [el("span", { class: "qb-icon" }, "−"), el("span", {}, "Expense")],
@@ -1394,12 +1494,14 @@
                     ]);
                     wrap.appendChild(quick);
 
-                    // category breakdown for today
+                    // category breakdown for today (spread across each transaction's line items)
                     const catTotals = {};
                     todayTx
                         .filter((t) => t.type === "sale")
                         .forEach((t) => {
-                            catTotals[t.category] = (catTotals[t.category] || 0) + t.amount;
+                            txLines(t).forEach((ln) => {
+                                catTotals[ln.category] = (catTotals[ln.category] || 0) + (Number(ln.amount) || 0);
+                            });
                         });
                     const catEntries = Object.entries(catTotals).sort((a, b) => b[1] - a[1]);
                     if (catEntries.length) {
@@ -1441,11 +1543,20 @@
                 function txRow(t) {
                     const isSale = t.type === "sale";
                     const isTransfer = t.type === "transfer";
+                    const lines = txLines(t);
                     const row = el("div", { class: "txrow", "data-id": t.id });
-                    const subtitle = isTransfer
-                        ? `${accountLabel(t.fromAccount)} \u2192 ${accountLabel(t.toAccount)} · ${fmtTime(t.date)}`
-                        : `${t.category} · ${fmtTime(t.date)} · ${paymentLabel(t.payment)}`;
-                    row.appendChild(el("div", { class: "txrow-main" }, [el("div", { class: "txrow-title" }, t.item), el("div", { class: "txrow-sub" }, subtitle)]));
+                    let title = t.item;
+                    let subtitle;
+                    if (isTransfer) {
+                        subtitle = `${accountLabel(t.fromAccount)} \u2192 ${accountLabel(t.toAccount)} · ${fmtTime(t.date)}`;
+                    } else if (lines.length > 1) {
+                        title = `${lines.length} items`;
+                        const catSet = Array.from(new Set(lines.map((l) => l.category))).join(", ");
+                        subtitle = `${catSet} · ${fmtTime(t.date)} · ${paymentLabel(t.payment)}`;
+                    } else {
+                        subtitle = `${t.category} · ${fmtTime(t.date)} · ${paymentLabel(t.payment)}`;
+                    }
+                    row.appendChild(el("div", { class: "txrow-main" }, [el("div", { class: "txrow-title" }, title), el("div", { class: "txrow-sub" }, subtitle)]));
                     const amtClass = isSale ? "sales" : isTransfer ? "transfer" : "expenses";
                     const sign = isSale ? "+" : isTransfer ? "" : "\u2212";
                     row.appendChild(el("div", { class: "txrow-amt " + amtClass }, sign + fmtPeso(t.amount)));
@@ -1491,12 +1602,17 @@
                     { label: "Owner Investment", from: "owner", to: "cash" },
                 ];
 
+                function lineSubtotal() {
+                    return App.saleLines.reduce((s, ln) => s + (Number(ln.amount) || 0), 0);
+                }
+
                 async function renderAdd() {
                     const company = await getActiveCompany();
                     const cats = company ? company.categories : { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES };
                     const presetsAll = await companyPresets();
                     const isTransfer = App.addType === "transfer";
-                    if (!isTransfer && (!App.selectedCategory || !cats[App.addType].includes(App.selectedCategory))) {
+                    const isLineBased = App.addType === "sale" || App.addType === "expense";
+                    if (isLineBased && (!App.selectedCategory || !cats[App.addType].includes(App.selectedCategory))) {
                         App.selectedCategory = cats[App.addType][0];
                     }
 
@@ -1510,6 +1626,7 @@
                                 onclick: () => {
                                     App.addType = "sale";
                                     App.selectedCategory = null;
+                                    App.saleLines = [];
                                     render();
                                 },
                             },
@@ -1522,6 +1639,7 @@
                                 onclick: () => {
                                     App.addType = "expense";
                                     App.selectedCategory = null;
+                                    App.saleLines = [];
                                     render();
                                 },
                             },
@@ -1571,132 +1689,32 @@
                                 App.transferTo = v;
                             }),
                         );
-                    } else {
-                        // Category chips
-                        const chipRow = el("div", { class: "chiprow" });
-                        cats[App.addType].forEach((c) => {
-                            const chip = el("button", { type: "button", class: "chip" + (c === App.selectedCategory ? " active" : "") }, c);
-                            chip.addEventListener("click", () => {
-                                App.selectedCategory = c;
-                                render();
-                            });
-                            chipRow.appendChild(chip);
-                        });
-                        form.appendChild(el("label", { class: "flabel" }, "Category"));
-                        form.appendChild(chipRow);
 
-                        // Presets (sale only)
-                        if (App.addType === "sale") {
-                            const presets = presetsAll.filter((p) => p.type === "sale" && p.category === App.selectedCategory);
-                            if (presets.length) {
-                                form.appendChild(el("label", { class: "flabel" }, "Quick items"));
-                                const presetRow = el("div", { class: "chiprow" });
-                                presets.forEach((p) => {
-                                    const chip = el("button", { type: "button", class: "chip preset" }, `${p.name} · ${fmtPeso(p.price)}`);
-                                    chip.addEventListener("click", () => {
-                                        qs("#f-item").value = p.name;
-                                        qs("#f-price").value = p.price;
-                                        qs("#f-qty").value = qs("#f-qty").value || 1;
-                                        recalcAmount();
-                                    });
-                                    presetRow.appendChild(chip);
-                                });
-                                form.appendChild(presetRow);
+                        const itemLabel = "Description (optional)";
+                        form.appendChild(el("label", { class: "flabel" }, itemLabel));
+                        form.appendChild(el("input", { id: "f-item", type: "text", class: "finput", placeholder: "e.g. Cashed out for restock", autocomplete: "off" }));
+
+                        form.appendChild(el("label", { class: "flabel" }, "Amount"));
+                        form.appendChild(
+                            el("input", { id: "f-amount", type: "number", class: "finput famount", placeholder: "0.00", min: "0", step: "0.01", inputmode: "decimal", required: "required" }),
+                        );
+
+                        form.appendChild(el("label", { class: "flabel" }, "Date & Time"));
+                        form.appendChild(el("input", { id: "f-date", type: "datetime-local", class: "finput", value: toLocalInputValue(new Date()) }));
+
+                        form.appendChild(el("label", { class: "flabel" }, "Note (optional)"));
+                        form.appendChild(el("input", { id: "f-note", type: "text", class: "finput", placeholder: "Optional note..." }));
+
+                        const saveBtn = el("button", { type: "submit", class: "bigbtn transfer" }, "Save Transfer");
+                        form.appendChild(saveBtn);
+
+                        form.addEventListener("submit", async (e) => {
+                            e.preventDefault();
+                            const amount = parseFloat(qs("#f-amount").value);
+                            if (!amount || amount <= 0) {
+                                toast("Please enter a valid amount");
+                                return;
                             }
-                        }
-                    }
-
-                    const itemLabel = App.addType === "sale" ? "Item / Service" : isTransfer ? "Description (optional)" : "Description";
-                    form.appendChild(el("label", { class: "flabel" }, itemLabel));
-                    form.appendChild(
-                        el("input", {
-                            id: "f-item",
-                            type: "text",
-                            class: "finput",
-                            placeholder: App.addType === "sale" ? "e.g. Photocopy, Used shirt..." : isTransfer ? "e.g. Cashed out for restock" : "e.g. Restock ballpens",
-                            autocomplete: "off",
-                        }),
-                    );
-
-                    if (App.addType === "sale") {
-                        const row = el("div", { class: "frow" });
-                        const qtyBlock = el("div", { class: "fcol" }, [
-                            el("label", { class: "flabel" }, "Qty"),
-                            el("div", { class: "stepper" }, [
-                                el(
-                                    "button",
-                                    {
-                                        type: "button",
-                                        class: "step-btn",
-                                        onclick: (e) => {
-                                            e.preventDefault();
-                                            stepQty(-1);
-                                        },
-                                    },
-                                    "−",
-                                ),
-                                el("input", { id: "f-qty", type: "number", class: "finput steppernum", value: "1", min: "0", step: "any", oninput: recalcAmount }),
-                                el(
-                                    "button",
-                                    {
-                                        type: "button",
-                                        class: "step-btn",
-                                        onclick: (e) => {
-                                            e.preventDefault();
-                                            stepQty(1);
-                                        },
-                                    },
-                                    "+",
-                                ),
-                            ]),
-                        ]);
-                        const priceBlock = el("div", { class: "fcol" }, [
-                            el("label", { class: "flabel" }, "Unit Price"),
-                            el("input", { id: "f-price", type: "number", class: "finput", placeholder: "0.00", min: "0", step: "0.01", inputmode: "decimal", oninput: recalcAmount }),
-                        ]);
-                        row.appendChild(qtyBlock);
-                        row.appendChild(priceBlock);
-                        form.appendChild(row);
-                    }
-
-                    form.appendChild(el("label", { class: "flabel" }, "Amount"));
-                    form.appendChild(el("input", { id: "f-amount", type: "number", class: "finput famount", placeholder: "0.00", min: "0", step: "0.01", inputmode: "decimal", required: "required" }));
-
-                    let payRow = null;
-                    if (!isTransfer) {
-                        form.appendChild(el("label", { class: "flabel" }, "Payment Method"));
-                        payRow = el("div", { class: "chiprow", id: "f-payment-row" });
-                        ["cash", "gcash", "bank", "other"].forEach((p, i) => {
-                            const chip = el("button", { type: "button", class: "chip pay" + (i === 0 ? " active" : "") }, paymentLabel(p));
-                            chip.dataset.value = p;
-                            chip.addEventListener("click", () => {
-                                qsa(".chip.pay", payRow).forEach((c) => c.classList.remove("active"));
-                                chip.classList.add("active");
-                            });
-                            payRow.appendChild(chip);
-                        });
-                        form.appendChild(payRow);
-                    }
-
-                    form.appendChild(el("label", { class: "flabel" }, "Date & Time"));
-                    form.appendChild(el("input", { id: "f-date", type: "datetime-local", class: "finput", value: toLocalInputValue(new Date()) }));
-
-                    form.appendChild(el("label", { class: "flabel" }, "Note (optional)"));
-                    form.appendChild(el("input", { id: "f-note", type: "text", class: "finput", placeholder: "Optional note..." }));
-
-                    const saveLabel = App.addType === "sale" ? "Save Sale" : App.addType === "expense" ? "Save Expense" : "Save Transfer";
-                    const saveBtn = el("button", { type: "submit", class: "bigbtn " + App.addType }, saveLabel);
-                    form.appendChild(saveBtn);
-
-                    form.addEventListener("submit", async (e) => {
-                        e.preventDefault();
-                        const amount = parseFloat(qs("#f-amount").value);
-                        if (!amount || amount <= 0) {
-                            toast("Please enter a valid amount");
-                            return;
-                        }
-
-                        if (isTransfer) {
                             if (App.transferFrom === App.transferTo) {
                                 toast("Choose two different accounts");
                                 return;
@@ -1720,24 +1738,279 @@
                             await dbAdd("transactions", record);
                             toast("Transfer saved");
                             render();
+                        });
+
+                        wrap.appendChild(form);
+                        return wrap;
+                    }
+
+                    /* ----- Sale / Expense: multi-line item builder ----- */
+                    const isSale = App.addType === "sale";
+
+                    // Already-added lines for this transaction
+                    if (App.saleLines.length) {
+                        form.appendChild(el("label", { class: "flabel" }, `Items (${App.saleLines.length})`));
+                        const list = el("div", { class: "linelist" });
+                        App.saleLines.forEach((ln, idx) => {
+                            const sub = `${ln.category}${ln.qty ? " · qty " + ln.qty : ""}`;
+                            const lineRow = el("div", { class: "linerow" }, [
+                                el("div", { class: "linerow-main" }, [el("div", { class: "linerow-title" }, ln.item), el("div", { class: "linerow-sub" }, sub)]),
+                                el("div", { class: "linerow-amt" }, fmtPeso(ln.amount)),
+                                el(
+                                    "button",
+                                    {
+                                        type: "button",
+                                        class: "chip-x",
+                                        onclick: () => {
+                                            App.saleLines.splice(idx, 1);
+                                            render();
+                                        },
+                                    },
+                                    "×",
+                                ),
+                            ]);
+                            list.appendChild(lineRow);
+                        });
+                        form.appendChild(list);
+                    }
+
+                    // Line-entry sub-form: builds ONE line item, then "Add Item" pushes it into App.saleLines
+                    const entry = el("div", { class: "lineentry" });
+
+                    const chipRow = el("div", { class: "chiprow" });
+                    cats[App.addType].forEach((c) => {
+                        const chip = el("button", { type: "button", class: "chip" + (c === App.selectedCategory ? " active" : "") }, c);
+                        chip.addEventListener("click", () => {
+                            App.selectedCategory = c;
+                            render();
+                        });
+                        chipRow.appendChild(chip);
+                    });
+                    entry.appendChild(el("label", { class: "flabel" }, "Category"));
+                    entry.appendChild(chipRow);
+
+                    if (isSale) {
+                        const presets = presetsAll.filter((p) => p.type === "sale" && p.category === App.selectedCategory);
+                        if (presets.length) {
+                            entry.appendChild(el("label", { class: "flabel" }, "Quick items"));
+                            const presetRow = el("div", { class: "chiprow" });
+                            presets.forEach((p) => {
+                                const chip = el("button", { type: "button", class: "chip preset" }, `${p.name} · ${fmtPeso(p.price)}`);
+                                chip.addEventListener("click", () => {
+                                    qs("#ln-item").value = p.name;
+                                    qs("#ln-price").value = p.price;
+                                    qs("#ln-qty").value = qs("#ln-qty").value || 1;
+                                    recalcLineAmount();
+                                });
+                                presetRow.appendChild(chip);
+                            });
+                            entry.appendChild(presetRow);
+                        }
+                    }
+
+                    entry.appendChild(el("label", { class: "flabel" }, isSale ? "Item / Service" : "Description"));
+                    entry.appendChild(
+                        el("input", {
+                            id: "ln-item",
+                            type: "text",
+                            class: "finput",
+                            placeholder: isSale ? "e.g. Photocopy, Used shirt..." : "e.g. Restock ballpens",
+                            autocomplete: "off",
+                        }),
+                    );
+
+                    const row = el("div", { class: "frow" });
+                    const qtyBlock = el("div", { class: "fcol" }, [
+                        el("label", { class: "flabel" }, "Qty"),
+                        el("div", { class: "stepper" }, [
+                            el(
+                                "button",
+                                {
+                                    type: "button",
+                                    class: "step-btn",
+                                    onclick: (e) => {
+                                        e.preventDefault();
+                                        stepLineQty(-1);
+                                    },
+                                },
+                                "−",
+                            ),
+                            el("input", { id: "ln-qty", type: "number", class: "finput steppernum", value: "1", min: "0", step: "any", oninput: recalcLineAmount }),
+                            el(
+                                "button",
+                                {
+                                    type: "button",
+                                    class: "step-btn",
+                                    onclick: (e) => {
+                                        e.preventDefault();
+                                        stepLineQty(1);
+                                    },
+                                },
+                                "+",
+                            ),
+                        ]),
+                    ]);
+                    const priceBlock = el("div", { class: "fcol" }, [
+                        el("label", { class: "flabel" }, "Unit Price"),
+                        el("input", { id: "ln-price", type: "number", class: "finput", placeholder: "0.00", min: "0", step: "0.01", inputmode: "decimal", oninput: recalcLineAmount }),
+                    ]);
+                    row.appendChild(qtyBlock);
+                    row.appendChild(priceBlock);
+                    entry.appendChild(row);
+
+                    entry.appendChild(el("label", { class: "flabel" }, "Line Amount"));
+                    entry.appendChild(el("input", { id: "ln-amount", type: "number", class: "finput famount", placeholder: "0.00", min: "0", step: "0.01", inputmode: "decimal" }));
+
+                    const addLineBtn = el("button", { type: "button", class: "bigbtn ghost small2" }, "+ Add Item to Transaction");
+                    addLineBtn.addEventListener("click", () => {
+                        const item = qs("#ln-item").value.trim();
+                        const amount = parseFloat(qs("#ln-amount").value);
+                        if (!item) {
+                            toast("Enter an item or description");
+                            return;
+                        }
+                        if (!amount || amount <= 0) {
+                            toast("Enter a valid line amount");
+                            return;
+                        }
+                        App.saleLines.push({
+                            category: App.selectedCategory,
+                            item,
+                            qty: parseFloat(qs("#ln-qty").value) || null,
+                            unitPrice: parseFloat(qs("#ln-price").value) || null,
+                            amount,
+                        });
+                        render();
+                        toast("Item added");
+                    });
+                    entry.appendChild(addLineBtn);
+                    form.appendChild(entry);
+
+                    // Totals block — subtotal is the sum of all added lines; total mirrors it (no fees/discounts modeled yet)
+                    const subtotal = lineSubtotal();
+                    const totals = el("div", { class: "totalsblock" });
+                    totals.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Subtotal"), el("span", { class: "val" }, fmtPeso(subtotal))]));
+                    totals.appendChild(el("div", { class: "totalsrow grand" }, [el("span", {}, "Total"), el("span", { class: "val", id: "totalDisplay" }, fmtPeso(subtotal))]));
+                    form.appendChild(totals);
+
+                    let payRow = null;
+                    form.appendChild(el("label", { class: "flabel" }, "Payment Method"));
+                    payRow = el("div", { class: "chiprow", id: "f-payment-row" });
+                    ["cash", "gcash", "bank", "other"].forEach((p, i) => {
+                        const chip = el("button", { type: "button", class: "chip pay" + (i === 0 ? " active" : "") }, paymentLabel(p));
+                        chip.dataset.value = p;
+                        chip.addEventListener("click", () => {
+                            qsa(".chip.pay", payRow).forEach((c) => c.classList.remove("active"));
+                            chip.classList.add("active");
+                            updateChangeDue();
+                        });
+                        payRow.appendChild(chip);
+                    });
+                    form.appendChild(payRow);
+
+                    // Change computation (most relevant for sales, but useful whenever cash physically changes hands)
+                    let changeRow = null;
+                    if (isSale) {
+                        form.appendChild(el("label", { class: "flabel" }, "Amount Tendered (optional)"));
+                        const tenderedInp = el("input", {
+                            id: "f-tendered",
+                            type: "number",
+                            class: "finput",
+                            placeholder: "0.00",
+                            min: "0",
+                            step: "0.01",
+                            inputmode: "decimal",
+                            oninput: updateChangeDue,
+                        });
+                        form.appendChild(tenderedInp);
+
+                        changeRow = el("div", { class: "totalsrow change", id: "changeRow" }, [el("span", {}, "Change Due"), el("span", { class: "val", id: "changeDisplay" }, fmtPeso(0))]);
+                        form.appendChild(changeRow);
+                    }
+
+                    function updateChangeDue() {
+                        if (!isSale) return;
+                        const total = lineSubtotal();
+                        const tendered = parseFloat(qs("#f-tendered") ? qs("#f-tendered").value : "") || 0;
+                        const changeDisplay = qs("#changeDisplay");
+                        const row = qs("#changeRow");
+                        if (!changeDisplay || !row) return;
+                        const diff = tendered - total;
+                        if (!tendered) {
+                            changeDisplay.textContent = fmtPeso(0);
+                            row.classList.remove("short");
+                        } else if (diff < 0) {
+                            changeDisplay.textContent = "Short " + fmtPeso(Math.abs(diff));
+                            row.classList.add("short");
+                        } else {
+                            changeDisplay.textContent = fmtPeso(diff);
+                            row.classList.remove("short");
+                        }
+                    }
+
+                    form.appendChild(el("label", { class: "flabel" }, "Date & Time"));
+                    form.appendChild(el("input", { id: "f-date", type: "datetime-local", class: "finput", value: toLocalInputValue(new Date()) }));
+
+                    form.appendChild(el("label", { class: "flabel" }, "Note (optional)"));
+                    form.appendChild(el("input", { id: "f-note", type: "text", class: "finput", placeholder: "Optional note..." }));
+
+                    const saveLabel = isSale ? "Save Sale" : "Save Expense";
+                    const saveBtn = el("button", { type: "submit", class: "bigbtn " + App.addType }, saveLabel);
+                    form.appendChild(saveBtn);
+
+                    form.addEventListener("submit", async (e) => {
+                        e.preventDefault();
+
+                        // If the person filled out the line-entry fields but forgot to tap "Add Item",
+                        // fold that pending line in automatically so it isn't silently dropped.
+                        const pendingItem = qs("#ln-item").value.trim();
+                        const pendingAmount = parseFloat(qs("#ln-amount").value);
+                        if (pendingItem && pendingAmount > 0) {
+                            App.saleLines.push({
+                                category: App.selectedCategory,
+                                item: pendingItem,
+                                qty: parseFloat(qs("#ln-qty").value) || null,
+                                unitPrice: parseFloat(qs("#ln-price").value) || null,
+                                amount: pendingAmount,
+                            });
+                        }
+
+                        if (App.saleLines.length === 0) {
+                            toast("Add at least one item");
                             return;
                         }
 
-                        const item = qs("#f-item").value.trim();
-                        if (!item) {
-                            toast("Please enter an item or description");
-                            return;
-                        }
+                        const subtotal = lineSubtotal();
+                        const total = subtotal; // no taxes/discounts modeled — total mirrors subtotal
                         const payChip = qs(".chip.pay.active", payRow);
+                        const payment = payChip ? payChip.dataset.value : "cash";
+
+                        let tendered = null,
+                            change = null;
+                        if (isSale) {
+                            const tVal = parseFloat(qs("#f-tendered").value);
+                            if (tVal > 0) {
+                                tendered = tVal;
+                                change = +(tVal - total).toFixed(2);
+                            }
+                        }
+
+                        // Keep top-level item/category/qty/unitPrice populated from the first line for
+                        // backward compatibility with anything reading the flat fields directly.
+                        const first = App.saleLines[0];
                         const record = {
                             type: App.addType,
                             companyId: await getActiveCompanyId(),
-                            category: App.selectedCategory,
-                            item,
-                            qty: App.addType === "sale" ? parseFloat(qs("#f-qty").value) || 1 : null,
-                            unitPrice: App.addType === "sale" ? parseFloat(qs("#f-price").value) || null : null,
-                            amount,
-                            payment: payChip ? payChip.dataset.value : "cash",
+                            category: App.saleLines.length === 1 ? first.category : "Multiple",
+                            item: App.saleLines.length === 1 ? first.item : App.saleLines.map((l) => l.item).join(", "),
+                            qty: App.saleLines.length === 1 ? first.qty : null,
+                            unitPrice: App.saleLines.length === 1 ? first.unitPrice : null,
+                            items: App.saleLines.slice(),
+                            subtotal,
+                            amount: total,
+                            payment,
+                            tendered,
+                            change,
                             fromAccount: null,
                             toAccount: null,
                             date: new Date(qs("#f-date").value || Date.now()).toISOString(),
@@ -1745,7 +2018,8 @@
                             createdAt: new Date().toISOString(),
                         };
                         await dbAdd("transactions", record);
-                        toast((App.addType === "sale" ? "Sale" : "Expense") + " saved");
+                        App.saleLines = [];
+                        toast((isSale ? "Sale" : "Expense") + " saved");
                         render();
                     });
 
@@ -1753,17 +2027,17 @@
                     return wrap;
                 }
 
-                function stepQty(delta) {
-                    const inp = qs("#f-qty");
+                function stepLineQty(delta) {
+                    const inp = qs("#ln-qty");
                     const v = Math.max(0, (parseFloat(inp.value) || 0) + delta);
                     inp.value = v;
-                    recalcAmount();
+                    recalcLineAmount();
                 }
-                function recalcAmount() {
-                    const qty = parseFloat(qs("#f-qty") ? qs("#f-qty").value : "") || 0;
-                    const price = parseFloat(qs("#f-price") ? qs("#f-price").value : "") || 0;
+                function recalcLineAmount() {
+                    const qty = parseFloat(qs("#ln-qty") ? qs("#ln-qty").value : "") || 0;
+                    const price = parseFloat(qs("#ln-price") ? qs("#ln-price").value : "") || 0;
                     if (qty && price) {
-                        qs("#f-amount").value = (qty * price).toFixed(2);
+                        qs("#ln-amount").value = (qty * price).toFixed(2);
                     }
                 }
 
@@ -1874,19 +2148,52 @@
                     const t = await dbGet("transactions", id);
                     if (!t) return;
                     const isTransfer = t.type === "transfer";
+                    const lines = txLines(t);
                     const overlay = el("div", { class: "overlay" });
                     const modal = el("div", { class: "modal" });
 
                     const titleMap = { sale: "Edit Sale", expense: "Edit Expense", transfer: "Edit Transfer" };
                     modal.appendChild(el("div", { class: "modal-title" }, titleMap[t.type] || "Edit Transaction"));
 
-                    modal.appendChild(el("label", { class: "flabel" }, isTransfer ? "Description" : t.type === "sale" ? "Item / Service" : "Description"));
-                    const itemInp = el("input", { type: "text", class: "finput", value: t.item });
-                    modal.appendChild(itemInp);
+                    // Show the line-item breakdown (read-only here — remove/re-add items via the Add page for now)
+                    if (!isTransfer && lines.length) {
+                        modal.appendChild(el("label", { class: "flabel" }, `Items (${lines.length})`));
+                        const list = el("div", { class: "linelist" });
+                        lines.forEach((ln) => {
+                            const sub = `${ln.category}${ln.qty ? " · qty " + ln.qty : ""}`;
+                            list.appendChild(
+                                el("div", { class: "linerow" }, [
+                                    el("div", { class: "linerow-main" }, [el("div", { class: "linerow-title" }, ln.item), el("div", { class: "linerow-sub" }, sub)]),
+                                    el("div", { class: "linerow-amt" }, fmtPeso(ln.amount)),
+                                ]),
+                            );
+                        });
+                        modal.appendChild(list);
+                        if (lines.length > 1) {
+                            modal.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Subtotal"), el("span", { class: "val" }, fmtPeso(t.subtotal != null ? t.subtotal : t.amount))]));
+                        }
+                    } else if (!isTransfer) {
+                        modal.appendChild(el("label", { class: "flabel" }, t.type === "sale" ? "Item / Service" : "Description"));
+                        const itemInp0 = el("input", { type: "text", class: "finput", value: t.item });
+                        modal.appendChild(itemInp0);
+                    }
 
-                    modal.appendChild(el("label", { class: "flabel" }, "Amount"));
+                    modal.appendChild(el("label", { class: "flabel" }, isTransfer ? "Description" : "Total Amount"));
                     const amtInp = el("input", { type: "number", class: "finput", value: t.amount, min: "0", step: "0.01" });
-                    modal.appendChild(amtInp);
+                    if (isTransfer) {
+                        // For transfers, this slot is actually the description field (kept from original layout below); amount handled separately.
+                    }
+
+                    let itemInp = null;
+                    if (isTransfer) {
+                        modal.appendChild(el("label", { class: "flabel" }, "Description"));
+                        itemInp = el("input", { type: "text", class: "finput", value: t.item });
+                        modal.appendChild(itemInp);
+                        modal.appendChild(el("label", { class: "flabel" }, "Amount"));
+                        modal.appendChild(amtInp);
+                    } else {
+                        modal.appendChild(amtInp);
+                    }
 
                     let payRow = null,
                         fromRow = null,
@@ -1917,6 +2224,20 @@
                             payRow.appendChild(chip);
                         });
                         modal.appendChild(payRow);
+                    }
+
+                    let tenderedInp = null;
+                    if (t.type === "sale") {
+                        modal.appendChild(el("label", { class: "flabel" }, "Amount Tendered (optional)"));
+                        tenderedInp = el("input", { type: "number", class: "finput", value: t.tendered != null ? t.tendered : "", min: "0", step: "0.01" });
+                        modal.appendChild(tenderedInp);
+                        const changeNow = t.tendered != null ? +(t.tendered - t.amount).toFixed(2) : null;
+                        modal.appendChild(
+                            el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [
+                                el("span", {}, "Change Due"),
+                                el("span", { class: "val" }, changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow)),
+                            ]),
+                        );
                     }
 
                     modal.appendChild(el("label", { class: "flabel" }, "Date & Time"));
@@ -1957,10 +2278,6 @@
                             toast("Choose two different accounts");
                             return;
                         }
-                        if (!isTransfer && !itemInp.value.trim()) {
-                            toast("Please check the description");
-                            return;
-                        }
                         let updated;
                         if (isTransfer) {
                             updated = Object.assign({}, t, {
@@ -1973,13 +2290,25 @@
                             });
                         } else {
                             const payChip = qs(".chip.pay.active", payRow);
+                            const tVal = tenderedInp ? parseFloat(tenderedInp.value) : NaN;
+                            const tendered = tVal > 0 ? tVal : null;
+                            const change = tendered != null ? +(tendered - amount).toFixed(2) : null;
+                            const scaleFactor = amount / (Number(t.amount) || amount || 1);
+                            const newLines = lines.length ? lines.map((ln) => Object.assign({}, ln, { amount: +(Number(ln.amount) * scaleFactor).toFixed(2) })) : lines;
                             updated = Object.assign({}, t, {
-                                item: itemInp.value.trim(),
                                 amount,
+                                subtotal: amount,
+                                items: newLines,
                                 payment: payChip ? payChip.dataset.value : t.payment,
+                                tendered,
+                                change,
                                 date: new Date(dateInp.value).toISOString(),
                                 note: noteInp.value.trim(),
                             });
+                            if (lines.length <= 1 && itemInp) {
+                                updated.item = itemInp.value.trim();
+                                if (updated.items && updated.items[0]) updated.items[0] = Object.assign({}, updated.items[0], { item: updated.item, amount });
+                            }
                         }
                         await dbPut("transactions", updated);
                         overlay.remove();
@@ -2054,10 +2383,12 @@
                     }
                     wrap.appendChild(transferSection);
 
-                    // category breakdown (sales)
+                    // category breakdown (sales) — spread across each transaction's line items
                     const catTotals = {};
                     txs.filter((t) => t.type === "sale").forEach((t) => {
-                        catTotals[t.category] = (catTotals[t.category] || 0) + t.amount;
+                        txLines(t).forEach((ln) => {
+                            catTotals[ln.category] = (catTotals[ln.category] || 0) + (Number(ln.amount) || 0);
+                        });
                     });
                     const catEntries = Object.entries(catTotals).sort((a, b) => b[1] - a[1]);
                     const catSection = el("div", { class: "section" }, [el("div", { class: "section-title" }, "SALES BY CATEGORY")]);
@@ -2095,10 +2426,12 @@
                     });
                     wrap.appendChild(paySection);
 
-                    // top items
+                    // top items — spread across each transaction's line items
                     const itemTotals = {};
                     txs.filter((t) => t.type === "sale").forEach((t) => {
-                        itemTotals[t.item] = (itemTotals[t.item] || 0) + t.amount;
+                        txLines(t).forEach((ln) => {
+                            itemTotals[ln.item] = (itemTotals[ln.item] || 0) + (Number(ln.amount) || 0);
+                        });
                     });
                     const topItems = Object.entries(itemTotals)
                         .sort((a, b) => b[1] - a[1])
@@ -2479,7 +2812,10 @@
                     await seedIfEmpty();
                     qsa(".navbtn").forEach((b) =>
                         b.addEventListener("click", (e) => {
-                            if (b.dataset.route === "add") App.selectedCategory = null;
+                            if (b.dataset.route === "add") {
+                                App.selectedCategory = null;
+                                App.saleLines = [];
+                            }
                         }),
                     );
                     if (!location.hash) {
