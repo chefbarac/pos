@@ -834,7 +834,7 @@
             .chart-legend {
                 display: flex;
                 flex-wrap: wrap;
-                gap: 14px;
+                gap: 8px 14px;
                 margin-bottom: 10px;
             }
             .legend-item {
@@ -844,6 +844,18 @@
                 font-size: 12px;
                 color: var(--ink-soft);
                 font-weight: 600;
+                background: none;
+                border: none;
+                padding: 2px 0;
+                font-family: var(--sans);
+                cursor: pointer;
+                transition: opacity 0.15s ease;
+            }
+            .legend-item.hidden {
+                opacity: 0.38;
+            }
+            .legend-item.hidden .legend-val {
+                text-decoration: line-through;
             }
             .legend-dot {
                 width: 9px;
@@ -856,6 +868,18 @@
                 color: var(--ink);
                 font-weight: 700;
             }
+            .chart-warn {
+                display: flex;
+                align-items: flex-start;
+                gap: 6px;
+                font-size: 11.5px;
+                line-height: 1.45;
+                color: var(--rust);
+                background: var(--rust-soft);
+                border-radius: 8px;
+                padding: 7px 10px;
+                margin-bottom: 10px;
+            }
             .charthost {
                 margin: 2px -4px 0;
             }
@@ -864,6 +888,42 @@
                 height: 150px;
                 display: block;
                 overflow: visible;
+                touch-action: pan-y;
+                cursor: crosshair;
+            }
+            .chart-readout {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: baseline;
+                gap: 6px 14px;
+                margin-top: 8px;
+                padding-top: 8px;
+                border-top: 1px dotted var(--border);
+                min-height: 18px;
+            }
+            .ro-label {
+                font-size: 11px;
+                font-weight: 700;
+                color: var(--ink-soft);
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            .ro-item {
+                display: flex;
+                align-items: center;
+                gap: 5px;
+                font-size: 12.5px;
+            }
+            .ro-dot {
+                width: 7px;
+                height: 7px;
+                border-radius: 50%;
+                flex-shrink: 0;
+            }
+            .ro-val {
+                font-family: var(--mono);
+                font-weight: 700;
+                color: var(--ink);
             }
 
             /* ---------- Modal ---------- */
@@ -1442,6 +1502,10 @@
                     reportRange: "today",
                     reportCustom: { from: null, to: null },
                     trendRange: "30d", // '7d' | '30d' | '90d' | 'all' — shared by both trend charts on Reports
+                    // Series a person has tapped off in each chart's legend (e.g. hiding Transfers because
+                    // a big owner transfer dwarfs day-to-day sales/expenses on the shared scale). Net is off
+                    // by default on the flow chart so the chart opens on gross activity, not profit.
+                    trendHidden: { balance: [], flow: ["net"] },
                     editingId: null,
                 };
 
@@ -2502,15 +2566,17 @@
                             }
                             i++;
                         }
-                        out.push({ label: b.label, cash, gcash, bank, sales, expenses, transfers });
+                        out.push({ label: b.label, cash, gcash, bank, sales, expenses, transfers, net: sales - expenses });
                     }
                     return out;
                 }
 
-                /* Renders a multi-series line chart as an inline SVG. `series` is
-                   [{ key, color, label }, ...]; each point in `points` must have a numeric value
-                   for every series key. */
-                function buildTrendChart(points, series) {
+                /* Renders a multi-series line chart as an inline SVG with hover/tap support. `series` is
+                   the already-filtered list of VISIBLE series — [{ key, color, label }, ...]. Each point
+                   in `points` must have a numeric value for every series key. `opts.onHover(idx)` fires
+                   on move/tap over a point; `opts.onLeave()` fires when the pointer leaves the chart. */
+                function buildTrendChart(points, series, opts) {
+                    opts = opts || {};
                     const W = 600,
                         H = 170,
                         padL = 4,
@@ -2566,22 +2632,168 @@
                         svg.appendChild(elSVG("text", { x: xAt(idx), y: H - 4, "text-anchor": anchor, style: "font-size:10px;fill:var(--ink-soft);font-family:var(--sans)" }, points[idx].label));
                     });
 
+                    // Hover/tap layer: a vertical guide line plus a highlight dot per series, both hidden
+                    // until the person moves a pointer (mouse or touch) over the plot area.
+                    const guideLine = elSVG("line", {
+                        x1: xAt(0),
+                        x2: xAt(0),
+                        y1: padT,
+                        y2: padT + innerH,
+                        style: "stroke:var(--ink-soft);stroke-width:1;stroke-dasharray:2,2;opacity:0;pointer-events:none",
+                    });
+                    svg.appendChild(guideLine);
+                    const highlightDots = series.map((s) => elSVG("circle", { r: 4, style: `fill:${s.color};stroke:var(--paper-card);stroke-width:1.5;opacity:0;pointer-events:none` }));
+                    highlightDots.forEach((d) => svg.appendChild(d));
+
+                    function setHighlight(idx) {
+                        if (idx == null) {
+                            guideLine.setAttribute("style", guideLine.getAttribute("style").replace("opacity:1", "opacity:0"));
+                            guideLine.style.opacity = 0;
+                            highlightDots.forEach((d) => (d.style.opacity = 0));
+                            return;
+                        }
+                        const p = points[idx];
+                        const x = xAt(idx);
+                        guideLine.setAttribute("x1", x);
+                        guideLine.setAttribute("x2", x);
+                        guideLine.style.opacity = 0.6;
+                        series.forEach((s, i) => {
+                            const d = highlightDots[i];
+                            d.setAttribute("cx", x);
+                            d.setAttribute("cy", yAt(p[s.key]));
+                            d.style.opacity = 1;
+                        });
+                    }
+
+                    if (n > 0) {
+                        const hit = elSVG("rect", {
+                            x: padL,
+                            y: 0,
+                            width: innerW,
+                            height: H,
+                            style: "fill:transparent;pointer-events:all",
+                        });
+                        svg.insertBefore(hit, guideLine);
+                        const indexFromEvent = (e) => {
+                            const rect = svg.getBoundingClientRect();
+                            if (!rect.width) return 0;
+                            const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+                            return n <= 1 ? 0 : Math.round(frac * (n - 1));
+                        };
+                        hit.addEventListener("pointerdown", (e) => {
+                            const idx = indexFromEvent(e);
+                            setHighlight(idx);
+                            opts.onHover && opts.onHover(idx);
+                        });
+                        hit.addEventListener("pointermove", (e) => {
+                            if (e.buttons === 0 && e.pointerType === "mouse") {
+                                // plain hover (no button) — still track for mouse
+                            }
+                            const idx = indexFromEvent(e);
+                            setHighlight(idx);
+                            opts.onHover && opts.onHover(idx);
+                        });
+                        hit.addEventListener("pointerleave", () => {
+                            setHighlight(null);
+                            opts.onLeave && opts.onLeave();
+                        });
+                    }
+
                     return svg;
                 }
 
-                function buildChartLegend(points, series) {
+                /* Legend that doubles as a series toggle: tapping an item hides/shows that series and
+                   triggers a re-render (via onToggle), letting a person exclude a data group — e.g. large
+                   owner Transfers — that's stretching the scale and flattening everything else. */
+                function buildChartLegend(points, allSeries, hiddenKeys, onToggle) {
                     const last = points[points.length - 1] || {};
                     return el(
                         "div",
                         { class: "chart-legend" },
-                        series.map((s) =>
-                            el("div", { class: "legend-item" }, [
+                        allSeries.map((s) => {
+                            const isHidden = hiddenKeys.includes(s.key);
+                            const item = el("button", { type: "button", class: "legend-item" + (isHidden ? " hidden" : "") }, [
                                 el("span", { class: "legend-dot", style: `background:${s.color}` }),
                                 el("span", {}, s.label),
                                 el("span", { class: "legend-val" }, fmtPeso(last[s.key] || 0)),
-                            ]),
-                        ),
+                            ]);
+                            item.addEventListener("click", () => onToggle(s.key));
+                            return item;
+                        }),
                     );
+                }
+
+                /* Readout strip under a chart: shows the exact figures for the hovered/tapped point (or
+                   the latest point when nothing is hovered), for only the currently-visible series. */
+                function buildChartReadout(point, series) {
+                    const roEl = el("div", { class: "chart-readout" });
+                    function set(p) {
+                        roEl.innerHTML = "";
+                        roEl.appendChild(el("span", { class: "ro-label" }, p.label));
+                        series.forEach((s) => {
+                            roEl.appendChild(
+                                el("span", { class: "ro-item" }, [el("span", { class: "ro-dot", style: `background:${s.color}` }), el("span", { class: "ro-val" }, fmtPeso(p[s.key] || 0))]),
+                            );
+                        });
+                    }
+                    set(point);
+                    return { el: roEl, set };
+                }
+
+                /* Flags any visible balance series that dipped below zero within the shown range — a
+                   quick warning that a business would have been short on that account at some point. */
+                function buildNegativeBalanceWarning(points, visibleSeries) {
+                    const flags = [];
+                    visibleSeries.forEach((s) => {
+                        let lowIdx = -1,
+                            lowVal = 0;
+                        points.forEach((p, idx) => {
+                            if (p[s.key] < lowVal) {
+                                lowVal = p[s.key];
+                                lowIdx = idx;
+                            }
+                        });
+                        if (lowIdx >= 0) flags.push(`${s.label} went negative (as low as ${fmtPeso(lowVal)} around ${points[lowIdx].label})`);
+                    });
+                    if (!flags.length) return null;
+                    return el("div", { class: "chart-warn" }, [el("span", {}, "\u26a0\ufe0f"), el("span", {}, flags.join(" · "))]);
+                }
+
+                function toggleTrendSeries(chartKey, seriesKey) {
+                    const list = App.trendHidden[chartKey];
+                    const i = list.indexOf(seriesKey);
+                    if (i === -1) list.push(seriesKey);
+                    else list.splice(i, 1);
+                    render();
+                }
+
+                function buildTrendChartCard(title, points, allSeries, chartKey) {
+                    const hidden = App.trendHidden[chartKey];
+                    const visible = allSeries.filter((s) => !hidden.includes(s.key));
+
+                    const card = el("div", { class: "card chartcard" });
+                    card.appendChild(el("div", { class: "chartcard-title" }, title));
+                    card.appendChild(buildChartLegend(points, allSeries, hidden, (key) => toggleTrendSeries(chartKey, key)));
+
+                    if (chartKey === "balance") {
+                        const warn = buildNegativeBalanceWarning(points, visible);
+                        if (warn) card.appendChild(warn);
+                    }
+
+                    if (!visible.length) {
+                        card.appendChild(el("div", { class: "empty small" }, "Tap a series above to show it on the chart."));
+                        return card;
+                    }
+
+                    const last = points[points.length - 1] || {};
+                    const readout = buildChartReadout(last, visible);
+                    const svg = buildTrendChart(points, visible, {
+                        onHover: (idx) => readout.set(points[idx]),
+                        onLeave: () => readout.set(last),
+                    });
+                    card.appendChild(el("div", { class: "charthost" }, svg));
+                    card.appendChild(readout.el);
+                    return card;
                 }
 
                 async function renderTrendSection() {
@@ -2598,6 +2810,7 @@
                         rangeRow.appendChild(chip);
                     });
                     section.appendChild(rangeRow);
+                    section.appendChild(el("div", { class: "help-text" }, "Tap a legend item to hide it from the chart. Hover or tap a point to see exact figures."));
 
                     const points = await computeTrendSeries(App.trendRange);
 
@@ -2606,22 +2819,16 @@
                         { key: "gcash", color: "var(--gold)", label: "GCash" },
                         { key: "bank", color: "var(--ink)", label: "Bank" },
                     ];
-                    const balCard = el("div", { class: "card chartcard" });
-                    balCard.appendChild(el("div", { class: "chartcard-title" }, "Account Balances"));
-                    balCard.appendChild(buildChartLegend(points, balSeries));
-                    balCard.appendChild(el("div", { class: "charthost" }, buildTrendChart(points, balSeries)));
-                    section.appendChild(balCard);
+                    section.appendChild(buildTrendChartCard("Account Balances", points, balSeries, "balance"));
 
                     const flowSeries = [
                         { key: "sales", color: "var(--green)", label: "Sales" },
                         { key: "expenses", color: "var(--rust)", label: "Expenses" },
                         { key: "transfers", color: "var(--gold)", label: "Transfers" },
+                        { key: "net", color: "var(--ink)", label: "Net" },
                     ];
-                    const flowCard = el("div", { class: "card chartcard" });
-                    flowCard.appendChild(el("div", { class: "chartcard-title" }, App.trendRange === "all" ? "Sales, Expenses & Transfers (per month)" : "Sales, Expenses & Transfers (per day)"));
-                    flowCard.appendChild(buildChartLegend(points, flowSeries));
-                    flowCard.appendChild(el("div", { class: "charthost" }, buildTrendChart(points, flowSeries)));
-                    section.appendChild(flowCard);
+                    const flowTitle = App.trendRange === "all" ? "Sales, Expenses & Transfers (per month)" : "Sales, Expenses & Transfers (per day)";
+                    section.appendChild(buildTrendChartCard(flowTitle, points, flowSeries, "flow"));
 
                     return section;
                 }
