@@ -821,6 +821,51 @@
                 color: var(--ink-soft);
             }
 
+            /* ---------- Trend charts (Reports) ---------- */
+            .chartcard {
+                margin-bottom: 8px;
+            }
+            .chartcard-title {
+                font-size: 12.5px;
+                font-weight: 700;
+                color: var(--ink);
+                margin-bottom: 10px;
+            }
+            .chart-legend {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 14px;
+                margin-bottom: 10px;
+            }
+            .legend-item {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                font-size: 12px;
+                color: var(--ink-soft);
+                font-weight: 600;
+            }
+            .legend-dot {
+                width: 9px;
+                height: 9px;
+                border-radius: 50%;
+                flex-shrink: 0;
+            }
+            .legend-val {
+                font-family: var(--mono);
+                color: var(--ink);
+                font-weight: 700;
+            }
+            .charthost {
+                margin: 2px -4px 0;
+            }
+            .trendchart {
+                width: 100%;
+                height: 150px;
+                display: block;
+                overflow: visible;
+            }
+
             /* ---------- Modal ---------- */
             .overlay {
                 position: fixed;
@@ -1353,6 +1398,21 @@
                         }
                     return node;
                 }
+                const SVG_NS = "http://www.w3.org/2000/svg";
+                function elSVG(tag, attrs, children) {
+                    const node = document.createElementNS(SVG_NS, tag);
+                    if (attrs)
+                        for (const k in attrs) {
+                            if (k.startsWith("on") && typeof attrs[k] === "function") node.addEventListener(k.slice(2), attrs[k]);
+                            else node.setAttribute(k, attrs[k]);
+                        }
+                    if (children)
+                        for (const c of [].concat(children)) {
+                            if (c == null) continue;
+                            node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+                        }
+                    return node;
+                }
                 function qs(sel, root) {
                     return (root || document).querySelector(sel);
                 }
@@ -1381,6 +1441,7 @@
                     historyFilters: { range: "today", type: "all", category: "all", search: "", from: null, to: null },
                     reportRange: "today",
                     reportCustom: { from: null, to: null },
+                    trendRange: "30d", // '7d' | '30d' | '90d' | 'all' — shared by both trend charts on Reports
                     editingId: null,
                 };
 
@@ -2364,6 +2425,207 @@
                     document.body.appendChild(overlay);
                 }
 
+                /* ---------- TREND CHARTS (Reports) ---------- */
+                const TREND_RANGES = [
+                    ["7d", "7D"],
+                    ["30d", "30D"],
+                    ["90d", "90D"],
+                    ["all", "Monthly"],
+                ];
+
+                /* Build the bucket boundaries for a trend range: daily buckets for 7d/30d/90d,
+                   or monthly buckets (capped at the most recent 12) for 'all'. */
+                function trendBucketDefs(range, earliestTxDate) {
+                    const now = new Date();
+                    if (range === "all") {
+                        const first = earliestTxDate ? new Date(earliestTxDate) : now;
+                        let cursor = new Date(first.getFullYear(), first.getMonth(), 1);
+                        const endCursor = new Date(now.getFullYear(), now.getMonth(), 1);
+                        const buckets = [];
+                        while (cursor <= endCursor) {
+                            const start = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+                            const end = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0, 23, 59, 59, 999);
+                            buckets.push({ label: start.toLocaleDateString("en-PH", { month: "short", year: "2-digit" }), start, end });
+                            cursor.setMonth(cursor.getMonth() + 1);
+                        }
+                        return buckets.slice(-12);
+                    }
+                    const days = range === "7d" ? 7 : range === "90d" ? 90 : 30;
+                    const buckets = [];
+                    for (let i = days - 1; i >= 0; i--) {
+                        const d = new Date(now);
+                        d.setDate(d.getDate() - i);
+                        buckets.push({ label: d.toLocaleDateString("en-PH", { month: "short", day: "numeric" }), start: startOfDay(d), end: endOfDay(d) });
+                    }
+                    return buckets;
+                }
+
+                /* Walk all transactions once (oldest→newest) and, for each bucket, record the running
+                   account balances as of the bucket's end plus the sales/expenses/transfers that landed
+                   inside that bucket. Balances accumulate across the *entire* history (not just the
+                   visible window) so the chart always reflects the true running balance. */
+                async function computeTrendSeries(range) {
+                    const txs = (await allTx()).slice().sort((a, b) => new Date(a.date) - new Date(b.date));
+                    const company = await getActiveCompany();
+                    let cash = company ? Number(company.startingCash) || 0 : 0;
+                    let gcash = company ? Number(company.startingGcash) || 0 : 0;
+                    let bank = company ? Number(company.startingBank) || 0 : 0;
+
+                    const buckets = trendBucketDefs(range, txs.length ? txs[0].date : null);
+                    let i = 0;
+                    const out = [];
+                    for (const b of buckets) {
+                        let sales = 0,
+                            expenses = 0,
+                            transfers = 0;
+                        while (i < txs.length && new Date(txs[i].date) <= b.end) {
+                            const t = txs[i];
+                            const amt = Number(t.amount) || 0;
+                            if (t.type === "sale") {
+                                sales += amt;
+                                if (t.payment === "cash") cash += amt;
+                                else if (t.payment === "gcash") gcash += amt;
+                                else if (t.payment === "bank") bank += amt;
+                            } else if (t.type === "expense") {
+                                expenses += amt;
+                                if (t.payment === "cash") cash -= amt;
+                                else if (t.payment === "gcash") gcash -= amt;
+                                else if (t.payment === "bank") bank -= amt;
+                            } else if (t.type === "transfer") {
+                                transfers += amt;
+                                if (t.fromAccount === "cash") cash -= amt;
+                                else if (t.fromAccount === "gcash") gcash -= amt;
+                                else if (t.fromAccount === "bank") bank -= amt;
+                                if (t.toAccount === "cash") cash += amt;
+                                else if (t.toAccount === "gcash") gcash += amt;
+                                else if (t.toAccount === "bank") bank += amt;
+                            }
+                            i++;
+                        }
+                        out.push({ label: b.label, cash, gcash, bank, sales, expenses, transfers });
+                    }
+                    return out;
+                }
+
+                /* Renders a multi-series line chart as an inline SVG. `series` is
+                   [{ key, color, label }, ...]; each point in `points` must have a numeric value
+                   for every series key. */
+                function buildTrendChart(points, series) {
+                    const W = 600,
+                        H = 170,
+                        padL = 4,
+                        padR = 4,
+                        padT = 10,
+                        padB = 22;
+                    const innerW = W - padL - padR,
+                        innerH = H - padT - padB;
+                    const n = points.length;
+                    const vals = [];
+                    points.forEach((p) => series.forEach((s) => vals.push(p[s.key])));
+                    let min = Math.min(0, ...vals);
+                    let max = Math.max(0, ...vals);
+                    if (min === max) max = min + 1;
+                    const pad = (max - min) * 0.08;
+                    min -= pad;
+                    max += pad;
+                    const range = max - min || 1;
+
+                    function xAt(idx) {
+                        return padL + (n <= 1 ? innerW / 2 : (idx / (n - 1)) * innerW);
+                    }
+                    function yAt(v) {
+                        return padT + innerH - ((v - min) / range) * innerH;
+                    }
+
+                    const svg = elSVG("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", class: "trendchart" });
+
+                    // zero baseline (only drawn separately from the axis line when values dip negative)
+                    if (min < 0 && max > 0) {
+                        const y0 = yAt(0);
+                        svg.appendChild(elSVG("line", { x1: padL, y1: y0, x2: W - padR, y2: y0, style: "stroke:var(--border);stroke-width:1;stroke-dasharray:3,3" }));
+                    }
+                    svg.appendChild(elSVG("line", { x1: padL, y1: padT + innerH, x2: W - padR, y2: padT + innerH, style: "stroke:var(--border);stroke-width:1" }));
+
+                    series.forEach((s) => {
+                        const d = points.map((p, idx) => `${idx === 0 ? "M" : "L"}${xAt(idx).toFixed(1)},${yAt(p[s.key]).toFixed(1)}`).join(" ");
+                        svg.appendChild(elSVG("path", { d, style: `fill:none;stroke:${s.color};stroke-width:2.5`, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+                        if (n <= 14) {
+                            points.forEach((p, idx) => {
+                                svg.appendChild(elSVG("circle", { cx: xAt(idx), cy: yAt(p[s.key]), r: 2.5, style: `fill:${s.color}` }));
+                            });
+                        } else {
+                            const last = points[n - 1];
+                            svg.appendChild(elSVG("circle", { cx: xAt(n - 1), cy: yAt(last[s.key]), r: 3, style: `fill:${s.color}` }));
+                        }
+                    });
+
+                    // x-axis labels: first, middle, last (avoids clutter on longer ranges)
+                    const idxs = n <= 1 ? [0] : n <= 5 ? points.map((_, idx) => idx) : [0, Math.round((n - 1) / 2), n - 1];
+                    idxs.forEach((idx) => {
+                        const anchor = idx === 0 ? "start" : idx === n - 1 ? "end" : "middle";
+                        svg.appendChild(elSVG("text", { x: xAt(idx), y: H - 4, "text-anchor": anchor, style: "font-size:10px;fill:var(--ink-soft);font-family:var(--sans)" }, points[idx].label));
+                    });
+
+                    return svg;
+                }
+
+                function buildChartLegend(points, series) {
+                    const last = points[points.length - 1] || {};
+                    return el(
+                        "div",
+                        { class: "chart-legend" },
+                        series.map((s) =>
+                            el("div", { class: "legend-item" }, [
+                                el("span", { class: "legend-dot", style: `background:${s.color}` }),
+                                el("span", {}, s.label),
+                                el("span", { class: "legend-val" }, fmtPeso(last[s.key] || 0)),
+                            ]),
+                        ),
+                    );
+                }
+
+                async function renderTrendSection() {
+                    const section = el("div", { class: "section" });
+                    section.appendChild(el("div", { class: "section-title" }, "TRENDS"));
+
+                    const rangeRow = el("div", { class: "chiprow" });
+                    TREND_RANGES.forEach(([val, label]) => {
+                        const chip = el("button", { type: "button", class: "chip" + (App.trendRange === val ? " active" : "") }, label);
+                        chip.addEventListener("click", () => {
+                            App.trendRange = val;
+                            render();
+                        });
+                        rangeRow.appendChild(chip);
+                    });
+                    section.appendChild(rangeRow);
+
+                    const points = await computeTrendSeries(App.trendRange);
+
+                    const balSeries = [
+                        { key: "cash", color: "var(--green)", label: "Cash" },
+                        { key: "gcash", color: "var(--gold)", label: "GCash" },
+                        { key: "bank", color: "var(--ink)", label: "Bank" },
+                    ];
+                    const balCard = el("div", { class: "card chartcard" });
+                    balCard.appendChild(el("div", { class: "chartcard-title" }, "Account Balances"));
+                    balCard.appendChild(buildChartLegend(points, balSeries));
+                    balCard.appendChild(el("div", { class: "charthost" }, buildTrendChart(points, balSeries)));
+                    section.appendChild(balCard);
+
+                    const flowSeries = [
+                        { key: "sales", color: "var(--green)", label: "Sales" },
+                        { key: "expenses", color: "var(--rust)", label: "Expenses" },
+                        { key: "transfers", color: "var(--gold)", label: "Transfers" },
+                    ];
+                    const flowCard = el("div", { class: "card chartcard" });
+                    flowCard.appendChild(el("div", { class: "chartcard-title" }, App.trendRange === "all" ? "Sales, Expenses & Transfers (per month)" : "Sales, Expenses & Transfers (per day)"));
+                    flowCard.appendChild(buildChartLegend(points, flowSeries));
+                    flowCard.appendChild(el("div", { class: "charthost" }, buildTrendChart(points, flowSeries)));
+                    section.appendChild(flowCard);
+
+                    return section;
+                }
+
                 /* ---------- REPORTS ---------- */
                 async function renderReports() {
                     const wrap = el("div", { class: "page" });
@@ -2416,6 +2678,9 @@
                         el("div", { class: "summary-grid" }, [summaryCard("Cash", bal.cash, "sales"), summaryCard("GCash", bal.gcash, "sales"), summaryCard("Bank", bal.bank, "sales")]),
                     );
                     wrap.appendChild(balSection);
+
+                    // trend charts — balances and sales/expenses/transfers over time
+                    wrap.appendChild(await renderTrendSection());
 
                     // fund transfers this period
                     const transfers = txs.filter((t) => t.type === "transfer").sort((a, b) => new Date(b.date) - new Date(a.date));
