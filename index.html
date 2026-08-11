@@ -644,6 +644,33 @@
                 font-size: 13px;
                 color: var(--ink-soft);
             }
+            .presetrow-reorder {
+                display: flex;
+                flex-direction: column;
+                gap: 2px;
+                flex-shrink: 0;
+            }
+            .reorder-btn {
+                width: 26px;
+                height: 20px;
+                border-radius: 6px;
+                border: 1px solid var(--border);
+                background: #fff;
+                color: var(--ink-soft);
+                font-size: 11px;
+                line-height: 1;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 0;
+            }
+            .reorder-btn:disabled {
+                opacity: 0.3;
+            }
+            .reorder-btn:not(:disabled):active {
+                background: var(--green-soft);
+                color: var(--ink);
+            }
 
             /* ---------- Line items (receipt builder) ---------- */
             .linelist {
@@ -1174,7 +1201,9 @@
                     return updated;
                 }
                 async function seedDefaultPresetsForCompany(companyId) {
-                    for (const p of DEFAULT_PRESET_SEED) await dbAdd("presets", Object.assign({ companyId }, p));
+                    for (let i = 0; i < DEFAULT_PRESET_SEED.length; i++) {
+                        await dbAdd("presets", Object.assign({ companyId, order: i }, DEFAULT_PRESET_SEED[i]));
+                    }
                 }
                 async function createCompany(name) {
                     const company = {
@@ -1386,6 +1415,21 @@
                     const cid = await getActiveCompanyId();
                     const all = await dbGetAll("presets");
                     return all.filter((p) => p.companyId === cid);
+                }
+
+                /* Sort presets for display. Presets carry an explicit `order` (position within their
+                   category) once the user has touched reordering or Settings has backfilled it; presets
+                   that predate the `order` field fall back to their original (insertion/id) sequence,
+                   keeping the sort stable via each preset's index in the input array. */
+                function sortPresets(list) {
+                    return list
+                        .map((p, i) => ({ p, i }))
+                        .sort((a, b) => {
+                            const oa = a.p.order != null ? a.p.order : a.i;
+                            const ob = b.p.order != null ? b.p.order : b.i;
+                            return oa - ob;
+                        })
+                        .map((x) => x.p);
                 }
 
                 async function computeAccountBalances(txsOverride) {
@@ -1790,7 +1834,7 @@
                     entry.appendChild(chipRow);
 
                     if (isSale) {
-                        const presets = presetsAll.filter((p) => p.type === "sale" && p.category === App.selectedCategory);
+                        const presets = sortPresets(presetsAll.filter((p) => p.type === "sale" && p.category === App.selectedCategory));
                         if (presets.length) {
                             entry.appendChild(el("label", { class: "flabel" }, "Quick items"));
                             const presetRow = el("div", { class: "chiprow" });
@@ -2684,12 +2728,46 @@
 
                     async function refresh() {
                         list.innerHTML = "";
-                        const presets = (await companyPresets()).filter((p) => p.category === catSelect.value);
+                        let presets = sortPresets((await companyPresets()).filter((p) => p.category === catSelect.value));
+
+                        // Backfill a stable `order` on presets that predate the reordering feature, so
+                        // dragging via the up/down buttons has real values to swap from the start.
+                        let needsBackfill = presets.some((p) => p.order == null);
+                        if (needsBackfill) {
+                            for (let i = 0; i < presets.length; i++) {
+                                if (presets[i].order !== i) {
+                                    presets[i] = Object.assign({}, presets[i], { order: i });
+                                    await dbPut("presets", presets[i]);
+                                }
+                            }
+                        }
+
                         if (presets.length === 0) {
                             list.appendChild(el("div", { class: "empty small" }, "No quick items yet for this category."));
                         }
-                        presets.forEach((p) => {
+                        presets.forEach((p, idx) => {
+                            const upBtn = el("button", { type: "button", class: "reorder-btn" }, "\u25b2");
+                            const downBtn = el("button", { type: "button", class: "reorder-btn" }, "\u25bc");
+                            if (idx === 0) upBtn.setAttribute("disabled", "disabled");
+                            if (idx === presets.length - 1) downBtn.setAttribute("disabled", "disabled");
+                            upBtn.addEventListener("click", async () => {
+                                if (idx === 0) return;
+                                const other = presets[idx - 1];
+                                const myOrder = p.order;
+                                await dbPut("presets", Object.assign({}, p, { order: other.order }));
+                                await dbPut("presets", Object.assign({}, other, { order: myOrder }));
+                                refresh();
+                            });
+                            downBtn.addEventListener("click", async () => {
+                                if (idx === presets.length - 1) return;
+                                const other = presets[idx + 1];
+                                const myOrder = p.order;
+                                await dbPut("presets", Object.assign({}, p, { order: other.order }));
+                                await dbPut("presets", Object.assign({}, other, { order: myOrder }));
+                                refresh();
+                            });
                             const row = el("div", { class: "presetrow" }, [
+                                el("div", { class: "presetrow-reorder" }, [upBtn, downBtn]),
                                 el("span", { class: "presetrow-name" }, p.name),
                                 el("span", { class: "presetrow-price" }, fmtPeso(p.price)),
                                 el("button", { type: "button", class: "chip-x" }, "×"),
@@ -2716,7 +2794,9 @@
                             return;
                         }
                         const cid = await getActiveCompanyId();
-                        await dbAdd("presets", { type: "sale", category: catSelect.value, name, price, companyId: cid });
+                        const existingInCat = (await companyPresets()).filter((p) => p.category === catSelect.value);
+                        const nextOrder = existingInCat.length ? Math.max(...existingInCat.map((p) => (p.order != null ? p.order : 0))) + 1 : 0;
+                        await dbAdd("presets", { type: "sale", category: catSelect.value, name, price, companyId: cid, order: nextOrder });
                         nameInp.value = "";
                         priceInp.value = "";
                         refresh();
