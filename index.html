@@ -495,6 +495,26 @@
                 border-color: var(--border);
                 font-weight: 600;
             }
+            .chip.preset.no-costing {
+                border-color: var(--gold);
+                box-shadow: inset 0 0 0 1px rgba(201, 154, 62, 0.35);
+            }
+            .badge-warn {
+                display: inline-block;
+                font-size: 9px;
+                font-weight: 700;
+                letter-spacing: 0.04em;
+                text-transform: uppercase;
+                color: #8a6a1a;
+                background: rgba(201, 154, 62, 0.2);
+                border-radius: 4px;
+                padding: 1px 5px;
+                margin-left: 5px;
+                vertical-align: middle;
+            }
+            .linerow-title .badge-warn {
+                font-size: 9px;
+            }
             .chip.removable {
                 display: inline-flex;
                 align-items: center;
@@ -1176,6 +1196,184 @@
             /* ============ Little Ledger POS — app logic ============ */
             (function () {
                 "use strict";
+
+                /* ---------- Costing inventory (cross-DB, same origin) ---------- */
+                const COSTING_DB_NAME = "documentingCostingDB";
+                const COSTING_DB_VERSION = 3; // must match Costing app
+
+                /** Cached set of Costing product names (lowercase). null = not loaded yet. */
+                let costingProductNames = null;
+                let costingNamesPromise = null;
+
+                async function loadCostingProductNames(force) {
+                    if (!force && costingProductNames) return costingProductNames;
+                    if (!force && costingNamesPromise) return costingNamesPromise;
+                    costingNamesPromise = (async () => {
+                        try {
+                            const cdb = await openCostingDB();
+                            if (!cdb.objectStoreNames.contains("products")) {
+                                costingProductNames = new Set();
+                                return costingProductNames;
+                            }
+                            const products = await costingReq(cdb.transaction("products", "readonly").objectStore("products").getAll());
+                            costingProductNames = new Set((products || []).map((p) => (p.name || "").toLowerCase().trim()).filter(Boolean));
+                            return costingProductNames;
+                        } catch (e) {
+                            console.warn("[inventory] could not load Costing product names", e);
+                            costingProductNames = costingProductNames || new Set();
+                            return costingProductNames;
+                        } finally {
+                            costingNamesPromise = null;
+                        }
+                    })();
+                    return costingNamesPromise;
+                }
+
+                function hasCostingProduct(name) {
+                    if (!costingProductNames) return true; // unknown yet — don't badge until loaded
+                    const key = (name || "").toLowerCase().trim();
+                    if (!key) return true;
+                    return costingProductNames.has(key);
+                }
+
+                function openCostingDB() {
+                    return new Promise((resolve, reject) => {
+                        const req = indexedDB.open(COSTING_DB_NAME, COSTING_DB_VERSION);
+                        // Do not create stores here — Costing owns schema. If DB missing, onupgradeneeded may fire with empty upgrade; still ok for readonly.
+                        req.onsuccess = () => resolve(req.result);
+                        req.onerror = () => reject(req.error);
+                        req.onupgradeneeded = () => {
+                            // If user opens POS before Costing ever ran, create minimal stores so writes work.
+                            const db = req.result;
+                            if (!db.objectStoreNames.contains("materials")) db.createObjectStore("materials", { keyPath: "id", autoIncrement: true });
+                            if (!db.objectStoreNames.contains("products")) db.createObjectStore("products", { keyPath: "id", autoIncrement: true });
+                            if (!db.objectStoreNames.contains("stockMoves")) db.createObjectStore("stockMoves", { keyPath: "id", autoIncrement: true });
+                            if (!db.objectStoreNames.contains("settings")) db.createObjectStore("settings", { keyPath: "key" });
+                            if (!db.objectStoreNames.contains("orders")) db.createObjectStore("orders", { keyPath: "id", autoIncrement: true });
+                            if (!db.objectStoreNames.contains("recipes")) db.createObjectStore("recipes", { keyPath: "id", autoIncrement: true });
+                        };
+                    });
+                }
+
+                function costingReq(req) {
+                    return new Promise((resolve, reject) => {
+                        req.onsuccess = () => resolve(req.result);
+                        req.onerror = () => reject(req.error);
+                    });
+                }
+
+                function recipeFromCostingProduct(product) {
+                    if (!product || !product.costItems) return [];
+                    return product.costItems
+                        .filter((c) => c.materialId && c.invQty != null && Number(c.invQty) > 0)
+                        .map((c) => ({
+                            materialId: c.materialId,
+                            qty: Number(c.invQty),
+                            optional: !!c.optional,
+                            label: c.label,
+                        }));
+                }
+
+                function saleLinesFromTx(tx) {
+                    if (tx.items && Array.isArray(tx.items) && tx.items.length) {
+                        return tx.items.map((ln) => ({ name: (ln.item || ln.name || "").trim(), qty: Number(ln.qty) || 0 }));
+                    }
+                    return [{ name: (tx.item || "").trim(), qty: Number(tx.qty) || 1 }];
+                }
+
+                function noteWantsOptional(note) {
+                    const n = (note || "").toLowerCase();
+                    return ["free print", "with print", "include print", "free a4", "+print"].some((t) => n.includes(t));
+                }
+
+                /**
+                 * Read Costing products/materials; write stockMoves into Costing DB.
+                 * Never throws to caller — returns status. Sale already saved in POS.
+                 */
+                async function applyCostingInventoryForSale(tx) {
+                    const result = { ok: true, deducted: 0, lineStatus: [], message: "" };
+                    try {
+                        const cdb = await openCostingDB();
+                        if (!cdb.objectStoreNames.contains("products") || !cdb.objectStoreNames.contains("stockMoves")) {
+                            result.ok = false;
+                            result.message = "Costing inventory not set up yet";
+                            return result;
+                        }
+                        const products = await costingReq(cdb.transaction("products", "readonly").objectStore("products").getAll());
+                        const byName = {};
+                        products.forEach((p) => {
+                            byName[(p.name || "").toLowerCase().trim()] = p;
+                        });
+
+                        const includeOptional = noteWantsOptional(tx.note);
+                        const lines = saleLinesFromTx(tx);
+                        const merged = {};
+
+                        for (const line of lines) {
+                            if (!line.qty) {
+                                result.lineStatus.push({ name: line.name, status: "ok", detail: "zero qty" });
+                                continue;
+                            }
+                            const product = byName[(line.name || "").toLowerCase().trim()];
+                            if (!product) {
+                                result.lineStatus.push({ name: line.name, status: "no_recipe", detail: "name not in Costing products" });
+                                continue;
+                            }
+                            const recipe = recipeFromCostingProduct(product);
+                            if (!recipe.length) {
+                                result.lineStatus.push({ name: line.name, status: "no_recipe", detail: "no material links in cost breakdown" });
+                                continue;
+                            }
+                            let used = 0;
+                            for (const rl of recipe) {
+                                if (rl.optional && !includeOptional) continue;
+                                const q = (Number(rl.qty) || 0) * line.qty;
+                                if (!rl.materialId || q <= 0) continue;
+                                merged[rl.materialId] = (merged[rl.materialId] || 0) + q;
+                                used++;
+                            }
+                            result.lineStatus.push({ name: line.name, status: "ok", detail: used ? "deducted" : "no applicable lines" });
+                        }
+
+                        const note = "POS Sale #" + (tx.id || "?") + " — " + lines.map((l) => l.qty + "× " + l.name).join(", ");
+                        const entries = Object.entries(merged);
+                        if (entries.length) {
+                            const wtx = cdb.transaction("stockMoves", "readwrite");
+                            const store = wtx.objectStore("stockMoves");
+                            for (const [materialId, qty] of entries) {
+                                store.add({
+                                    materialId: parseInt(materialId, 10),
+                                    type: "out",
+                                    qty: Number(qty),
+                                    note: note,
+                                    date: tx.date ? new Date(tx.date).getTime() : Date.now(),
+                                    createdAt: Date.now(),
+                                    source: "pos-sale",
+                                    transactionId: tx.id || null,
+                                    companyId: tx.companyId || null,
+                                });
+                                result.deducted++;
+                            }
+                            await new Promise((resolve, reject) => {
+                                wtx.oncomplete = resolve;
+                                wtx.onerror = () => reject(wtx.error);
+                            });
+                        }
+
+                        const missing = result.lineStatus.filter((s) => s.status === "no_recipe");
+                        const parts = [];
+                        if (result.deducted) parts.push("Stock −" + result.deducted);
+                        if (missing.length) parts.push("No recipe: " + missing.map((m) => m.name).join(", "));
+                        result.message = parts.join(" · ");
+                        return result;
+                    } catch (err) {
+                        console.warn("[inventory] deduct skipped", err);
+                        result.ok = false;
+                        result.message = "Inventory skipped (sale kept)";
+                        result.lineStatus.push({ name: "(sale)", status: "error", detail: String(err && err.message ? err.message : err) });
+                        return result;
+                    }
+                }
 
                 /* ---------- IndexedDB layer ---------- */
                 const DB_NAME = "littleLedgerDB";
@@ -1922,8 +2120,13 @@
                         const list = el("div", { class: "linelist" });
                         App.saleLines.forEach((ln, idx) => {
                             const sub = `${ln.category}${ln.qty ? " · qty " + ln.qty : ""}`;
+                            const missingCosting = isSale && !hasCostingProduct(ln.item);
+                            const titleKids = missingCosting ? [document.createTextNode(ln.item + " "), el("span", { class: "badge-warn" }, "no Costing")] : [ln.item];
                             const lineRow = el("div", { class: "linerow" }, [
-                                el("div", { class: "linerow-main" }, [el("div", { class: "linerow-title" }, ln.item), el("div", { class: "linerow-sub" }, sub)]),
+                                el("div", { class: "linerow-main" }, [
+                                    el("div", { class: "linerow-title" }, titleKids),
+                                    el("div", { class: "linerow-sub" }, sub + (missingCosting ? " · no stock recipe" : "")),
+                                ]),
                                 el("div", { class: "linerow-amt" }, fmtPeso(ln.amount)),
                                 el(
                                     "button",
@@ -1959,12 +2162,22 @@
                     entry.appendChild(chipRow);
 
                     if (isSale) {
+                        await loadCostingProductNames(false);
                         const presets = sortPresets(presetsAll.filter((p) => p.type === "sale" && p.category === App.selectedCategory));
                         if (presets.length) {
                             entry.appendChild(el("label", { class: "flabel" }, "Quick items"));
                             const presetRow = el("div", { class: "chiprow" });
                             presets.forEach((p) => {
-                                const chip = el("button", { type: "button", class: "chip preset" }, `${p.name} · ${fmtPeso(p.price)}`);
+                                const missing = !hasCostingProduct(p.name);
+                                const label = missing ? `${p.name} · ${fmtPeso(p.price)}` : `${p.name} · ${fmtPeso(p.price)}`;
+                                const chip = el(
+                                    "button",
+                                    { type: "button", class: "chip preset" + (missing ? " no-costing" : ""), title: missing ? "Not in Costing products — no auto stock deduct" : "Linked in Costing" },
+                                    label,
+                                );
+                                if (missing) {
+                                    chip.appendChild(el("span", { class: "badge-warn" }, "no Costing"));
+                                }
                                 chip.addEventListener("click", () => {
                                     qs("#ln-item").value = p.name;
                                     qs("#ln-price").value = p.price;
@@ -2186,9 +2399,27 @@
                             note: qs("#f-note").value.trim(),
                             createdAt: new Date().toISOString(),
                         };
-                        await dbAdd("transactions", record);
+                        if (isSale) {
+                            await loadCostingProductNames(false);
+                            const missingNames = [...new Set(App.saleLines.map((l) => l.item).filter((n) => n && !hasCostingProduct(n)))];
+                            if (missingNames.length) {
+                                const ok = confirm("These items are not in Costing products (no auto stock deduct):\n\n• " + missingNames.join("\n• ") + "\n\nSave sale anyway?");
+                                if (!ok) return;
+                            }
+                        }
+
+                        const newId = await dbAdd("transactions", record);
+                        record.id = newId;
                         App.saleLines = [];
-                        toast((isSale ? "Sale" : "Expense") + " saved");
+                        if (isSale) {
+                            const inv = await applyCostingInventoryForSale(record);
+                            const base = "Sale saved";
+                            toast(inv.message ? base + " · " + inv.message : base);
+                            // refresh name cache in case Costing was updated in another tab
+                            loadCostingProductNames(true).catch(() => {});
+                        } else {
+                            toast("Expense saved");
+                        }
                         render();
                     });
 
