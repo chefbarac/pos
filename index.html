@@ -1852,7 +1852,7 @@
                     transferFrom: "gcash",
                     transferTo: "cash",
                     saleLines: [], // line items staged for the transaction currently being built on the Add page
-                    historyFilters: { range: "today", type: "all", category: "all", search: "", from: null, to: null },
+                    historyFilters: { range: "today", type: "all", category: "all", inventory: "all", search: "", from: null, to: null },
                     reportRange: "today",
                     reportCustom: { from: null, to: null },
                     trendRange: "30d", // '7d' | '30d' | '90d' | 'all' — shared by both trend charts on Reports
@@ -2730,6 +2730,25 @@
                     });
                     filterCard.appendChild(typeRow);
 
+                    const invRow = el("div", { class: "chiprow" });
+                    [
+                        ["all", "All"],
+                        ["no_costing", "No Costing"],
+                        ["not_in_inventory", "Not in inventory"],
+                    ].forEach(([val, label]) => {
+                        const chip = el("button", { type: "button", class: "chip" + (App.historyFilters.inventory === val ? " active" : "") }, label);
+                        chip.addEventListener("click", () => {
+                            App.historyFilters.inventory = val;
+                            // These cleanup filters only apply to sales
+                            if (val !== "all" && App.historyFilters.type !== "sale") {
+                                App.historyFilters.type = "sale";
+                            }
+                            render();
+                        });
+                        invRow.appendChild(chip);
+                    });
+                    filterCard.appendChild(invRow);
+
                     const search = el("input", { type: "text", class: "finput", placeholder: "Search item or note...", value: App.historyFilters.search });
                     search.addEventListener("input", (e) => {
                         App.historyFilters.search = e.target.value;
@@ -2752,6 +2771,14 @@
                         else if (f.range === "week") txs = txs.filter((t) => inRange(t.date, startOfWeek(now), endOfDay(now)));
                         else if (f.range === "month") txs = txs.filter((t) => inRange(t.date, startOfMonth(now), endOfDay(now)));
                         if (f.type !== "all") txs = txs.filter((t) => t.type === f.type);
+                        if (f.inventory === "no_costing") {
+                            txs = txs.filter((t) => {
+                                if (t.type !== "sale") return false;
+                                return txLines(t).some((ln) => ln.item && !hasCostingProduct(ln.item));
+                            });
+                        } else if (f.inventory === "not_in_inventory") {
+                            txs = txs.filter((t) => t.type === "sale" && isSaleRecordedInInventory(t) === false);
+                        }
                         if (f.search) {
                             const s = f.search.toLowerCase();
                             txs = txs.filter((t) => (t.item || "").toLowerCase().includes(s) || (t.note || "").toLowerCase().includes(s) || (t.category || "").toLowerCase().includes(s));
@@ -2759,12 +2786,13 @@
                         txs.sort((a, b) => new Date(b.date) - new Date(a.date));
 
                         if (txs.length === 0) {
-                            listHost.appendChild(
-                                el("div", { class: "empty" }, [
-                                    el("div", { class: "empty-title" }, "No transactions found"),
-                                    el("div", { class: "empty-sub" }, "Try a different filter or date range."),
-                                ]),
-                            );
+                            const emptySub =
+                                f.inventory === "no_costing"
+                                    ? "No sales with unknown Costing product names in this range."
+                                    : f.inventory === "not_in_inventory"
+                                      ? "All sales in this range are already recorded in inventory."
+                                      : "Try a different filter or date range.";
+                            listHost.appendChild(el("div", { class: "empty" }, [el("div", { class: "empty-title" }, "No transactions found"), el("div", { class: "empty-sub" }, emptySub)]));
                             return;
                         }
 
