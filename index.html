@@ -322,10 +322,36 @@
                 font-size: 14.5px;
                 font-weight: 600;
             }
+            .txrow-title .sale-id {
+                font-family: var(--mono);
+                font-size: 11.5px;
+                font-weight: 700;
+                color: var(--ink-soft);
+                margin-right: 6px;
+            }
             .txrow-sub {
                 font-size: 11.5px;
                 color: var(--ink-soft);
                 margin-top: 2px;
+            }
+            .badge-inv {
+                display: inline-block;
+                font-size: 9px;
+                font-weight: 700;
+                letter-spacing: 0.04em;
+                text-transform: uppercase;
+                border-radius: 4px;
+                padding: 1px 5px;
+                margin-left: 5px;
+                vertical-align: middle;
+            }
+            .badge-inv.missing {
+                color: var(--rust);
+                background: var(--rust-soft);
+            }
+            .badge-inv.ok {
+                color: var(--green);
+                background: var(--green-soft);
             }
             .txrow-amt {
                 font-family: var(--mono);
@@ -1289,6 +1315,53 @@
                     return costingProductNames.has(key);
                 }
 
+                /** Set of POS transaction ids that already have stockMoves in Costing (source pos-sale). null = not loaded. */
+                let recordedPosSaleIds = null;
+                let recordedPosPromise = null;
+
+                async function loadRecordedPosSaleIds(force) {
+                    if (!force && recordedPosSaleIds) return recordedPosSaleIds;
+                    if (!force && recordedPosPromise) return recordedPosPromise;
+                    recordedPosPromise = (async () => {
+                        try {
+                            const cdb = await openCostingDB();
+                            if (!cdb.objectStoreNames.contains("stockMoves")) {
+                                recordedPosSaleIds = new Set();
+                                return recordedPosSaleIds;
+                            }
+                            const moves = await costingReq(cdb.transaction("stockMoves", "readonly").objectStore("stockMoves").getAll());
+                            const ids = new Set();
+                            (moves || []).forEach((m) => {
+                                if (m.source === "pos-sale" && m.transactionId != null) {
+                                    ids.add(m.transactionId);
+                                    return;
+                                }
+                                const note = String(m.note || "");
+                                const m1 = note.match(/Sale #(\d+)/);
+                                const m2 = note.match(/POS#(\d+)/);
+                                if (m1) ids.add(parseInt(m1[1], 10));
+                                if (m2) ids.add(parseInt(m2[1], 10));
+                            });
+                            recordedPosSaleIds = ids;
+                            return recordedPosSaleIds;
+                        } catch (e) {
+                            console.warn("[inventory] could not load recorded POS sale ids", e);
+                            recordedPosSaleIds = recordedPosSaleIds || new Set();
+                            return recordedPosSaleIds;
+                        } finally {
+                            recordedPosPromise = null;
+                        }
+                    })();
+                    return recordedPosPromise;
+                }
+
+                function isSaleRecordedInInventory(txOrId) {
+                    if (!recordedPosSaleIds) return null; // unknown
+                    const id = typeof txOrId === "object" && txOrId ? txOrId.id : txOrId;
+                    if (id == null) return false;
+                    return recordedPosSaleIds.has(id);
+                }
+
                 function openCostingDB() {
                     return new Promise((resolve, reject) => {
                         const req = indexedDB.open(COSTING_DB_NAME, COSTING_DB_VERSION);
@@ -1970,6 +2043,7 @@
                     }
 
                     // recent transactions
+                    await Promise.all([loadRecordedPosSaleIds(false), loadCostingProductNames(false)]);
                     const recent = txs
                         .slice()
                         .sort((a, b) => new Date(b.date) - new Date(a.date))
@@ -1995,18 +2069,44 @@
                     const isTransfer = t.type === "transfer";
                     const lines = txLines(t);
                     const row = el("div", { class: "txrow", "data-id": t.id });
-                    let title = t.item;
+                    let titleText = t.item;
                     let subtitle;
                     if (isTransfer) {
                         subtitle = `${accountLabel(t.fromAccount)} \u2192 ${accountLabel(t.toAccount)} · ${fmtTime(t.date)}`;
                     } else if (lines.length > 1) {
-                        title = `${lines.length} items`;
+                        titleText = `${lines.length} items`;
                         const catSet = Array.from(new Set(lines.map((l) => l.category))).join(", ");
                         subtitle = `${catSet} · ${fmtTime(t.date)} · ${paymentLabel(t.payment)}`;
                     } else {
                         subtitle = `${t.category} · ${fmtTime(t.date)} · ${paymentLabel(t.payment)}`;
                     }
-                    row.appendChild(el("div", { class: "txrow-main" }, [el("div", { class: "txrow-title" }, title), el("div", { class: "txrow-sub" }, subtitle)]));
+
+                    const titleKids = [];
+                    if (isSale && t.id != null) {
+                        titleKids.push(el("span", { class: "sale-id" }, "Sale #" + t.id));
+                    }
+                    titleKids.push(document.createTextNode(titleText || ""));
+                    if (isSale) {
+                        const recorded = isSaleRecordedInInventory(t);
+                        if (recorded === false) {
+                            titleKids.push(el("span", { class: "badge-inv missing", title: "No stock-out in Costing for this sale yet" }, "not in inventory"));
+                        }
+                        const missingNames = lines.map((l) => l.item).filter((n) => n && !hasCostingProduct(n));
+                        if (missingNames.length) {
+                            titleKids.push(
+                                el(
+                                    "span",
+                                    {
+                                        class: "badge-warn",
+                                        title: "Not in Costing products: " + missingNames.join(", "),
+                                    },
+                                    missingNames.length === 1 ? "no Costing" : missingNames.length + " no Costing",
+                                ),
+                            );
+                        }
+                    }
+
+                    row.appendChild(el("div", { class: "txrow-main" }, [el("div", { class: "txrow-title" }, titleKids), el("div", { class: "txrow-sub" }, subtitle)]));
                     const amtClass = isSale ? "sales" : isTransfer ? "transfer" : "expenses";
                     const sign = isSale ? "+" : isTransfer ? "" : "\u2212";
                     row.appendChild(el("div", { class: "txrow-amt " + amtClass }, sign + fmtPeso(t.amount)));
@@ -2565,8 +2665,9 @@
                             let msg = inv.message || "";
                             if (inv.deducted > 0 && !msg) msg = "Stock −" + inv.deducted;
                             toast(msg ? base + " · " + msg : base);
-                            // refresh name cache in case Costing was updated in another tab
+                            // refresh name + recorded caches
                             loadCostingProductNames(true).catch(() => {});
+                            loadRecordedPosSaleIds(true).catch(() => {});
                         } else {
                             toast("Expense saved");
                         }
@@ -2643,6 +2744,7 @@
 
                     async function renderHistoryList() {
                         listHost.innerHTML = "";
+                        await Promise.all([loadRecordedPosSaleIds(false), loadCostingProductNames(false)]);
                         let txs = await allTx();
                         const now = new Date();
                         const f = App.historyFilters;
@@ -2864,6 +2966,7 @@
                                 toast(inv.message || (inv.deducted ? "Stock −" + inv.deducted : "Inventory applied"));
                             }
                             loadCostingProductNames(true).catch(() => {});
+                            loadRecordedPosSaleIds(true).catch(() => {});
                         });
                     }
                     saveBtn.addEventListener("click", async () => {
