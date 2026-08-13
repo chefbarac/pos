@@ -1,5 +1,5 @@
 const PREFIX = 'pos-cache';
-const CACHE_NAME = PREFIX + '-v3.0.6';
+const CACHE_NAME = PREFIX + '-v3.0.7';
 
 // Optional: pre-cache a few known static assets on install.
 // Not required for SWR to work — it'll cache things on first fetch anyway.
