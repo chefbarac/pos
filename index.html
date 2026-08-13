@@ -1343,8 +1343,10 @@
                  * Read Costing products/materials; write stockMoves into Costing DB.
                  * Never throws to caller — returns status. Sale already saved in POS.
                  */
-                async function applyCostingInventoryForSale(tx) {
-                    const result = { ok: true, deducted: 0, lineStatus: [], message: "" };
+                async function applyCostingInventoryForSale(tx, opts) {
+                    opts = opts || {};
+                    const force = !!opts.force;
+                    const result = { ok: true, deducted: 0, lineStatus: [], message: "", skipped: false };
                     try {
                         const cdb = await openCostingDB();
                         if (!cdb.objectStoreNames.contains("products") || !cdb.objectStoreNames.contains("stockMoves")) {
@@ -1352,6 +1354,34 @@
                             result.message = "Costing inventory not set up yet";
                             return result;
                         }
+
+                        // Idempotency: skip if this POS sale already has stock-outs (unless force)
+                        if (tx.id != null) {
+                            const existingMoves = await costingReq(cdb.transaction("stockMoves", "readonly").objectStore("stockMoves").getAll());
+                            const prior = (existingMoves || []).filter(
+                                (m) =>
+                                    (m.source === "pos-sale" && m.transactionId === tx.id) ||
+                                    (m.note && (String(m.note).indexOf("Sale #" + tx.id) !== -1 || String(m.note).indexOf("POS#" + tx.id) !== -1)),
+                            );
+                            if (prior.length && !force) {
+                                result.skipped = true;
+                                result.message = "Already applied (" + prior.length + " stock move" + (prior.length === 1 ? "" : "s") + ")";
+                                return result;
+                            }
+                            if (prior.length && force) {
+                                // Replace: delete prior outs for this transaction, then rewrite below
+                                const wdel = cdb.transaction("stockMoves", "readwrite");
+                                const delStore = wdel.objectStore("stockMoves");
+                                for (const m of prior) {
+                                    if (m.id != null) delStore.delete(m.id);
+                                }
+                                await new Promise((resolve, reject) => {
+                                    wdel.oncomplete = resolve;
+                                    wdel.onerror = () => reject(wdel.error);
+                                });
+                            }
+                        }
+
                         const products = await costingReq(cdb.transaction("products", "readonly").objectStore("products").getAll());
                         const byName = {};
                         products.forEach((p) => {
@@ -2675,15 +2705,24 @@
                     const titleMap = { sale: "Edit Sale", expense: "Edit Expense", transfer: "Edit Transfer" };
                     modal.appendChild(el("div", { class: "modal-title" }, titleMap[t.type] || "Edit Transaction"));
 
-                    // Show the line-item breakdown (read-only here — remove/re-add items via the Add page for now)
+                    // Line-item breakdown — item names are editable so you can align them with Costing products
+                    let lineNameInputs = [];
                     if (!isTransfer && lines.length) {
-                        modal.appendChild(el("label", { class: "flabel" }, `Items (${lines.length})`));
+                        modal.appendChild(el("label", { class: "flabel" }, `Items (${lines.length}) — edit names to match Costing`));
                         const list = el("div", { class: "linelist" });
-                        lines.forEach((ln) => {
+                        lines.forEach((ln, idx) => {
                             const sub = `${ln.category}${ln.qty ? " · qty " + ln.qty : ""}`;
+                            const nameInp = el("input", {
+                                type: "text",
+                                class: "finput",
+                                value: ln.item || "",
+                                style: "font-size:13.5px;padding:8px 10px;margin-bottom:2px",
+                                "data-line-idx": String(idx),
+                            });
+                            lineNameInputs.push(nameInp);
                             list.appendChild(
-                                el("div", { class: "linerow" }, [
-                                    el("div", { class: "linerow-main" }, [el("div", { class: "linerow-title" }, ln.item), el("div", { class: "linerow-sub" }, sub)]),
+                                el("div", { class: "linerow", style: "flex-wrap:wrap;align-items:flex-start" }, [
+                                    el("div", { class: "linerow-main", style: "flex:1 1 140px" }, [nameInp, el("div", { class: "linerow-sub" }, sub)]),
                                     el("div", { class: "linerow-amt" }, fmtPeso(ln.amount)),
                                 ]),
                             );
@@ -2695,6 +2734,7 @@
                     } else if (!isTransfer) {
                         modal.appendChild(el("label", { class: "flabel" }, t.type === "sale" ? "Item / Service" : "Description"));
                         const itemInp0 = el("input", { type: "text", class: "finput", value: t.item });
+                        lineNameInputs.push(itemInp0);
                         modal.appendChild(itemInp0);
                     }
 
@@ -2768,14 +2808,21 @@
                     const noteInp = el("input", { type: "text", class: "finput", value: t.note || "" });
                     modal.appendChild(noteInp);
 
-                    const btnRow = el("div", { class: "modal-btnrow" }, [
+                    const btnKids = [
                         el("button", { type: "button", class: "bigbtn ghost" }, "Cancel"),
                         el("button", { type: "button", class: "bigbtn danger" }, "Delete"),
                         el("button", { type: "button", class: "bigbtn sale" }, "Save"),
-                    ]);
+                    ];
+                    if (t.type === "sale") {
+                        btnKids.push(el("button", { type: "button", class: "bigbtn transfer", style: "flex-basis:100%" }, "Apply inventory"));
+                    }
+                    const btnRow = el("div", { class: "modal-btnrow" }, btnKids);
                     modal.appendChild(btnRow);
 
-                    const [cancelBtn, delBtn, saveBtn] = btnRow.children;
+                    const cancelBtn = btnRow.children[0];
+                    const delBtn = btnRow.children[1];
+                    const saveBtn = btnRow.children[2];
+                    const applyInvBtn = t.type === "sale" ? btnRow.children[3] : null;
                     cancelBtn.addEventListener("click", () => overlay.remove());
                     overlay.addEventListener("click", (e) => {
                         if (e.target === overlay) overlay.remove();
@@ -2788,6 +2835,37 @@
                             render();
                         }
                     });
+                    if (applyInvBtn) {
+                        applyInvBtn.addEventListener("click", async () => {
+                            let working = Object.assign({}, t);
+                            working.id = id;
+                            // Use edited line names from the modal (does not require Save first)
+                            if (lineNameInputs.length && lines.length) {
+                                const newLines = lines.map((ln, idx) => {
+                                    const renamed = lineNameInputs[idx] ? lineNameInputs[idx].value.trim() : ln.item;
+                                    return Object.assign({}, ln, { item: renamed || ln.item });
+                                });
+                                working.items = newLines;
+                                if (newLines.length === 1) working.item = newLines[0].item;
+                                else working.item = newLines.map((l) => l.item).join(", ");
+                            }
+                            const inv = await applyCostingInventoryForSale(working);
+                            if (inv.skipped) {
+                                const redo = confirm((inv.message || "Already applied") + "\n\nForce re-apply? This replaces prior stock-outs for this sale.");
+                                if (redo) {
+                                    const inv2 = await applyCostingInventoryForSale(working, { force: true });
+                                    toast(inv2.message ? "Re-applied · " + inv2.message : inv2.deducted ? "Re-applied · Stock −" + inv2.deducted : "Re-applied");
+                                } else {
+                                    toast(inv.message || "Already applied");
+                                }
+                            } else if (!inv.ok) {
+                                toast(inv.message || "Inventory skipped");
+                            } else {
+                                toast(inv.message || (inv.deducted ? "Stock −" + inv.deducted : "Inventory applied"));
+                            }
+                            loadCostingProductNames(true).catch(() => {});
+                        });
+                    }
                     saveBtn.addEventListener("click", async () => {
                         const amount = parseFloat(amtInp.value);
                         if (!amount || amount <= 0) {
@@ -2814,7 +2892,15 @@
                             const tendered = tVal > 0 ? tVal : null;
                             const change = tendered != null ? +(tendered - amount).toFixed(2) : null;
                             const scaleFactor = amount / (Number(t.amount) || amount || 1);
-                            const newLines = lines.length ? lines.map((ln) => Object.assign({}, ln, { amount: +(Number(ln.amount) * scaleFactor).toFixed(2) })) : lines;
+                            const newLines = lines.length
+                                ? lines.map((ln, idx) => {
+                                      const renamed = lineNameInputs[idx] ? lineNameInputs[idx].value.trim() : ln.item;
+                                      return Object.assign({}, ln, {
+                                          item: renamed || ln.item,
+                                          amount: +(Number(ln.amount) * scaleFactor).toFixed(2),
+                                      });
+                                  })
+                                : lines;
                             updated = Object.assign({}, t, {
                                 amount,
                                 subtotal: amount,
@@ -2825,9 +2911,16 @@
                                 date: new Date(dateInp.value).toISOString(),
                                 note: noteInp.value.trim(),
                             });
-                            if (lines.length <= 1 && itemInp) {
-                                updated.item = itemInp.value.trim();
-                                if (updated.items && updated.items[0]) updated.items[0] = Object.assign({}, updated.items[0], { item: updated.item, amount });
+                            if (newLines.length === 1) {
+                                updated.item = newLines[0].item;
+                                updated.category = newLines[0].category;
+                                updated.qty = newLines[0].qty;
+                                updated.unitPrice = newLines[0].unitPrice;
+                            } else if (newLines.length > 1) {
+                                updated.item = newLines.map((l) => l.item).join(", ");
+                                updated.category = "Multiple";
+                                updated.qty = null;
+                                updated.unitPrice = null;
                             }
                         }
                         await dbPut("transactions", updated);
