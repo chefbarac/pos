@@ -2166,27 +2166,139 @@
                         const presets = sortPresets(presetsAll.filter((p) => p.type === "sale" && p.category === App.selectedCategory));
                         if (presets.length) {
                             entry.appendChild(el("label", { class: "flabel" }, "Quick items"));
+
+                            function applyPreset(p) {
+                                qs("#ln-item").value = p.name;
+                                qs("#ln-price").value = p.price;
+                                qs("#ln-qty").value = qs("#ln-qty").value || 1;
+                                recalcLineAmount();
+                            }
+
+                            const searchWrap = el("div", { class: "preset-search-wrap" });
+                            const searchInp = el("input", {
+                                type: "search",
+                                class: "finput",
+                                placeholder: "Search " + presets.length + " items…",
+                                autocomplete: "off",
+                                id: "preset-search",
+                            });
+                            const suggest = el("div", { class: "preset-suggest", id: "preset-suggest" });
+                            searchWrap.appendChild(searchInp);
+                            searchWrap.appendChild(suggest);
+                            entry.appendChild(searchWrap);
+
+                            let activeIdx = -1;
+                            function filteredPresets(q) {
+                                const key = (q || "").toLowerCase().trim();
+                                if (!key) return presets.slice(0, 40);
+                                return presets.filter((p) => (p.name || "").toLowerCase().includes(key)).slice(0, 40);
+                            }
+                            function renderSuggest(q, show) {
+                                const list = filteredPresets(q);
+                                suggest.innerHTML = "";
+                                activeIdx = -1;
+                                if (!show) {
+                                    suggest.classList.remove("open");
+                                    return;
+                                }
+                                if (!list.length) {
+                                    suggest.appendChild(el("div", { class: "preset-suggest-empty" }, "No matching items"));
+                                    suggest.classList.add("open");
+                                    return;
+                                }
+                                list.forEach((p, idx) => {
+                                    const missing = !hasCostingProduct(p.name);
+                                    const leftKids = [p.name];
+                                    if (missing) leftKids.push(el("span", { class: "badge-warn" }, "no Costing"));
+                                    const btn = el("button", { type: "button", class: "preset-suggest-item" }, [el("span", {}, leftKids), el("span", { class: "ps-price" }, fmtPeso(p.price))]);
+                                    if (missing) btn.title = "Not in Costing products — no auto stock deduct";
+                                    btn.addEventListener("mousedown", (ev) => {
+                                        ev.preventDefault();
+                                        applyPreset(p);
+                                        searchInp.value = "";
+                                        renderSuggest("", false);
+                                    });
+                                    suggest.appendChild(btn);
+                                });
+                                suggest.classList.add("open");
+                            }
+                            searchInp.addEventListener("focus", () => renderSuggest(searchInp.value, true));
+                            searchInp.addEventListener("input", () => renderSuggest(searchInp.value, true));
+                            searchInp.addEventListener("blur", () => setTimeout(() => renderSuggest("", false), 160));
+                            searchInp.addEventListener("keydown", (ev) => {
+                                const items = [...suggest.querySelectorAll(".preset-suggest-item")];
+                                const list = filteredPresets(searchInp.value);
+                                if (ev.key === "ArrowDown") {
+                                    ev.preventDefault();
+                                    if (!suggest.classList.contains("open")) renderSuggest(searchInp.value, true);
+                                    activeIdx = Math.min(items.length - 1, activeIdx + 1);
+                                    items.forEach((b, bi) => b.classList.toggle("active", bi === activeIdx));
+                                    if (items[activeIdx]) items[activeIdx].scrollIntoView({ block: "nearest" });
+                                } else if (ev.key === "ArrowUp") {
+                                    ev.preventDefault();
+                                    activeIdx = Math.max(0, activeIdx - 1);
+                                    items.forEach((b, bi) => b.classList.toggle("active", bi === activeIdx));
+                                    if (items[activeIdx]) items[activeIdx].scrollIntoView({ block: "nearest" });
+                                } else if (ev.key === "Enter") {
+                                    const pick = activeIdx >= 0 ? list[activeIdx] : list[0];
+                                    if (pick) {
+                                        ev.preventDefault();
+                                        applyPreset(pick);
+                                        searchInp.value = "";
+                                        renderSuggest("", false);
+                                    }
+                                } else if (ev.key === "Escape") {
+                                    renderSuggest("", false);
+                                    searchInp.blur();
+                                }
+                            });
+
+                            const topN = presets.slice(0, 8);
                             const presetRow = el("div", { class: "chiprow" });
-                            presets.forEach((p) => {
+                            topN.forEach((p) => {
                                 const missing = !hasCostingProduct(p.name);
-                                const label = missing ? `${p.name} · ${fmtPeso(p.price)}` : `${p.name} · ${fmtPeso(p.price)}`;
                                 const chip = el(
                                     "button",
-                                    { type: "button", class: "chip preset" + (missing ? " no-costing" : ""), title: missing ? "Not in Costing products — no auto stock deduct" : "Linked in Costing" },
-                                    label,
+                                    {
+                                        type: "button",
+                                        class: "chip preset" + (missing ? " no-costing" : ""),
+                                        title: missing ? "Not in Costing products — no auto stock deduct" : "Linked in Costing",
+                                    },
+                                    p.name + " · " + fmtPeso(p.price),
                                 );
-                                if (missing) {
-                                    chip.appendChild(el("span", { class: "badge-warn" }, "no Costing"));
-                                }
-                                chip.addEventListener("click", () => {
-                                    qs("#ln-item").value = p.name;
-                                    qs("#ln-price").value = p.price;
-                                    qs("#ln-qty").value = qs("#ln-qty").value || 1;
-                                    recalcLineAmount();
-                                });
+                                if (missing) chip.appendChild(el("span", { class: "badge-warn" }, "no Costing"));
+                                chip.addEventListener("click", () => applyPreset(p));
                                 presetRow.appendChild(chip);
                             });
                             entry.appendChild(presetRow);
+
+                            if (presets.length > 8) {
+                                const moreWrap = el("div", { class: "preset-chips-collapsed", id: "preset-more-chips" });
+                                const moreRow = el("div", { class: "chiprow" });
+                                presets.slice(8).forEach((p) => {
+                                    const missing = !hasCostingProduct(p.name);
+                                    const chip = el(
+                                        "button",
+                                        {
+                                            type: "button",
+                                            class: "chip preset" + (missing ? " no-costing" : ""),
+                                            title: missing ? "Not in Costing — no stock deduct" : p.name,
+                                        },
+                                        p.name + " · " + fmtPeso(p.price),
+                                    );
+                                    if (missing) chip.appendChild(el("span", { class: "badge-warn" }, "no Costing"));
+                                    chip.addEventListener("click", () => applyPreset(p));
+                                    moreRow.appendChild(chip);
+                                });
+                                moreWrap.appendChild(moreRow);
+                                entry.appendChild(moreWrap);
+                                const toggle = el("button", { type: "button", class: "chip", style: "margin-top:4px" }, "Show all " + presets.length + " chips");
+                                toggle.addEventListener("click", () => {
+                                    const open = moreWrap.classList.toggle("show-all");
+                                    toggle.textContent = open ? "Hide extra chips" : "Show all " + presets.length + " chips";
+                                });
+                                entry.appendChild(toggle);
+                            }
                         }
                     }
 
@@ -2414,7 +2526,9 @@
                         if (isSale) {
                             const inv = await applyCostingInventoryForSale(record);
                             const base = "Sale saved";
-                            toast(inv.message ? base + " · " + inv.message : base);
+                            let msg = inv.message || "";
+                            if (inv.deducted > 0 && !msg) msg = "Stock −" + inv.deducted;
+                            toast(msg ? base + " · " + msg : base);
                             // refresh name cache in case Costing was updated in another tab
                             loadCostingProductNames(true).catch(() => {});
                         } else {
