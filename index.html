@@ -1590,12 +1590,7 @@
                                     (m.note && (String(m.note).indexOf("Sale #" + tx.id) !== -1 || String(m.note).indexOf("POS#" + tx.id) !== -1))),
                         );
                         // Avoid double-reverse: if we already have reverse ins for this sale, skip
-                        const priorReverses = (all || []).filter(
-                            (m) =>
-                                m.type === "in" &&
-                                m.source === "pos-sale-reverse" &&
-                                m.transactionId === tx.id,
-                        );
+                        const priorReverses = (all || []).filter((m) => m.type === "in" && m.source === "pos-sale-reverse" && m.transactionId === tx.id);
                         if (!priorOuts.length) {
                             result.skipped = true;
                             result.message = "No inventory to reverse";
@@ -1625,7 +1620,10 @@
                             "Reverse POS Sale #" +
                             tx.id +
                             " — " +
-                            (tx.item || saleLinesFromTx(tx).map((l) => l.qty + "× " + l.name).join(", "));
+                            (tx.item ||
+                                saleLinesFromTx(tx)
+                                    .map((l) => l.qty + "× " + l.name)
+                                    .join(", "));
                         const wtx = cdb.transaction("stockMoves", "readwrite");
                         const store = wtx.objectStore("stockMoves");
                         for (const [materialId, qty] of entries) {
@@ -1647,12 +1645,7 @@
                             wtx.oncomplete = resolve;
                             wtx.onerror = () => reject(wtx.error);
                         });
-                        result.message =
-                            "Stock +" +
-                            result.reversed +
-                            " (reverse Sale #" +
-                            tx.id +
-                            ")";
+                        result.message = "Stock +" + result.reversed + " (reverse Sale #" + tx.id + ")";
                         return result;
                     } catch (err) {
                         console.warn("[inventory] reverse failed", err);
@@ -2253,70 +2246,6 @@
                     const amtClass = isSale ? "sales" : isTransfer ? "transfer" : "expenses";
                     const sign = isSale ? "+" : isTransfer ? "" : "\u2212";
                     row.appendChild(el("div", { class: "txrow-amt " + amtClass }, sign + fmtPeso(t.amount)));
-
-                    const actions = el("div", { class: "txrow-actions" });
-                    const editBtn = el("button", { type: "button", class: "txrow-action" }, "Edit");
-                    editBtn.addEventListener("click", (e) => {
-                        e.stopPropagation();
-                        openEditModal(t.id);
-                    });
-                    actions.appendChild(editBtn);
-
-                    if (isSale) {
-                        const recorded = isSaleRecordedInInventory(t);
-                        const invBtn = el(
-                            "button",
-                            {
-                                type: "button",
-                                class: "txrow-action inv",
-                                title: recorded ? "Already in inventory — click to force re-apply" : "Apply stock-out to Costing inventory",
-                            },
-                            recorded ? "Re-apply inv" : "Apply inv",
-                        );
-                        invBtn.addEventListener("click", async (e) => {
-                            e.stopPropagation();
-                            invBtn.disabled = true;
-                            try {
-                                let inv = await applyCostingInventoryForSale(Object.assign({}, t, { id: t.id }));
-                                if (inv.skipped) {
-                                    const redo = confirm((inv.message || "Already applied") + "\n\nForce re-apply? This replaces prior stock-outs for this sale.");
-                                    if (!redo) {
-                                        toast(inv.message || "Already applied");
-                                        return;
-                                    }
-                                    inv = await applyCostingInventoryForSale(Object.assign({}, t, { id: t.id }), { force: true });
-                                }
-                                if (!inv.ok) toast(inv.message || "Inventory skipped");
-                                else toast(inv.message || (inv.deducted ? "Stock −" + inv.deducted : inv.skipped ? "Already applied" : "Inventory applied"));
-                                await loadRecordedPosSaleIds(true);
-                                loadCostingProductNames(true).catch(() => {});
-                                render();
-                            } catch (err) {
-                                console.warn(err);
-                                toast("Could not apply inventory");
-                            } finally {
-                                invBtn.disabled = false;
-                            }
-                        });
-                        actions.appendChild(invBtn);
-                    }
-
-                    const delBtn = el("button", { type: "button", class: "txrow-action danger" }, "Delete");
-                    delBtn.addEventListener("click", async (e) => {
-                        e.stopPropagation();
-                        const isRec = t.type === "sale" && isSaleRecordedInInventory(t) === true;
-                        const msg = isRec
-                            ? "Delete this sale? Inventory stock-outs will be reversed with compensating stock-in (audit trail)."
-                            : "Delete this transaction? This cannot be undone.";
-                        if (!confirm(msg)) return;
-                        const res = await deleteTransactionWithInventoryReverse(t.id);
-                        if (res.inv && res.inv.reversed) toast("Deleted · " + res.inv.message);
-                        else if (res.inv && res.inv.message && !res.inv.skipped) toast("Deleted · " + res.inv.message);
-                        else toast("Transaction deleted");
-                        render();
-                    });
-                    actions.appendChild(delBtn);
-                    row.appendChild(actions);
 
                     row.addEventListener("click", () => openEditModal(t.id));
                     return row;
@@ -3000,12 +2929,7 @@
                                     : f.inventory === "not_in_inventory"
                                       ? "All sales in this range are already recorded in inventory."
                                       : "Try a different filter or date range.";
-                            listHost.appendChild(
-                                el("div", { class: "empty" }, [
-                                    el("div", { class: "empty-title" }, "No transactions found"),
-                                    el("div", { class: "empty-sub" }, emptySub),
-                                ]),
-                            );
+                            listHost.appendChild(el("div", { class: "empty" }, [el("div", { class: "empty-title" }, "No transactions found"), el("div", { class: "empty-sub" }, emptySub)]));
                             return;
                         }
 
@@ -3172,9 +3096,7 @@
                     });
                     delBtn.addEventListener("click", async () => {
                         const isRec = t.type === "sale" && isSaleRecordedInInventory(t) === true;
-                        const msg = isRec
-                            ? "Delete this sale? Inventory stock-outs will be reversed with compensating stock-in (audit trail)."
-                            : "Delete this transaction? This cannot be undone.";
+                        const msg = isRec ? "Delete this sale? Inventory stock-outs will be reversed with compensating stock-in (audit trail)." : "Delete this transaction? This cannot be undone.";
                         if (!confirm(msg)) return;
                         const res = await deleteTransactionWithInventoryReverse(id);
                         overlay.remove();
