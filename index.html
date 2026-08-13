@@ -499,6 +499,59 @@
                 border-color: var(--gold);
                 box-shadow: inset 0 0 0 1px rgba(201, 154, 62, 0.35);
             }
+            .preset-search-wrap {
+                position: relative;
+                margin-bottom: 4px;
+            }
+            .preset-suggest {
+                display: none;
+                position: absolute;
+                left: 0;
+                right: 0;
+                top: calc(100% + 4px);
+                max-height: 220px;
+                overflow-y: auto;
+                background: var(--paper-card);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
+                z-index: 40;
+            }
+            .preset-suggest.open {
+                display: block;
+            }
+            .preset-suggest-item {
+                width: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                padding: 10px 12px;
+                border: none;
+                background: none;
+                text-align: left;
+                font-size: 13.5px;
+                font-weight: 600;
+                color: var(--ink);
+                font-family: var(--sans);
+                cursor: pointer;
+            }
+            .preset-suggest-item:hover,
+            .preset-suggest-item.active {
+                background: var(--green-soft);
+            }
+            .preset-suggest-item .ps-price {
+                font-family: var(--mono);
+                font-size: 12.5px;
+                color: var(--ink-soft);
+                flex-shrink: 0;
+            }
+            .preset-suggest-empty {
+                padding: 12px;
+                font-size: 12.5px;
+                color: var(--ink-soft);
+                text-align: center;
+            }
             .badge-warn {
                 display: inline-block;
                 font-size: 9px;
@@ -2165,7 +2218,7 @@
                         await loadCostingProductNames(false);
                         const presets = sortPresets(presetsAll.filter((p) => p.type === "sale" && p.category === App.selectedCategory));
                         if (presets.length) {
-                            entry.appendChild(el("label", { class: "flabel" }, "Quick items"));
+                            entry.appendChild(el("label", { class: "flabel" }, "Search items"));
 
                             function applyPreset(p) {
                                 qs("#ln-item").value = p.name;
@@ -2252,53 +2305,6 @@
                                     searchInp.blur();
                                 }
                             });
-
-                            const topN = presets.slice(0, 8);
-                            const presetRow = el("div", { class: "chiprow" });
-                            topN.forEach((p) => {
-                                const missing = !hasCostingProduct(p.name);
-                                const chip = el(
-                                    "button",
-                                    {
-                                        type: "button",
-                                        class: "chip preset" + (missing ? " no-costing" : ""),
-                                        title: missing ? "Not in Costing products — no auto stock deduct" : "Linked in Costing",
-                                    },
-                                    p.name + " · " + fmtPeso(p.price),
-                                );
-                                if (missing) chip.appendChild(el("span", { class: "badge-warn" }, "no Costing"));
-                                chip.addEventListener("click", () => applyPreset(p));
-                                presetRow.appendChild(chip);
-                            });
-                            entry.appendChild(presetRow);
-
-                            if (presets.length > 8) {
-                                const moreWrap = el("div", { class: "preset-chips-collapsed", id: "preset-more-chips" });
-                                const moreRow = el("div", { class: "chiprow" });
-                                presets.slice(8).forEach((p) => {
-                                    const missing = !hasCostingProduct(p.name);
-                                    const chip = el(
-                                        "button",
-                                        {
-                                            type: "button",
-                                            class: "chip preset" + (missing ? " no-costing" : ""),
-                                            title: missing ? "Not in Costing — no stock deduct" : p.name,
-                                        },
-                                        p.name + " · " + fmtPeso(p.price),
-                                    );
-                                    if (missing) chip.appendChild(el("span", { class: "badge-warn" }, "no Costing"));
-                                    chip.addEventListener("click", () => applyPreset(p));
-                                    moreRow.appendChild(chip);
-                                });
-                                moreWrap.appendChild(moreRow);
-                                entry.appendChild(moreWrap);
-                                const toggle = el("button", { type: "button", class: "chip", style: "margin-top:4px" }, "Show all " + presets.length + " chips");
-                                toggle.addEventListener("click", () => {
-                                    const open = moreWrap.classList.toggle("show-all");
-                                    toggle.textContent = open ? "Hide extra chips" : "Show all " + presets.length + " chips";
-                                });
-                                entry.appendChild(toggle);
-                            }
                         }
                     }
 
