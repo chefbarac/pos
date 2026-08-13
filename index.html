@@ -737,11 +737,31 @@
                 flex: 1;
                 font-size: 13.5px;
                 font-weight: 600;
+                min-width: 0;
+            }
+            .presetrow-name.finput {
+                font-size: 13.5px;
+                font-weight: 600;
+                padding: 7px 9px;
             }
             .presetrow-price {
                 font-family: var(--mono);
                 font-size: 13px;
                 color: var(--ink-soft);
+            }
+            .presetrow-price.finput {
+                width: 88px;
+                flex-shrink: 0;
+                font-family: var(--mono);
+                font-size: 13px;
+                padding: 7px 8px;
+                text-align: right;
+            }
+            .presetrow-cat {
+                max-width: 110px;
+                flex-shrink: 0;
+                font-size: 12px;
+                padding: 7px 6px;
             }
             .presetrow-reorder {
                 display: flex;
@@ -3813,13 +3833,73 @@
                                 await dbPut("presets", Object.assign({}, other, { order: myOrder }));
                                 refresh();
                             });
+                            const nameInpRow = el("input", {
+                                type: "text",
+                                class: "finput presetrow-name",
+                                value: p.name || "",
+                                title: "Edit item name",
+                            });
+                            const priceInpRow = el("input", {
+                                type: "number",
+                                class: "finput presetrow-price",
+                                value: p.price != null ? p.price : "",
+                                min: "0",
+                                step: "0.01",
+                                title: "Edit price",
+                            });
+                            const catSel = el("select", { class: "finput presetrow-cat", title: "Move to category" });
+                            cats.sale.forEach((c) => {
+                                const opt = el("option", { value: c }, c);
+                                if (c === p.category) opt.selected = true;
+                                catSel.appendChild(opt);
+                            });
+
+                            async function savePresetPatch(patch) {
+                                const updated = Object.assign({}, p, patch);
+                                await dbPut("presets", updated);
+                                // keep local ref in sync for further edits without full refresh when possible
+                                Object.assign(p, updated);
+                            }
+
+                            nameInpRow.addEventListener("change", async () => {
+                                const name = nameInpRow.value.trim();
+                                if (!name) {
+                                    nameInpRow.value = p.name || "";
+                                    toast("Name cannot be empty");
+                                    return;
+                                }
+                                if (name === p.name) return;
+                                await savePresetPatch({ name });
+                                toast("Preset name saved");
+                            });
+                            priceInpRow.addEventListener("change", async () => {
+                                const price = parseFloat(priceInpRow.value);
+                                if (!isFinite(price) || price < 0) {
+                                    priceInpRow.value = p.price != null ? p.price : "";
+                                    toast("Enter a valid price");
+                                    return;
+                                }
+                                if (price === Number(p.price)) return;
+                                await savePresetPatch({ price });
+                                toast("Preset price saved");
+                            });
+                            catSel.addEventListener("change", async () => {
+                                const category = catSel.value;
+                                if (category === p.category) return;
+                                await savePresetPatch({ category });
+                                toast("Moved to " + category);
+                                refresh();
+                            });
+
                             const row = el("div", { class: "presetrow" }, [
                                 el("div", { class: "presetrow-reorder" }, [upBtn, downBtn]),
-                                el("span", { class: "presetrow-name" }, p.name),
-                                el("span", { class: "presetrow-price" }, fmtPeso(p.price)),
-                                el("button", { type: "button", class: "chip-x" }, "×"),
+                                nameInpRow,
+                                priceInpRow,
+                                catSel,
+                                el("button", { type: "button", class: "chip-x", title: "Delete preset" }, "×"),
                             ]);
                             row.querySelector(".chip-x").addEventListener("click", async () => {
+                                if (!confirm('Delete preset "' + (p.name || "") + '"?')) return;
                                 await dbDelete("presets", p.id);
                                 refresh();
                             });
@@ -3836,8 +3916,12 @@
                     addBtn.addEventListener("click", async () => {
                         const name = nameInp.value.trim();
                         const price = parseFloat(priceInp.value);
-                        if (!name || !price) {
-                            toast("Enter a name and price");
+                        if (!name) {
+                            toast("Enter a name");
+                            return;
+                        }
+                        if (!isFinite(price) || price < 0) {
+                            toast("Enter a valid price");
                             return;
                         }
                         const cid = await getActiveCompanyId();
