@@ -2026,10 +2026,22 @@
                     const h = location.hash.replace("#/", "") || "home";
                     return h.split("?")[0];
                 }
-                window.addEventListener("hashchange", render);
+                let _lastRenderedRoute = null;
+                window.addEventListener("hashchange", () => render({ scroll: "top" }));
 
-                async function render() {
+                /**
+                 * @param {{ scroll?: "top" | "preserve" | "none" }} [opts]
+                 * - top: jump to top (route changes)
+                 * - preserve: keep scroll position (edits / filter refreshes) — default when re-rendering same route
+                 * - none: leave scroll alone
+                 */
+                async function render(opts) {
+                    opts = opts || {};
                     const route = currentRoute();
+                    const routeChanged = _lastRenderedRoute !== route;
+                    const scrollMode = opts.scroll || (routeChanged ? "top" : "preserve");
+                    const y = scrollMode === "preserve" ? window.scrollY || window.pageYOffset || 0 : 0;
+
                     qsa(".navbtn").forEach((b) => b.classList.toggle("active", b.dataset.route === route));
                     const main = qs("#app");
                     main.innerHTML = "";
@@ -2040,7 +2052,29 @@
                     else if (route === "forecast") main.appendChild(await renderForecast());
                     else if (route === "settings") main.appendChild(await renderSettings());
                     else main.appendChild(await renderHome());
-                    window.scrollTo(0, 0);
+
+                    _lastRenderedRoute = route;
+                    if (scrollMode === "top") {
+                        window.scrollTo(0, 0);
+                    } else if (scrollMode === "preserve") {
+                        requestAnimationFrame(() => window.scrollTo(0, y));
+                    }
+                }
+
+                /** Soft refresh: same route, keep scroll (use after edits instead of full navigate). */
+                function softRender() {
+                    return render({ scroll: "preserve" });
+                }
+
+                async function getPersistedInvestmentSim() {
+                    const cid = await getActiveCompanyId();
+                    if (cid == null) return null;
+                    return getSetting("investmentSim_" + cid, null);
+                }
+                async function persistInvestmentSim(sim) {
+                    const cid = await getActiveCompanyId();
+                    if (cid == null) return;
+                    await setSetting("investmentSim_" + cid, Object.assign({}, sim, { savedAt: new Date().toISOString() }));
                 }
 
                 /* ---------- Data queries ---------- */
@@ -2895,7 +2929,7 @@
                         const chip = el("button", { type: "button", class: "chip" + (App.historyFilters.range === val ? " active" : "") }, label);
                         chip.addEventListener("click", () => {
                             App.historyFilters.range = val;
-                            render();
+                            softRender();
                         });
                         rangeRow.appendChild(chip);
                     });
@@ -2911,7 +2945,7 @@
                         const chip = el("button", { type: "button", class: "chip" + (App.historyFilters.type === val ? " active" : "") }, label);
                         chip.addEventListener("click", () => {
                             App.historyFilters.type = val;
-                            render();
+                            softRender();
                         });
                         typeRow.appendChild(chip);
                     });
@@ -2933,7 +2967,7 @@
                             if (val !== "all" && App.historyFilters.type !== "sale") {
                                 App.historyFilters.type = "sale";
                             }
-                            render();
+                            softRender();
                         });
                         invRow.appendChild(chip);
                     });
@@ -3212,7 +3246,7 @@
                         if (res.inv && res.inv.reversed) toast("Deleted · " + res.inv.message);
                         else if (res.inv && res.inv.message && !res.inv.skipped) toast("Deleted · " + res.inv.message);
                         else toast("Transaction deleted");
-                        render();
+                        softRender();
                     });
                     if (applyInvBtn) {
                         applyInvBtn.addEventListener("click", async () => {
@@ -3288,7 +3322,7 @@
                                     await dbPut("transactions", updatedSale);
                                     overlay.remove();
                                     toast("Marked paid · Receivable → " + accountLabel(to));
-                                    render();
+                                    softRender();
                                 });
                                 row.appendChild(chip);
                             });
@@ -3366,7 +3400,7 @@
                         await dbPut("transactions", updated);
                         overlay.remove();
                         toast(updated.excludeFromForecast ? "Saved · excluded from Forecast" : "Transaction updated");
-                        render();
+                        softRender();
                     });
 
                     overlay.appendChild(modal);
@@ -3652,7 +3686,7 @@
                     const i = list.indexOf(seriesKey);
                     if (i === -1) list.push(seriesKey);
                     else list.splice(i, 1);
-                    render();
+                    softRender();
                 }
 
                 function buildTrendChartCard(title, points, allSeries, chartKey) {
@@ -3693,7 +3727,7 @@
                         const chip = el("button", { type: "button", class: "chip" + (App.trendRange === val ? " active" : "") }, label);
                         chip.addEventListener("click", () => {
                             App.trendRange = val;
-                            render();
+                            softRender();
                         });
                         rangeRow.appendChild(chip);
                     });
@@ -3738,7 +3772,7 @@
                         const chip = el("button", { type: "button", class: "chip" + (App.reportRange === val ? " active" : "") }, label);
                         chip.addEventListener("click", () => {
                             App.reportRange = val;
-                            render();
+                            softRender();
                         });
                         rangeRow.appendChild(chip);
                     });
@@ -4478,20 +4512,21 @@
                     lines.push("Projected liquid cash on hand (rough): " + fmtPeso(ctx.projectedCash));
                     lines.push("  Method: liquid + POS sales + other income + receivable − recurring − planned unpaid");
                     lines.push("");
-                    lines.push("--- Investment stress test ---");
-                    if (ctx.investmentTest) {
-                        lines.push("Hypothetical purchase: " + ctx.investmentTest.name + " @ " + fmtPeso(ctx.investmentTest.amount));
-                        lines.push("Cash after purchase (if paid from liquid now): " + fmtPeso(ctx.investmentTest.cashAfter));
-                        lines.push("Projected cash at horizon after purchase: " + fmtPeso(ctx.investmentTest.projectedAfter));
-                        lines.push(
-                            "Months of recurring costs covered by remaining liquid after buy: " + (ctx.investmentTest.monthsCovered != null ? ctx.investmentTest.monthsCovered.toFixed(1) : "n/a"),
-                        );
-                        if (ctx.investmentTest.withOtherIncome != null) {
-                            lines.push("Projected cash after buy INCLUDING other income: " + fmtPeso(ctx.investmentTest.withOtherIncome));
-                        }
-                        lines.push("Verdict hint: " + ctx.investmentTest.verdict);
+                    lines.push("--- Investment stress test (from Forecast simulator; persisted) ---");
+                    if (ctx.investmentTest && ctx.investmentTest.amount > 0) {
+                        const it = ctx.investmentTest;
+                        lines.push("Hypothetical purchase: " + (it.name || "Purchase") + " @ " + fmtPeso(it.amount));
+                        lines.push("Liquid cash at simulation: " + fmtPeso(it.liquidNow != null ? it.liquidNow : ctx.liquid));
+                        if (it.otherIncomeInWindow != null) lines.push("Other income in window: " + fmtPeso(it.otherIncomeInWindow));
+                        lines.push("Cash after purchase (from liquid now): " + fmtPeso(it.cashAfter));
+                        lines.push("Projected cash @ horizon AFTER purchase: " + fmtPeso(it.projectedAfter));
+                        lines.push("Months of recurring costs covered by remaining liquid after buy: " + (it.monthsCovered != null ? Number(it.monthsCovered).toFixed(1) : "n/a"));
+                        if (it.volTop) lines.push("Volume demand context: " + it.volTop);
+                        if (it.horizonDays) lines.push("Horizon used: " + it.horizonDays + " days");
+                        if (it.savedAt) lines.push("Simulator saved at: " + it.savedAt);
+                        lines.push("Verdict hint: " + (it.verdict || ""));
                     } else {
-                        lines.push("(Use the investment simulator on Forecast, or save a planned investment.)");
+                        lines.push("(No saved simulation yet — open Forecast → Investment simulator → Run & save for AI brief.)");
                     }
                     lines.push("");
                     lines.push("--- Smart suggestions (volume-aware + Costing stock) ---");
@@ -4611,7 +4646,7 @@
                         chip.addEventListener("click", () => {
                             App.forecastHorizonDays = d;
                             App.forecastTargetDate = null;
-                            render();
+                            softRender();
                         });
                         horizonRow.appendChild(chip);
                     });
@@ -4629,12 +4664,16 @@
                         if (App.forecastTargetDate) {
                             App.forecastHorizonDays = daysInHorizon(30, App.forecastTargetDate);
                         }
-                        render();
+                        softRender();
                     });
                     dateRow.appendChild(dateInp);
                     dateRow.appendChild(applyDate);
                     ctrlCard.appendChild(dateRow);
                     ctrlCard.appendChild(el("div", { class: "help-text" }, "Horizon: " + horizonDays + " day(s)" + (App.forecastTargetDate ? " → " + App.forecastTargetDate : "") + "."));
+                    const refreshProj = el("button", { type: "button", class: "bigbtn ghost small2" }, "Refresh projections");
+                    refreshProj.title = "Recalculate valuation, cash projection, and AI brief after editing amounts below";
+                    refreshProj.addEventListener("click", () => softRender());
+                    ctrlCard.appendChild(refreshProj);
                     wrap.appendChild(ctrlCard);
 
                     // ---- Valuation summary ----
@@ -4774,7 +4813,7 @@
                                 }),
                             );
                             toast("Other income saved");
-                            render();
+                            // No full re-render — keeps focus & scroll; open Forecast again or soft-refresh to recalc projections
                         };
                         nameInp.addEventListener("change", save);
                         amtInp.addEventListener("change", save);
@@ -4784,7 +4823,7 @@
                         row.querySelector(".chip-x").addEventListener("click", async () => {
                             if (!confirm('Delete "' + (o.name || "") + '"?')) return;
                             await dbDelete("otherIncome", o.id);
-                            render();
+                            softRender();
                         });
                         incList.appendChild(row);
                     });
@@ -4812,7 +4851,7 @@
                             notes: "",
                             createdAt: new Date().toISOString(),
                         });
-                        render();
+                        softRender();
                     });
                     incAdd.appendChild(incName);
                     incAdd.appendChild(incAmt);
@@ -4852,7 +4891,6 @@
                                 }),
                             );
                             toast("Asset saved");
-                            render();
                         };
                         nameInp.addEventListener("change", save);
                         costInp.addEventListener("change", save);
@@ -4861,7 +4899,7 @@
                         row.querySelector(".chip-x").addEventListener("click", async () => {
                             if (!confirm('Delete asset "' + (a.name || "") + '"?')) return;
                             await dbDelete("assets", a.id);
-                            render();
+                            softRender();
                         });
                         assetList.appendChild(row);
                     });
@@ -4889,7 +4927,7 @@
                             createdAt: new Date().toISOString(),
                         });
                         toast("Asset added");
-                        render();
+                        softRender();
                     });
                     assetAdd.appendChild(assetName);
                     assetAdd.appendChild(assetCost);
@@ -4921,7 +4959,6 @@
                                 }),
                             );
                             toast("Recurring saved");
-                            render();
                         };
                         nameInp.addEventListener("change", save);
                         amtInp.addEventListener("change", save);
@@ -4930,7 +4967,7 @@
                         row.querySelector(".chip-x").addEventListener("click", async () => {
                             if (!confirm('Delete "' + (r.name || "") + '"?')) return;
                             await dbDelete("recurringExpenses", r.id);
-                            render();
+                            softRender();
                         });
                         recList.appendChild(row);
                     });
@@ -4954,7 +4991,7 @@
                             notes: "",
                             createdAt: new Date().toISOString(),
                         });
-                        render();
+                        softRender();
                     });
                     recAdd.appendChild(recName);
                     recAdd.appendChild(recAmt);
@@ -4996,7 +5033,6 @@
                                     }),
                                 );
                                 toast("Planned expense saved");
-                                render();
                             };
                             nameInp.addEventListener("change", save);
                             amtInp.addEventListener("change", save);
@@ -5013,13 +5049,13 @@
                             );
                             paidBtn.addEventListener("click", async () => {
                                 await dbPut("plannedExpenses", Object.assign({}, p, { paid: !p.paid }));
-                                render();
+                                softRender();
                             });
                             const row = el("div", { class: "presetrow", style: "flex-wrap:wrap" }, [nameInp, amtInp, dueInp, typeSel, paidBtn, el("button", { type: "button", class: "chip-x" }, "×")]);
                             row.querySelector(".chip-x").addEventListener("click", async () => {
                                 if (!confirm("Delete this planned expense?")) return;
                                 await dbDelete("plannedExpenses", p.id);
-                                render();
+                                softRender();
                             });
                             planList.appendChild(row);
                         });
@@ -5045,7 +5081,7 @@
                             notes: "",
                             createdAt: new Date().toISOString(),
                         });
-                        render();
+                        softRender();
                     });
                     planAdd.appendChild(planName);
                     planAdd.appendChild(planAmt);
@@ -5063,20 +5099,36 @@
                             "Test a big purchase (new printer, etc.) against cash movement. Includes expected other income (e.g. copra) in the horizon projection. Does not save a transaction.",
                         ),
                     );
+                    const persistedSim = await getPersistedInvestmentSim();
                     invCard.appendChild(el("label", { class: "flabel" }, "What are you buying?"));
-                    const invName = el("input", { type: "text", class: "finput", id: "inv-name", placeholder: "e.g. New Epson printer", value: "New printer" });
+                    const invName = el("input", {
+                        type: "text",
+                        class: "finput",
+                        id: "inv-name",
+                        placeholder: "e.g. New Epson printer",
+                        value: (persistedSim && persistedSim.name) || "New printer",
+                    });
                     invCard.appendChild(invName);
                     invCard.appendChild(el("label", { class: "flabel" }, "Price"));
-                    const invPrice = el("input", { type: "number", class: "finput famount", id: "inv-price", placeholder: "0.00", min: "0", step: "0.01", value: "15000" });
+                    const invPrice = el("input", {
+                        type: "number",
+                        class: "finput famount",
+                        id: "inv-price",
+                        placeholder: "0.00",
+                        min: "0",
+                        step: "0.01",
+                        value: persistedSim && persistedSim.amount != null ? String(persistedSim.amount) : "15000",
+                    });
                     invCard.appendChild(invPrice);
                     const invResult = el("div", { id: "inv-result", class: "totalsblock" });
                     invCard.appendChild(invResult);
-                    function runInvSim() {
-                        const price = parseFloat(invPrice.value) || 0;
-                        const name = invName.value.trim() || "Purchase";
+                    const invPersistHint = el("div", { class: "help-text", id: "inv-persist-hint" }, "");
+                    invCard.appendChild(invPersistHint);
+
+                    function buildInvSimResult(price, name) {
                         const cashAfter = liquid - price;
                         const projectedAfter = projectedCash - price;
-                        const withOtherIncome = projectedAfter; // projectedCash already includes other income
+                        const withOtherIncome = projectedAfter;
                         const monthsCovered = monthlyRecurring > 0 ? cashAfter / monthlyRecurring : null;
                         const volTop = topByQty[0] ? topByQty[0].name + " (qty " + Math.round(topByQty[0].qty) + ")" : "n/a";
                         let verdict = "";
@@ -5091,33 +5143,81 @@
                         else
                             verdict =
                                 "Buffer looks workable on paper (incl. other income in projection). Demand by volume: " + volTop + ". Still allow for ink/maintenance and delayed external income.";
-                        invResult.innerHTML = "";
-                        invResult.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Liquid now"), el("span", { class: "val" }, fmtPeso(liquid))]));
-                        if (otherIncomeInWindowAmt > 0) {
-                            invResult.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Other income in window"), el("span", { class: "val" }, fmtPeso(otherIncomeInWindowAmt))]));
-                        }
-                        invResult.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "After paying " + name), el("span", { class: "val" }, fmtPeso(cashAfter))]));
-                        invResult.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Projected cash @ horizon after buy"), el("span", { class: "val" }, fmtPeso(projectedAfter))]));
-                        if (monthsCovered != null) {
-                            invResult.appendChild(
-                                el("div", { class: "totalsrow" }, [el("span", {}, "Months of fixed costs covered after buy"), el("span", { class: "val" }, monthsCovered.toFixed(1) + " mo")]),
-                            );
-                        }
-                        invResult.appendChild(el("div", { class: "help-text", style: "margin-top:8px" }, verdict));
-                        invCard._lastSim = {
+                        return {
                             name,
                             amount: price,
                             cashAfter,
                             projectedAfter,
                             monthsCovered,
                             withOtherIncome,
+                            otherIncomeInWindow: otherIncomeInWindowAmt,
+                            liquidNow: liquid,
+                            projectedCashBefore: projectedCash,
+                            horizonDays,
+                            volTop,
                             verdict,
                         };
                     }
-                    invPrice.addEventListener("input", runInvSim);
-                    invName.addEventListener("input", runInvSim);
-                    const simBtn = el("button", { type: "button", class: "bigbtn transfer small2" }, "Run simulation");
-                    simBtn.addEventListener("click", runInvSim);
+
+                    function paintInvSim(sim) {
+                        invResult.innerHTML = "";
+                        if (!sim || !(sim.amount > 0)) {
+                            invResult.appendChild(el("div", { class: "help-text" }, "Enter a price and run the simulation. Results are saved for the AI brief."));
+                            return;
+                        }
+                        invResult.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Liquid now"), el("span", { class: "val" }, fmtPeso(sim.liquidNow != null ? sim.liquidNow : liquid))]));
+                        if ((sim.otherIncomeInWindow != null ? sim.otherIncomeInWindow : otherIncomeInWindowAmt) > 0) {
+                            invResult.appendChild(
+                                el("div", { class: "totalsrow" }, [
+                                    el("span", {}, "Other income in window"),
+                                    el("span", { class: "val" }, fmtPeso(sim.otherIncomeInWindow != null ? sim.otherIncomeInWindow : otherIncomeInWindowAmt)),
+                                ]),
+                            );
+                        }
+                        invResult.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "After paying " + (sim.name || "purchase")), el("span", { class: "val" }, fmtPeso(sim.cashAfter))]));
+                        invResult.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Projected cash @ horizon after buy"), el("span", { class: "val" }, fmtPeso(sim.projectedAfter))]));
+                        if (sim.monthsCovered != null) {
+                            invResult.appendChild(
+                                el("div", { class: "totalsrow" }, [
+                                    el("span", {}, "Months of fixed costs covered after buy"),
+                                    el("span", { class: "val" }, Number(sim.monthsCovered).toFixed(1) + " mo"),
+                                ]),
+                            );
+                        }
+                        invResult.appendChild(el("div", { class: "help-text", style: "margin-top:8px" }, sim.verdict || ""));
+                    }
+
+                    async function runInvSim(opts) {
+                        opts = opts || {};
+                        const price = parseFloat(invPrice.value) || 0;
+                        const name = invName.value.trim() || "Purchase";
+                        const sim = buildInvSimResult(price, name);
+                        invCard._lastSim = sim;
+                        paintInvSim(sim);
+                        if (opts.persist !== false && price > 0) {
+                            await persistInvestmentSim(sim);
+                            invPersistHint.textContent = "Saved for AI brief" + (sim.savedAt || opts.justSaved ? " · " + new Date().toLocaleString("en-PH") : "");
+                        }
+                        // Refresh AI brief text if already on page
+                        const ta = qs("#ai-brief-text");
+                        if (ta && typeof wrap._rebuildAiBrief === "function") wrap._rebuildAiBrief(sim);
+                        return sim;
+                    }
+                    invPrice.addEventListener("change", () => runInvSim({ persist: true }));
+                    invName.addEventListener("change", () => runInvSim({ persist: true }));
+                    // Live preview without hammering IndexedDB on every keystroke
+                    invPrice.addEventListener("input", () => {
+                        const sim = buildInvSimResult(parseFloat(invPrice.value) || 0, invName.value.trim() || "Purchase");
+                        invCard._lastSim = sim;
+                        paintInvSim(sim);
+                    });
+                    invName.addEventListener("input", () => {
+                        const sim = buildInvSimResult(parseFloat(invPrice.value) || 0, invName.value.trim() || "Purchase");
+                        invCard._lastSim = sim;
+                        paintInvSim(sim);
+                    });
+                    const simBtn = el("button", { type: "button", class: "bigbtn transfer small2" }, "Run & save for AI brief");
+                    simBtn.addEventListener("click", () => runInvSim({ persist: true, justSaved: true }));
                     invCard.appendChild(simBtn);
                     const addAsPlanned = el("button", { type: "button", class: "bigbtn ghost small2" }, "Save as planned investment");
                     addAsPlanned.addEventListener("click", async () => {
@@ -5127,6 +5227,7 @@
                             toast("Enter a price");
                             return;
                         }
+                        await runInvSim({ persist: true });
                         await dbAdd("plannedExpenses", {
                             companyId: await getActiveCompanyId(),
                             name,
@@ -5137,12 +5238,13 @@
                             notes: "From investment simulator",
                             createdAt: new Date().toISOString(),
                         });
-                        toast("Saved under planned expenses");
-                        render();
+                        toast("Saved under planned expenses + AI brief");
+                        softRender();
                     });
                     invCard.appendChild(addAsPlanned);
                     wrap.appendChild(invCard);
-                    runInvSim();
+                    // Fresh numbers with current balances; keep persisted name/price
+                    await runInvSim({ persist: true });
 
                     // ---- Smart suggestions ----
                     wrap.appendChild(el("div", { class: "section-title" }, "SMART SUGGESTIONS"));
@@ -5226,61 +5328,66 @@
                     wrap.appendChild(el("div", { class: "section-title" }, "AI DISCUSSION BRIEF"));
                     const aiCard = el("div", { class: "card" });
                     aiCard.appendChild(
-                        el("div", { class: "help-text" }, "Copy this summary and paste it into ChatGPT, Grok, or another AI to debate purchases (new printer, etc.) with your real numbers."),
+                        el("div", { class: "help-text" }, "Copy this summary and paste into an AI chat. Investment stress-test numbers update when you run the simulator (and are persisted)."),
                     );
-                    const sim = invCard._lastSim || null;
-                    const summaryText = buildAiFinancialSummary({
-                        businessName,
-                        bal,
-                        liquid,
-                        assetValue,
-                        currentAssets,
-                        valuation,
-                        assets,
-                        lookbackDays,
-                        salesTotal: salesStats.total,
-                        avgDaily: salesStats.avgDaily,
-                        saleCount: salesStats.count,
-                        excludedCount: salesStats.excludedCount || 0,
-                        excludedTotal: salesStats.excludedTotal || 0,
-                        topItems,
-                        topByQty,
-                        topByAmount,
-                        demandNote,
-                        otherIncome: otherIncomeList,
-                        otherIncomeInWindow: otherIncomeInWindowAmt,
-                        monthlyRecurring,
-                        recurring,
-                        planned,
-                        horizonDays,
-                        targetDate: App.forecastTargetDate,
-                        projectedRevenue,
-                        projectedRecurring,
-                        plannedInWindow,
-                        projectedCash,
-                        avgMarginPct,
-                        simpleAvgMargin: costingMetrics.simpleAvgMargin,
-                        productCount: costingMetrics.productCount,
-                        costingPotentialRevenue: costingMetrics.totalRevenue,
-                        costingPotentialCost: costingMetrics.totalCost,
-                        costingPotentialProfit: costingMetrics.totalProfit,
-                        projectedGrossProfit,
-                        projectedCogs,
-                        investmentTest: sim,
-                        equipHints,
-                        replenish,
-                    });
                     const ta = el("textarea", {
+                        id: "ai-brief-text",
                         class: "finput",
                         style: "min-height:180px;font-family:var(--mono);font-size:11.5px;line-height:1.45;resize:vertical",
                         readonly: "readonly",
                     });
-                    ta.value = summaryText;
+                    function makeAiCtx(investmentTest) {
+                        return {
+                            businessName,
+                            bal,
+                            liquid,
+                            assetValue,
+                            currentAssets,
+                            valuation,
+                            assets,
+                            lookbackDays,
+                            salesTotal: salesStats.total,
+                            avgDaily: salesStats.avgDaily,
+                            saleCount: salesStats.count,
+                            excludedCount: salesStats.excludedCount || 0,
+                            excludedTotal: salesStats.excludedTotal || 0,
+                            topItems,
+                            topByQty,
+                            topByAmount,
+                            demandNote,
+                            otherIncome: otherIncomeList,
+                            otherIncomeInWindow: otherIncomeInWindowAmt,
+                            monthlyRecurring,
+                            recurring,
+                            planned,
+                            horizonDays,
+                            targetDate: App.forecastTargetDate,
+                            projectedRevenue,
+                            projectedRecurring,
+                            plannedInWindow,
+                            projectedCash,
+                            avgMarginPct,
+                            simpleAvgMargin: costingMetrics.simpleAvgMargin,
+                            productCount: costingMetrics.productCount,
+                            costingPotentialRevenue: costingMetrics.totalRevenue,
+                            costingPotentialCost: costingMetrics.totalCost,
+                            costingPotentialProfit: costingMetrics.totalProfit,
+                            projectedGrossProfit,
+                            projectedCogs,
+                            investmentTest: investmentTest || invCard._lastSim || null,
+                            equipHints,
+                            replenish,
+                        };
+                    }
+                    wrap._rebuildAiBrief = (sim) => {
+                        ta.value = buildAiFinancialSummary(makeAiCtx(sim));
+                    };
+                    wrap._rebuildAiBrief(invCard._lastSim);
                     aiCard.appendChild(ta);
                     const copyBtn = el("button", { type: "button", class: "bigbtn sale" }, "Copy summary for AI");
                     copyBtn.addEventListener("click", async () => {
                         try {
-                            await navigator.clipboard.writeText(summaryText);
+                            await navigator.clipboard.writeText(ta.value);
                             toast("Copied — paste into your AI chat");
                         } catch (e) {
                             ta.select();
