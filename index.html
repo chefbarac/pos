@@ -1744,7 +1744,7 @@
 
                 /* ---------- IndexedDB layer ---------- */
                 const DB_NAME = "littleLedgerDB";
-                const DB_VERSION = 4;
+                const DB_VERSION = 5;
                 let dbPromise = null;
 
                 function openDB() {
@@ -1794,6 +1794,12 @@
                             if (!db.objectStoreNames.contains("otherIncome")) {
                                 const incStore = db.createObjectStore("otherIncome", { keyPath: "id", autoIncrement: true });
                                 incStore.createIndex("companyId", "companyId");
+                            }
+                            // Saved transaction templates (recurring cut-offs: groceries, savings, transfers, etc.)
+                            if (!db.objectStoreNames.contains("txTemplates")) {
+                                const tplStore = db.createObjectStore("txTemplates", { keyPath: "id", autoIncrement: true });
+                                tplStore.createIndex("companyId", "companyId");
+                                tplStore.createIndex("type", "type");
                             }
                         };
                         req.onsuccess = (e) => resolve(e.target.result);
@@ -2162,6 +2168,20 @@
                     const all = await dbGetAll("presets");
                     return all.filter((p) => p.companyId === cid);
                 }
+                async function companyTxTemplates(typeFilter) {
+                    const cid = await getActiveCompanyId();
+                    const all = await dbGetAll("txTemplates");
+                    let list = all.filter((t) => t.companyId === cid);
+                    if (typeFilter) list = list.filter((t) => t.type === typeFilter);
+                    return list
+                        .map((t, i) => ({ t, i }))
+                        .sort((a, b) => {
+                            const oa = a.t.order != null ? a.t.order : a.i;
+                            const ob = b.t.order != null ? b.t.order : b.i;
+                            return oa - ob;
+                        })
+                        .map((x) => x.t);
+                }
 
                 /* Sort presets for display. Presets carry an explicit `order` (position within their
                    category) once the user has touched reordering or Settings has backfilled it; presets
@@ -2429,6 +2449,611 @@
                     return row;
                 }
 
+                /** Normalize legacy single-type templates into steps[] */
+                function templateSteps(tpl) {
+                    if (!tpl) return [];
+                    if (Array.isArray(tpl.steps) && tpl.steps.length) return tpl.steps;
+                    // Legacy single-record template
+                    if (tpl.type === "transfer") {
+                        return [
+                            {
+                                type: "transfer",
+                                fromAccount: tpl.fromAccount,
+                                toAccount: tpl.toAccount,
+                                item: tpl.item || tpl.name,
+                                amount: tpl.amount,
+                                note: tpl.note || "",
+                            },
+                        ];
+                    }
+                    if (tpl.type === "sale" || tpl.type === "expense") {
+                        const items =
+                            Array.isArray(tpl.items) && tpl.items.length
+                                ? tpl.items
+                                : [
+                                      {
+                                          category: tpl.category,
+                                          item: tpl.item || tpl.name,
+                                          qty: tpl.qty,
+                                          unitPrice: tpl.unitPrice,
+                                          amount: tpl.amount,
+                                      },
+                                  ];
+                        return [
+                            {
+                                type: tpl.type,
+                                category: tpl.category || (items[0] && items[0].category),
+                                item: tpl.item || (items.length === 1 ? items[0].item : items.length + " items"),
+                                amount: tpl.amount != null ? tpl.amount : items.reduce((s, ln) => s + (Number(ln.amount) || 0), 0),
+                                payment: tpl.payment || "cash",
+                                note: tpl.note || "",
+                                items: items,
+                            },
+                        ];
+                    }
+                    return [];
+                }
+
+                function stepSummary(step) {
+                    if (!step) return "";
+                    if (step.type === "transfer") {
+                        return accountLabel(step.fromAccount) + " → " + accountLabel(step.toAccount) + (step.item ? " · " + step.item : "");
+                    }
+                    const items = step.items || [];
+                    if (items.length > 1) return items.length + " lines · " + (step.item || step.type);
+                    return (step.item || step.type || "") + (step.category ? " · " + step.category : "");
+                }
+
+                function applyTxTemplate(tpl) {
+                    if (!tpl) return;
+                    const steps = templateSteps(tpl);
+                    if (!steps.length) {
+                        toast("Empty template");
+                        return;
+                    }
+                    // Multi-step (or always for packs): open run modal so amounts can be tweaked then all saved
+                    if (steps.length > 1 || tpl.steps) {
+                        openRunTemplateModal(tpl);
+                        return;
+                    }
+                    // Single step: prefill Add form (legacy behavior)
+                    const step = steps[0];
+                    App.addType = step.type || App.addType;
+                    if (step.type === "transfer") {
+                        if (step.fromAccount) App.transferFrom = step.fromAccount;
+                        if (step.toAccount) App.transferTo = step.toAccount;
+                        render().then(() => {
+                            const itemInp = qs("#f-item");
+                            const amtInp = qs("#f-amount");
+                            const noteInp = qs("#f-note");
+                            if (itemInp) itemInp.value = step.item || tpl.name || "";
+                            if (amtInp && step.amount != null) amtInp.value = Number(step.amount) || "";
+                            if (noteInp && step.note) noteInp.value = step.note;
+                            toast("Template applied — edit amount if needed");
+                        });
+                        return;
+                    }
+                    App.saleLines = [];
+                    if (Array.isArray(step.items) && step.items.length) {
+                        App.saleLines = step.items.map((ln) => ({
+                            category: ln.category || step.category || App.selectedCategory,
+                            item: ln.item || ln.name || "",
+                            qty: ln.qty != null ? ln.qty : null,
+                            unitPrice: ln.unitPrice != null ? ln.unitPrice : null,
+                            amount: Number(ln.amount) || 0,
+                        }));
+                    } else if (step.item || step.amount) {
+                        App.saleLines = [
+                            {
+                                category: step.category || App.selectedCategory,
+                                item: step.item || tpl.name || "",
+                                qty: step.qty != null ? step.qty : null,
+                                unitPrice: step.unitPrice != null ? step.unitPrice : null,
+                                amount: Number(step.amount) || 0,
+                            },
+                        ];
+                    }
+                    if (step.category) App.selectedCategory = step.category;
+                    App._pendingTemplatePayment = step.payment || null;
+                    App._pendingTemplateNote = step.note || "";
+                    render().then(() => {
+                        if (App._pendingTemplatePayment) {
+                            const payRow = qs("#f-payment-row");
+                            if (payRow) {
+                                qsa(".chip.pay", payRow).forEach((c) => {
+                                    c.classList.toggle("active", c.dataset.value === App._pendingTemplatePayment);
+                                });
+                            }
+                            App._pendingTemplatePayment = null;
+                        }
+                        if (App._pendingTemplateNote) {
+                            const noteInp = qs("#f-note");
+                            if (noteInp) noteInp.value = App._pendingTemplateNote;
+                            App._pendingTemplateNote = "";
+                        }
+                        toast("Template applied — edit amount if needed");
+                    });
+                }
+
+                function closeTemplateModal() {
+                    const ov = qs("#tpl-modal-overlay");
+                    if (ov) ov.remove();
+                }
+
+                async function openRunTemplateModal(tpl) {
+                    closeTemplateModal();
+                    const steps = templateSteps(tpl).map((s) => Object.assign({}, s, { items: s.items ? s.items.map((ln) => Object.assign({}, ln)) : s.items }));
+                    const company = await getActiveCompany();
+                    const cats = company ? company.categories : { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES };
+
+                    const overlay = el("div", { class: "overlay", id: "tpl-modal-overlay" });
+                    overlay.addEventListener("click", (e) => {
+                        if (e.target === overlay) closeTemplateModal();
+                    });
+                    const modal = el("div", { class: "modal" });
+                    modal.appendChild(el("div", { class: "modal-title" }, tpl.name || "Run template"));
+                    modal.appendChild(el("div", { class: "help-text" }, "Edit amounts for this cut-off, then record all steps as separate transactions (sale / expense / transfer)."));
+
+                    const list = el("div", { class: "presetlist" });
+                    const amountInputs = [];
+
+                    steps.forEach((step, idx) => {
+                        const typeBadge = el(
+                            "span",
+                            {
+                                class: "badge-inv " + (step.type === "sale" ? "ok" : step.type === "expense" ? "missing" : "ok"),
+                                style: "margin-right:6px",
+                            },
+                            step.type === "sale" ? "SALE" : step.type === "expense" ? "EXPENSE" : "TRANSFER",
+                        );
+                        const title = el("div", { class: "txrow-title" }, [typeBadge, document.createTextNode(stepSummary(step) || "Step " + (idx + 1))]);
+                        const amtInp = el("input", {
+                            type: "number",
+                            class: "finput famount",
+                            value: step.amount != null ? step.amount : "",
+                            min: "0",
+                            step: "0.01",
+                            inputmode: "decimal",
+                            style: "max-width:140px;margin-top:6px",
+                        });
+                        amountInputs.push(amtInp);
+                        const skipLab = el("label", { style: "display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12.5px;color:var(--ink-soft)" }, [
+                            el("input", { type: "checkbox", class: "tpl-skip", "data-idx": String(idx) }),
+                            document.createTextNode("Skip this step"),
+                        ]);
+                        const block = el("div", { class: "card", style: "padding:12px;margin-bottom:10px" }, [title, el("div", { class: "flabel" }, "Amount"), amtInp, skipLab]);
+                        list.appendChild(block);
+                    });
+                    modal.appendChild(list);
+
+                    const btnRow = el("div", { class: "modal-btnrow" });
+                    const cancelBtn = el("button", { type: "button", class: "bigbtn ghost" }, "Cancel");
+                    cancelBtn.addEventListener("click", closeTemplateModal);
+                    const runBtn = el("button", { type: "button", class: "bigbtn sale" }, "Record all");
+                    runBtn.addEventListener("click", async () => {
+                        const cid = await getActiveCompanyId();
+                        const nowIso = new Date().toISOString();
+                        let saved = 0;
+                        for (let i = 0; i < steps.length; i++) {
+                            const skip = modal.querySelector('.tpl-skip[data-idx="' + i + '"]');
+                            if (skip && skip.checked) continue;
+                            const step = steps[i];
+                            const amount = parseFloat(amountInputs[i].value) || 0;
+                            if (amount <= 0 && step.type !== "transfer") {
+                                // allow 0? skip zero amounts to avoid junk
+                                if (amount <= 0) continue;
+                            }
+                            if (step.type === "transfer") {
+                                if (amount <= 0) continue;
+                                if (!step.fromAccount || !step.toAccount || step.fromAccount === step.toAccount) continue;
+                                await dbAdd("transactions", {
+                                    type: "transfer",
+                                    companyId: cid,
+                                    category: "Transfer",
+                                    item: step.item || accountLabel(step.fromAccount) + " → " + accountLabel(step.toAccount),
+                                    qty: null,
+                                    unitPrice: null,
+                                    amount,
+                                    payment: null,
+                                    fromAccount: step.fromAccount,
+                                    toAccount: step.toAccount,
+                                    date: nowIso,
+                                    note: step.note || "",
+                                    createdAt: nowIso,
+                                });
+                                saved++;
+                            } else if (step.type === "sale" || step.type === "expense") {
+                                let items = Array.isArray(step.items) && step.items.length ? step.items.map((ln) => Object.assign({}, ln)) : null;
+                                if (items && items.length === 1) {
+                                    items[0].amount = amount;
+                                } else if (items && items.length > 1) {
+                                    // scale line amounts proportionally to new total
+                                    const oldTotal = items.reduce((s, ln) => s + (Number(ln.amount) || 0), 0) || 1;
+                                    items = items.map((ln) => Object.assign({}, ln, { amount: Math.round(((Number(ln.amount) || 0) / oldTotal) * amount * 100) / 100 }));
+                                } else {
+                                    items = [
+                                        {
+                                            category: step.category || (cats[step.type] && cats[step.type][0]) || "Other",
+                                            item: step.item || step.type,
+                                            qty: null,
+                                            unitPrice: null,
+                                            amount,
+                                        },
+                                    ];
+                                }
+                                if (amount <= 0) continue;
+                                const record = {
+                                    type: step.type,
+                                    companyId: cid,
+                                    category: items[0].category,
+                                    item: items.length === 1 ? items[0].item : items.length + " items",
+                                    qty: items.length === 1 ? items[0].qty : null,
+                                    unitPrice: items.length === 1 ? items[0].unitPrice : null,
+                                    amount,
+                                    payment: step.payment || "cash",
+                                    date: nowIso,
+                                    note: step.note || "",
+                                    createdAt: nowIso,
+                                    items: items,
+                                };
+                                const newId = await dbAdd("transactions", record);
+                                record.id = newId;
+                                if (step.type === "sale") {
+                                    await applyCostingInventoryForSale(record);
+                                }
+                                saved++;
+                            }
+                        }
+                        closeTemplateModal();
+                        if (saved) {
+                            toast(saved + " transaction" + (saved === 1 ? "" : "s") + " recorded");
+                            loadCostingProductNames(true).catch(() => {});
+                            loadRecordedPosSaleIds(true).catch(() => {});
+                            if (currentRoute() === "add" || currentRoute() === "home" || currentRoute() === "history") softRender();
+                            else location.hash = "#/home";
+                        } else {
+                            toast("Nothing recorded — check amounts");
+                        }
+                    });
+                    btnRow.appendChild(cancelBtn);
+                    btnRow.appendChild(runBtn);
+                    modal.appendChild(btnRow);
+                    overlay.appendChild(modal);
+                    document.body.appendChild(overlay);
+                }
+
+                async function openEditTemplateModal(tpl, onSaved) {
+                    closeTemplateModal();
+                    const company = await getActiveCompany();
+                    const cats = company ? company.categories : { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES };
+                    let steps = templateSteps(tpl).map((s) => Object.assign({}, s, { items: s.items ? s.items.map((ln) => Object.assign({}, ln)) : undefined }));
+
+                    const overlay = el("div", { class: "overlay", id: "tpl-modal-overlay" });
+                    overlay.addEventListener("click", (e) => {
+                        if (e.target === overlay) closeTemplateModal();
+                    });
+                    const modal = el("div", { class: "modal" });
+                    modal.appendChild(el("div", { class: "modal-title" }, tpl && tpl.id ? "Edit template pack" : "New template pack"));
+                    modal.appendChild(
+                        el("div", { class: "help-text" }, "Combine sales, expenses, and transfers in one pack (e.g. groceries + savings + bank→GCash). Run the pack to post all steps at once."),
+                    );
+
+                    modal.appendChild(el("label", { class: "flabel" }, "Pack name"));
+                    const nameInp = el("input", {
+                        type: "text",
+                        class: "finput",
+                        value: (tpl && tpl.name) || "",
+                        placeholder: "e.g. Weekend cut-off",
+                    });
+                    modal.appendChild(nameInp);
+
+                    const stepsHost = el("div", { id: "tpl-steps-host", style: "margin-top:10px" });
+                    modal.appendChild(stepsHost);
+
+                    function paintSteps() {
+                        stepsHost.innerHTML = "";
+                        if (!steps.length) {
+                            stepsHost.appendChild(el("div", { class: "empty small" }, "No steps yet — add a sale, expense, or transfer below."));
+                            return;
+                        }
+                        steps.forEach((step, idx) => {
+                            const typeLab = step.type === "sale" ? "Sale" : step.type === "expense" ? "Expense" : "Transfer";
+                            const head = el("div", { class: "txrow-title" }, typeLab + " · " + (stepSummary(step) || "step " + (idx + 1)));
+                            const amtInp = el("input", {
+                                type: "number",
+                                class: "finput",
+                                value: step.amount != null ? step.amount : "",
+                                min: "0",
+                                step: "0.01",
+                                style: "max-width:120px",
+                            });
+                            amtInp.addEventListener("change", () => {
+                                step.amount = parseFloat(amtInp.value) || 0;
+                                if (Array.isArray(step.items) && step.items.length === 1) step.items[0].amount = step.amount;
+                            });
+                            const descInp = el("input", {
+                                type: "text",
+                                class: "finput",
+                                value: step.item || "",
+                                placeholder: "Description",
+                            });
+                            descInp.addEventListener("change", () => {
+                                step.item = descInp.value.trim();
+                                if (Array.isArray(step.items) && step.items.length === 1) step.items[0].item = step.item;
+                            });
+                            const upBtn = el("button", { type: "button", class: "reorder-btn" }, "▲");
+                            const downBtn = el("button", { type: "button", class: "reorder-btn" }, "▼");
+                            if (idx === 0) upBtn.setAttribute("disabled", "disabled");
+                            if (idx === steps.length - 1) downBtn.setAttribute("disabled", "disabled");
+                            upBtn.addEventListener("click", () => {
+                                if (idx === 0) return;
+                                const tmp = steps[idx - 1];
+                                steps[idx - 1] = steps[idx];
+                                steps[idx] = tmp;
+                                paintSteps();
+                            });
+                            downBtn.addEventListener("click", () => {
+                                if (idx === steps.length - 1) return;
+                                const tmp = steps[idx + 1];
+                                steps[idx + 1] = steps[idx];
+                                steps[idx] = tmp;
+                                paintSteps();
+                            });
+                            const delBtn = el("button", { type: "button", class: "chip-x" }, "×");
+                            delBtn.addEventListener("click", () => {
+                                steps.splice(idx, 1);
+                                paintSteps();
+                            });
+                            const row = el("div", { class: "card", style: "padding:10px 12px;margin-bottom:8px" }, [
+                                el("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:6px" }, [
+                                    el("div", { class: "presetrow-reorder" }, [upBtn, downBtn]),
+                                    el("div", { style: "flex:1;min-width:0" }, head),
+                                    delBtn,
+                                ]),
+                                el("div", { class: "frow" }, [
+                                    el("div", { class: "fcol" }, [el("label", { class: "flabel" }, "Description"), descInp]),
+                                    el("div", { class: "fcol" }, [el("label", { class: "flabel" }, "Amount"), amtInp]),
+                                ]),
+                            ]);
+                            // Extra controls for transfer / payment
+                            if (step.type === "transfer") {
+                                const fromSel = el("select", { class: "finput" });
+                                const toSel = el("select", { class: "finput" });
+                                ["cash", "gcash", "bank", "receivable", "owner"].forEach((a) => {
+                                    const o1 = el("option", { value: a }, accountLabel(a));
+                                    const o2 = el("option", { value: a }, accountLabel(a));
+                                    if (a === step.fromAccount) o1.selected = true;
+                                    if (a === step.toAccount) o2.selected = true;
+                                    fromSel.appendChild(o1);
+                                    toSel.appendChild(o2);
+                                });
+                                fromSel.addEventListener("change", () => (step.fromAccount = fromSel.value));
+                                toSel.addEventListener("change", () => (step.toAccount = toSel.value));
+                                row.appendChild(
+                                    el("div", { class: "frow", style: "margin-top:6px" }, [
+                                        el("div", { class: "fcol" }, [el("label", { class: "flabel" }, "From"), fromSel]),
+                                        el("div", { class: "fcol" }, [el("label", { class: "flabel" }, "To"), toSel]),
+                                    ]),
+                                );
+                            } else {
+                                const paySel = el("select", { class: "finput" });
+                                const pays = step.type === "sale" ? ["cash", "gcash", "bank", "receivable", "other"] : ["cash", "gcash", "bank", "other"];
+                                pays.forEach((p) => {
+                                    const o = el("option", { value: p }, paymentLabel(p));
+                                    if ((step.payment || "cash") === p) o.selected = true;
+                                    paySel.appendChild(o);
+                                });
+                                paySel.addEventListener("change", () => (step.payment = paySel.value));
+                                const catSel = el("select", { class: "finput" });
+                                (cats[step.type] || []).forEach((c) => {
+                                    const o = el("option", { value: c }, c);
+                                    if ((step.category || "") === c) o.selected = true;
+                                    catSel.appendChild(o);
+                                });
+                                catSel.addEventListener("change", () => {
+                                    step.category = catSel.value;
+                                    if (Array.isArray(step.items) && step.items[0]) step.items[0].category = catSel.value;
+                                });
+                                row.appendChild(
+                                    el("div", { class: "frow", style: "margin-top:6px" }, [
+                                        el("div", { class: "fcol" }, [el("label", { class: "flabel" }, "Category"), catSel]),
+                                        el("div", { class: "fcol" }, [el("label", { class: "flabel" }, "Payment"), paySel]),
+                                    ]),
+                                );
+                            }
+                            stepsHost.appendChild(row);
+                        });
+                    }
+                    paintSteps();
+
+                    // Add step builders
+                    modal.appendChild(el("div", { class: "flabel" }, "Add step"));
+                    const addRow = el("div", { class: "chiprow" });
+                    function pushStep(step) {
+                        steps.push(step);
+                        paintSteps();
+                    }
+                    [
+                        ["expense", "Expense"],
+                        ["transfer", "Transfer"],
+                        ["sale", "Sale"],
+                    ].forEach(([type, lab]) => {
+                        const chip = el("button", { type: "button", class: "chip" }, "+ " + lab);
+                        chip.addEventListener("click", () => {
+                            if (type === "transfer") {
+                                pushStep({
+                                    type: "transfer",
+                                    fromAccount: "bank",
+                                    toAccount: "gcash",
+                                    item: "Transfer",
+                                    amount: 0,
+                                    note: "",
+                                });
+                            } else {
+                                const cat = (cats[type] && cats[type][0]) || "Other";
+                                pushStep({
+                                    type: type,
+                                    category: cat,
+                                    item: lab,
+                                    amount: 0,
+                                    payment: "cash",
+                                    note: "",
+                                    items: [{ category: cat, item: lab, qty: null, unitPrice: null, amount: 0 }],
+                                });
+                            }
+                        });
+                        addRow.appendChild(chip);
+                    });
+                    modal.appendChild(addRow);
+
+                    const btnRow = el("div", { class: "modal-btnrow" });
+                    const cancelBtn = el("button", { type: "button", class: "bigbtn ghost" }, "Cancel");
+                    cancelBtn.addEventListener("click", closeTemplateModal);
+                    const saveBtn = el("button", { type: "button", class: "bigbtn sale" }, "Save pack");
+                    saveBtn.addEventListener("click", async () => {
+                        const name = nameInp.value.trim();
+                        if (!name) {
+                            toast("Enter a pack name");
+                            return;
+                        }
+                        if (!steps.length) {
+                            toast("Add at least one step");
+                            return;
+                        }
+                        const cid = await getActiveCompanyId();
+                        const existing = await companyTxTemplates();
+                        const nextOrder = tpl && tpl.order != null ? tpl.order : existing.length ? Math.max(...existing.map((t) => (t.order != null ? t.order : 0))) + 1 : 0;
+                        const record = {
+                            companyId: cid,
+                            name,
+                            order: nextOrder,
+                            createdAt: (tpl && tpl.createdAt) || new Date().toISOString(),
+                            steps: steps.map((s) => Object.assign({}, s)),
+                            // clear legacy single-type fields so templateSteps prefers steps[]
+                            type: null,
+                            item: null,
+                            amount: steps.reduce((sum, s) => sum + (Number(s.amount) || 0), 0),
+                        };
+                        if (tpl && tpl.id != null) {
+                            record.id = tpl.id;
+                            await dbPut("txTemplates", record);
+                        } else {
+                            await dbAdd("txTemplates", record);
+                        }
+                        closeTemplateModal();
+                        toast('Pack "' + name + '" saved');
+                        if (typeof onSaved === "function") onSaved();
+                        else softRender();
+                    });
+                    btnRow.appendChild(cancelBtn);
+                    btnRow.appendChild(saveBtn);
+                    modal.appendChild(btnRow);
+                    overlay.appendChild(modal);
+                    document.body.appendChild(overlay);
+                }
+
+                /** Save whatever is currently on the Add form as a new single-step pack (or append to named pack). */
+                async function saveCurrentAsTemplate(opts) {
+                    opts = opts || {};
+                    const type = App.addType;
+                    const cid = await getActiveCompanyId();
+                    if (cid == null) {
+                        toast("No active company");
+                        return;
+                    }
+                    let step = null;
+                    if (type === "transfer") {
+                        const amount = parseFloat(qs("#f-amount") ? qs("#f-amount").value : "") || opts.amount || 0;
+                        const item = (qs("#f-item") ? qs("#f-item").value.trim() : "") || opts.defaultName || "Transfer";
+                        const note = qs("#f-note") ? qs("#f-note").value.trim() : "";
+                        step = {
+                            type: "transfer",
+                            fromAccount: App.transferFrom,
+                            toAccount: App.transferTo,
+                            item,
+                            amount,
+                            note,
+                        };
+                    } else {
+                        let items = App.saleLines.slice();
+                        if (!items.length) {
+                            const item = qs("#ln-item") ? qs("#ln-item").value.trim() : "";
+                            const amount = parseFloat(qs("#ln-amount") ? qs("#ln-amount").value : "") || 0;
+                            if (item && amount > 0) {
+                                items = [
+                                    {
+                                        category: App.selectedCategory,
+                                        item,
+                                        qty: parseFloat(qs("#ln-qty") ? qs("#ln-qty").value : "") || null,
+                                        unitPrice: parseFloat(qs("#ln-price") ? qs("#ln-price").value : "") || null,
+                                        amount,
+                                    },
+                                ];
+                            }
+                        }
+                        if (!items.length) {
+                            toast("Add at least one item before saving a template");
+                            return;
+                        }
+                        const payChip = qs("#f-payment-row .chip.pay.active");
+                        const payment = payChip ? payChip.dataset.value : "cash";
+                        const note = qs("#f-note") ? qs("#f-note").value.trim() : "";
+                        const total = items.reduce((s, ln) => s + (Number(ln.amount) || 0), 0);
+                        step = {
+                            type: type,
+                            category: items[0].category || App.selectedCategory,
+                            item: items.length === 1 ? items[0].item : items.length + " items",
+                            amount: total,
+                            payment,
+                            note,
+                            items: items.map((ln) => ({
+                                category: ln.category,
+                                item: ln.item,
+                                qty: ln.qty,
+                                unitPrice: ln.unitPrice,
+                                amount: ln.amount,
+                            })),
+                        };
+                    }
+
+                    // Offer: new pack vs add step to existing pack
+                    const packs = await companyTxTemplates();
+                    const choice = prompt(
+                        "Save as:\n• Type a NEW pack name, or\n• Type exact name of an existing pack to ADD this step\n\nExisting: " + (packs.length ? packs.map((p) => p.name).join(", ") : "(none)"),
+                        opts.defaultName || step.item || "Cut-off",
+                    );
+                    if (choice == null) return;
+                    const name = choice.trim();
+                    if (!name) {
+                        toast("Name required");
+                        return;
+                    }
+                    const existing = packs.find((p) => (p.name || "").toLowerCase() === name.toLowerCase());
+                    if (existing) {
+                        const steps = templateSteps(existing);
+                        steps.push(step);
+                        const updated = Object.assign({}, existing, {
+                            steps,
+                            type: null,
+                            amount: steps.reduce((s, x) => s + (Number(x.amount) || 0), 0),
+                        });
+                        await dbPut("txTemplates", updated);
+                        toast('Added step to "' + existing.name + '" (' + steps.length + " steps)");
+                    } else {
+                        const nextOrder = packs.length ? Math.max(...packs.map((t) => (t.order != null ? t.order : 0))) + 1 : 0;
+                        await dbAdd("txTemplates", {
+                            companyId: cid,
+                            name,
+                            order: nextOrder,
+                            createdAt: new Date().toISOString(),
+                            steps: [step],
+                            amount: Number(step.amount) || 0,
+                        });
+                        toast('Pack "' + name + '" created');
+                    }
+                    softRender();
+                }
+
                 /* ---------- ADD ---------- */
                 const TRANSFER_QUICK_TYPES = [
                     { label: "GCash Cash-out", from: "gcash", to: "cash" },
@@ -2450,6 +3075,7 @@
                     const company = await getActiveCompany();
                     const cats = company ? company.categories : { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES };
                     const presetsAll = await companyPresets();
+                    const txTemplates = await companyTxTemplates(); // packs can mix sale/expense/transfer
                     const isTransfer = App.addType === "transfer";
                     const isLineBased = App.addType === "sale" || App.addType === "expense";
                     if (isLineBased && (!App.selectedCategory || !cats[App.addType].includes(App.selectedCategory))) {
@@ -2499,6 +3125,29 @@
                     ]);
                     wrap.appendChild(tabs);
 
+                    // Cut-off packs (can mix sale + expense + transfer)
+                    if (txTemplates.length) {
+                        const tplCard = el("div", { class: "card", style: "padding:12px 14px;margin-bottom:12px" });
+                        tplCard.appendChild(el("div", { class: "flabel", style: "margin-top:0" }, "Cut-off packs"));
+                        tplCard.appendChild(
+                            el("div", { class: "help-text", style: "margin-bottom:8px" }, "Tap a pack to record its steps (sales, expenses, transfers) in one go. Build packs in Settings."),
+                        );
+                        const tplRow = el("div", { class: "chiprow" });
+                        txTemplates.forEach((tpl) => {
+                            const steps = templateSteps(tpl);
+                            const n = steps.length;
+                            const types = Array.from(new Set(steps.map((s) => s.type).filter(Boolean)));
+                            const label = tpl.name || "Pack";
+                            const hint = n > 1 ? " · " + n + " steps" : tpl.amount != null && Number(tpl.amount) > 0 ? " · " + fmtPeso(tpl.amount) : "";
+                            const chip = el("button", { type: "button", class: "chip preset" }, label + hint);
+                            chip.title = types.length ? types.join(" + ") : "Apply pack";
+                            chip.addEventListener("click", () => applyTxTemplate(tpl));
+                            tplRow.appendChild(chip);
+                        });
+                        tplCard.appendChild(tplRow);
+                        wrap.appendChild(tplCard);
+                    }
+
                     const form = el("form", { class: "card form" });
 
                     if (isTransfer) {
@@ -2547,6 +3196,12 @@
 
                         const saveBtn = el("button", { type: "submit", class: "bigbtn transfer" }, "Save Transfer");
                         form.appendChild(saveBtn);
+                        const saveTplBtn = el("button", { type: "button", class: "bigbtn ghost small2" }, "Save into cut-off pack");
+                        saveTplBtn.addEventListener("click", () => {
+                            const def = (qs("#f-item") && qs("#f-item").value.trim()) || accountLabel(App.transferFrom) + " → " + accountLabel(App.transferTo);
+                            saveCurrentAsTemplate({ defaultName: def });
+                        });
+                        form.appendChild(saveTplBtn);
 
                         form.addEventListener("submit", async (e) => {
                             e.preventDefault();
@@ -2882,6 +3537,15 @@
                     const saveLabel = isSale ? "Save Sale" : "Save Expense";
                     const saveBtn = el("button", { type: "submit", class: "bigbtn " + App.addType }, saveLabel);
                     form.appendChild(saveBtn);
+                    const saveTplBtn = el("button", { type: "button", class: "bigbtn ghost small2" }, "Save into cut-off pack");
+                    saveTplBtn.addEventListener("click", () => {
+                        let def = "";
+                        if (App.saleLines.length === 1) def = App.saleLines[0].item || "";
+                        else if (App.saleLines.length > 1) def = App.saleLines.length + " items";
+                        else if (qs("#ln-item")) def = qs("#ln-item").value.trim();
+                        saveCurrentAsTemplate({ defaultName: def || (isSale ? "Sale template" : "Expense template") });
+                    });
+                    form.appendChild(saveTplBtn);
 
                     form.addEventListener("submit", async (e) => {
                         e.preventDefault();
@@ -5849,6 +6513,7 @@
                                 for (const r of await dbGetAll("recurringExpenses")) if (r.companyId === company.id) await dbDelete("recurringExpenses", r.id);
                                 for (const p of await dbGetAll("plannedExpenses")) if (p.companyId === company.id) await dbDelete("plannedExpenses", p.id);
                                 for (const o of await dbGetAll("otherIncome")) if (o.companyId === company.id) await dbDelete("otherIncome", o.id);
+                                for (const t of await dbGetAll("txTemplates")) if (t.companyId === company.id) await dbDelete("txTemplates", t.id);
                             } catch (e) {}
                             await dbDelete("companies", company.id);
                             const remaining = await listCompanies();
@@ -5935,6 +6600,9 @@
                     wrap.appendChild(categoryManager(cats, "expense"));
 
                     // Presets
+                    wrap.appendChild(el("div", { class: "section-title" }, "CUT-OFF PACKS"));
+                    wrap.appendChild(await txTemplateManager());
+
                     wrap.appendChild(el("div", { class: "section-title" }, "QUICK-ITEM PRESETS"));
                     wrap.appendChild(await presetManager(cats));
 
@@ -5969,6 +6637,7 @@
                                     await dbClear("recurringExpenses");
                                     await dbClear("plannedExpenses");
                                     await dbClear("otherIncome");
+                                    await dbClear("txTemplates");
                                 } catch (e) {}
                                 await seedIfEmpty();
                                 toast("All data cleared");
@@ -5982,6 +6651,221 @@
                     wrap.appendChild(el("div", { class: "footnote" }, "Little Ledger — all data stays on this device unless you export it."));
 
                     return wrap;
+                }
+
+                async function txTemplateManager() {
+                    const card = el("div", { class: "card" });
+                    card.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Cut-off packs can combine sales, expenses, and transfers in one run — e.g. groceries + savings + bank→GCash. Tap a pack on the Add page to record every step.",
+                        ),
+                    );
+                    const list = el("div", { class: "presetlist" });
+
+                    async function refresh() {
+                        list.innerHTML = "";
+                        const templates = await companyTxTemplates();
+                        if (!templates.length) {
+                            list.appendChild(
+                                el(
+                                    "div",
+                                    { class: "empty small" },
+                                    "No packs yet. Create one below, or on Add fill a transaction and tap “Save as template” (you can add more steps to the same pack name).",
+                                ),
+                            );
+                            return;
+                        }
+                        templates.forEach((tpl, idx) => {
+                            const steps = templateSteps(tpl);
+                            const types = Array.from(new Set(steps.map((s) => s.type).filter(Boolean)));
+                            const typeHint = types.length ? types.map((t) => (t === "sale" ? "S" : t === "expense" ? "E" : "T")).join("+") : "?";
+                            const nameInp = el("input", {
+                                type: "text",
+                                class: "finput presetrow-name",
+                                value: tpl.name || "",
+                                title: "Pack name",
+                            });
+                            nameInp.addEventListener("change", async () => {
+                                const name = nameInp.value.trim();
+                                if (!name) {
+                                    nameInp.value = tpl.name || "";
+                                    return;
+                                }
+                                await dbPut("txTemplates", Object.assign({}, tpl, { name }));
+                                tpl.name = name;
+                                toast("Name saved");
+                            });
+                            const meta = el(
+                                "div",
+                                { class: "help-text", style: "width:100%;margin:0 0 2px 34px;font-size:11.5px" },
+                                steps.length +
+                                    " step" +
+                                    (steps.length === 1 ? "" : "s") +
+                                    " · " +
+                                    typeHint +
+                                    (steps.length
+                                        ? " — " +
+                                          steps
+                                              .slice(0, 3)
+                                              .map((s) => stepSummary(s) || s.type)
+                                              .join("; ") +
+                                          (steps.length > 3 ? "…" : "")
+                                        : ""),
+                            );
+
+                            const upBtn = el("button", { type: "button", class: "reorder-btn" }, "▲");
+                            const downBtn = el("button", { type: "button", class: "reorder-btn" }, "▼");
+                            if (idx === 0) upBtn.setAttribute("disabled", "disabled");
+                            if (idx === templates.length - 1) downBtn.setAttribute("disabled", "disabled");
+                            upBtn.addEventListener("click", async () => {
+                                if (idx === 0) return;
+                                const other = templates[idx - 1];
+                                const myOrder = tpl.order != null ? tpl.order : idx;
+                                const otherOrder = other.order != null ? other.order : idx - 1;
+                                await dbPut("txTemplates", Object.assign({}, tpl, { order: otherOrder }));
+                                await dbPut("txTemplates", Object.assign({}, other, { order: myOrder }));
+                                refresh();
+                            });
+                            downBtn.addEventListener("click", async () => {
+                                if (idx === templates.length - 1) return;
+                                const other = templates[idx + 1];
+                                const myOrder = tpl.order != null ? tpl.order : idx;
+                                const otherOrder = other.order != null ? other.order : idx + 1;
+                                await dbPut("txTemplates", Object.assign({}, tpl, { order: otherOrder }));
+                                await dbPut("txTemplates", Object.assign({}, other, { order: myOrder }));
+                                refresh();
+                            });
+
+                            const runBtn = el("button", { type: "button", class: "chip", style: "font-size:11px;padding:6px 10px" }, "Run");
+                            runBtn.addEventListener("click", () => openRunTemplateModal(tpl));
+                            const editBtn = el("button", { type: "button", class: "chip", style: "font-size:11px;padding:6px 10px" }, "Edit");
+                            editBtn.addEventListener("click", () => openEditTemplateModal(tpl, refresh));
+                            const delBtn = el("button", { type: "button", class: "chip-x", title: "Delete pack" }, "×");
+                            delBtn.addEventListener("click", async () => {
+                                if (!confirm('Delete pack "' + (tpl.name || "") + '"?')) return;
+                                await dbDelete("txTemplates", tpl.id);
+                                refresh();
+                            });
+
+                            const row = el("div", { class: "presetrow", style: "flex-wrap:wrap" }, [
+                                el("div", { class: "presetrow-reorder" }, [upBtn, downBtn]),
+                                nameInp,
+                                runBtn,
+                                editBtn,
+                                delBtn,
+                                meta,
+                            ]);
+                            list.appendChild(row);
+                        });
+                    }
+
+                    card.appendChild(list);
+
+                    const newBtn = el("button", { type: "button", class: "bigbtn sale small2" }, "New cut-off pack");
+                    newBtn.addEventListener("click", () => openEditTemplateModal(null, refresh));
+                    card.appendChild(newBtn);
+
+                    card.appendChild(el("div", { class: "flabel" }, "Starter packs"));
+                    const quickRow = el("div", { class: "chiprow" });
+                    const STARTERS = [
+                        {
+                            name: "Weekend cut-off",
+                            steps: [
+                                {
+                                    type: "expense",
+                                    category: "Other",
+                                    item: "Groceries",
+                                    amount: 0,
+                                    payment: "cash",
+                                    items: [{ category: "Other", item: "Groceries", qty: null, unitPrice: null, amount: 0 }],
+                                },
+                                {
+                                    type: "transfer",
+                                    fromAccount: "cash",
+                                    toAccount: "bank",
+                                    item: "Savings",
+                                    amount: 0,
+                                },
+                                {
+                                    type: "transfer",
+                                    fromAccount: "bank",
+                                    toAccount: "gcash",
+                                    item: "Bank to GCash",
+                                    amount: 0,
+                                },
+                            ],
+                        },
+                        {
+                            name: "Salary day",
+                            steps: [
+                                {
+                                    type: "expense",
+                                    category: "Other",
+                                    item: "Salary / Labor",
+                                    amount: 0,
+                                    payment: "cash",
+                                    items: [{ category: "Other", item: "Salary / Labor", qty: null, unitPrice: null, amount: 0 }],
+                                },
+                                {
+                                    type: "transfer",
+                                    fromAccount: "cash",
+                                    toAccount: "owner",
+                                    item: "Owner withdrawal",
+                                    amount: 0,
+                                },
+                            ],
+                        },
+                        {
+                            name: "Utilities + restock",
+                            steps: [
+                                {
+                                    type: "expense",
+                                    category: "Utilities",
+                                    item: "Utilities",
+                                    amount: 0,
+                                    payment: "gcash",
+                                    items: [{ category: "Utilities", item: "Utilities", qty: null, unitPrice: null, amount: 0 }],
+                                },
+                                {
+                                    type: "expense",
+                                    category: "Restock",
+                                    item: "Restock supplies",
+                                    amount: 0,
+                                    payment: "cash",
+                                    items: [{ category: "Restock", item: "Restock supplies", qty: null, unitPrice: null, amount: 0 }],
+                                },
+                            ],
+                        },
+                    ];
+                    STARTERS.forEach((q) => {
+                        const chip = el("button", { type: "button", class: "chip preset" }, "+ " + q.name);
+                        chip.addEventListener("click", async () => {
+                            const cid = await getActiveCompanyId();
+                            const existing = await companyTxTemplates();
+                            if (existing.some((t) => (t.name || "").toLowerCase() === q.name.toLowerCase())) {
+                                toast("Already have “" + q.name + "”");
+                                return;
+                            }
+                            const nextOrder = existing.length ? Math.max(...existing.map((t) => (t.order != null ? t.order : 0))) + 1 : 0;
+                            await dbAdd("txTemplates", {
+                                companyId: cid,
+                                name: q.name,
+                                order: nextOrder,
+                                createdAt: new Date().toISOString(),
+                                steps: q.steps,
+                                amount: 0,
+                            });
+                            toast("“" + q.name + "” pack added — Edit to set amounts");
+                            refresh();
+                        });
+                        quickRow.appendChild(chip);
+                    });
+                    card.appendChild(quickRow);
+
+                    await refresh();
+                    return card;
                 }
 
                 function categoryManager(cats, type) {
@@ -6186,7 +7070,7 @@
 
                 /* ---------- Export / Import ---------- */
                 async function exportDB() {
-                    const [transactions, presets, settingsArr, companies, assets, recurringExpenses, plannedExpenses, otherIncome] = await Promise.all([
+                    const [transactions, presets, settingsArr, companies, assets, recurringExpenses, plannedExpenses, otherIncome, txTemplates] = await Promise.all([
                         dbGetAll("transactions"),
                         dbGetAll("presets"),
                         dbGetAll("settings"),
@@ -6195,11 +7079,12 @@
                         dbGetAll("recurringExpenses").catch(() => []),
                         dbGetAll("plannedExpenses").catch(() => []),
                         dbGetAll("otherIncome").catch(() => []),
+                        dbGetAll("txTemplates").catch(() => []),
                     ]);
                     const payload = {
                         app: "little-ledger-pos",
                         exportedAt: new Date().toISOString(),
-                        version: 4,
+                        version: 5,
                         transactions,
                         presets,
                         settings: settingsArr,
@@ -6208,6 +7093,7 @@
                         recurringExpenses,
                         plannedExpenses,
                         otherIncome,
+                        txTemplates,
                     };
                     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
                     const url = URL.createObjectURL(blob);
@@ -6241,6 +7127,7 @@
                             await dbClear("recurringExpenses");
                             await dbClear("plannedExpenses");
                             await dbClear("otherIncome");
+                            await dbClear("txTemplates");
                         } catch (e) {}
 
                         const hasCompanies = Array.isArray(data.companies) && data.companies.length > 0;
@@ -6253,6 +7140,7 @@
                             if (Array.isArray(data.recurringExpenses)) for (const r of data.recurringExpenses) await dbPut("recurringExpenses", r);
                             if (Array.isArray(data.plannedExpenses)) for (const p of data.plannedExpenses) await dbPut("plannedExpenses", p);
                             if (Array.isArray(data.otherIncome)) for (const o of data.otherIncome) await dbPut("otherIncome", o);
+                            if (Array.isArray(data.txTemplates)) for (const t of data.txTemplates) await dbPut("txTemplates", t);
                         } else {
                             // Old single-tenant backup (no companies array) — wrap everything into one company.
                             const legacySettings = {};
