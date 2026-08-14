@@ -868,6 +868,80 @@
             .totalsrow.change .val {
                 color: var(--green);
             }
+            .stmt-card {
+                margin-bottom: 14px;
+            }
+            .stmt-title {
+                font-size: 13px;
+                font-weight: 700;
+                letter-spacing: 0.04em;
+                text-transform: uppercase;
+                color: var(--ink);
+                margin-bottom: 4px;
+            }
+            .stmt-period {
+                font-size: 12px;
+                color: var(--ink-soft);
+                margin-bottom: 10px;
+            }
+            .stmt-row {
+                display: flex;
+                justify-content: space-between;
+                align-items: baseline;
+                gap: 12px;
+                padding: 6px 0;
+                font-size: 13.5px;
+                border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+            }
+            .stmt-row:last-child {
+                border-bottom: none;
+            }
+            .stmt-row.indent span:first-child {
+                padding-left: 14px;
+                color: var(--ink-soft);
+            }
+            .stmt-row.section-head {
+                font-weight: 700;
+                font-size: 12px;
+                text-transform: uppercase;
+                letter-spacing: 0.03em;
+                color: var(--ink-soft);
+                border-bottom: none;
+                padding-top: 12px;
+                padding-bottom: 2px;
+            }
+            .stmt-row.total {
+                font-weight: 700;
+                border-bottom: none;
+                border-top: 2px solid var(--border);
+                margin-top: 4px;
+                padding-top: 10px;
+            }
+            .stmt-row.grand {
+                font-weight: 800;
+                font-size: 15px;
+                border-top: 2px solid var(--ink);
+                border-bottom: 3px double var(--ink);
+                margin-top: 6px;
+                padding: 10px 0;
+            }
+            .stmt-row .stmt-amt {
+                font-family: var(--mono);
+                font-variant-numeric: tabular-nums;
+                white-space: nowrap;
+            }
+            .stmt-row .stmt-amt.pos {
+                color: var(--sales, #0a7a3e);
+            }
+            .stmt-row .stmt-amt.neg {
+                color: var(--expenses, #b42318);
+            }
+            .stmt-note {
+                font-size: 11.5px;
+                color: var(--ink-soft);
+                margin-top: 10px;
+                line-height: 1.45;
+            }
             .totalsrow.change.short .val {
                 color: var(--rust);
             }
@@ -3895,7 +3969,316 @@
                         wrap.appendChild(topSection);
                     }
 
+                    // ---- Financial Statements ----
+                    wrap.appendChild(await renderFinancialStatements(txs, allTxs, bal, App.reportRange));
+
                     return wrap;
+                }
+
+                function reportPeriodLabel(range) {
+                    if (range === "today") return "Today";
+                    if (range === "week") return "This week";
+                    if (range === "month") return "This month";
+                    return "All time";
+                }
+
+                function stmtRow(label, amount, opts) {
+                    opts = opts || {};
+                    const cls = "stmt-row" + (opts.indent ? " indent" : "") + (opts.section ? " section-head" : "") + (opts.total ? " total" : "") + (opts.grand ? " grand" : "");
+                    if (opts.section) {
+                        return el("div", { class: cls }, [el("span", {}, label)]);
+                    }
+                    const amtCls = "stmt-amt" + (opts.signed && amount > 0 ? " pos" : opts.signed && amount < 0 ? " neg" : "");
+                    const show = opts.blank ? "" : fmtPeso(amount);
+                    return el("div", { class: cls }, [el("span", {}, label), el("span", { class: amtCls }, show)]);
+                }
+
+                /**
+                 * Income Statement (P&L), Balance Sheet, Cash Flow — management view from POS data.
+                 * COGS uses Costing weighted avg margin when available; otherwise expenses only.
+                 */
+                async function renderFinancialStatements(periodTxs, allTxs, bal, range) {
+                    const section = el("div", { class: "section" });
+                    section.appendChild(el("div", { class: "section-title" }, "FINANCIAL STATEMENTS"));
+                    section.appendChild(
+                        el("div", { class: "help-text" }, "Management statements from your POS books. Not a formal audit — good for decisions and AI discussion. Period follows the chips above."),
+                    );
+
+                    const periodLabel = reportPeriodLabel(range);
+                    const revenue = sumBy(periodTxs, (t) => t.type === "sale");
+                    const opex = sumBy(periodTxs, (t) => t.type === "expense");
+
+                    // Expense breakdown by category for P&L detail
+                    const expByCat = {};
+                    periodTxs
+                        .filter((t) => t.type === "expense")
+                        .forEach((t) => {
+                            txLines(t).forEach((ln) => {
+                                const cat = ln.category || t.category || "Other";
+                                expByCat[cat] = (expByCat[cat] || 0) + (Number(ln.amount) || 0);
+                            });
+                        });
+                    const expCats = Object.entries(expByCat).sort((a, b) => b[1] - a[1]);
+
+                    // Costing margin → estimated COGS
+                    let avgMargin = null;
+                    let estimatedCogs = null;
+                    let grossProfit = null;
+                    try {
+                        const snap = await loadCostingInventorySnapshot();
+                        if (snap.ok && snap.metrics && snap.metrics.avgMargin != null && isFinite(snap.metrics.avgMargin)) {
+                            avgMargin = snap.metrics.avgMargin;
+                            estimatedCogs = revenue * (1 - avgMargin / 100);
+                            grossProfit = revenue - estimatedCogs;
+                        }
+                    } catch (e) {}
+
+                    // Other income memo (forecast sources — not always booked as POS txs)
+                    let otherIncomeMemo = 0;
+                    try {
+                        const oi = await companyOtherIncome();
+                        otherIncomeMemo = (oi || []).filter((o) => !o.received).reduce((s, o) => s + (Number(o.amount) || 0), 0);
+                    } catch (e) {}
+
+                    const netIncome = avgMargin != null ? grossProfit - opex : revenue - opex;
+
+                    // ---- Income Statement ----
+                    const pl = el("div", { class: "card stmt-card" });
+                    pl.appendChild(el("div", { class: "stmt-title" }, "Income Statement (P&L)"));
+                    pl.appendChild(el("div", { class: "stmt-period" }, periodLabel + " · Revenue − costs"));
+                    pl.appendChild(stmtRow("Revenue", 0, { section: true }));
+                    pl.appendChild(stmtRow("Sales / services", revenue, { indent: true }));
+                    pl.appendChild(stmtRow("Total revenue", revenue, { total: true }));
+                    if (avgMargin != null) {
+                        pl.appendChild(stmtRow("Cost of goods / services", 0, { section: true }));
+                        pl.appendChild(stmtRow("Estimated COGS (" + fmtPct(avgMargin) + " margin)", estimatedCogs, { indent: true }));
+                        pl.appendChild(stmtRow("Gross profit", grossProfit, { total: true, signed: true }));
+                    }
+                    pl.appendChild(stmtRow("Operating expenses", 0, { section: true }));
+                    if (expCats.length) {
+                        expCats.forEach(([cat, amt]) => pl.appendChild(stmtRow(cat, amt, { indent: true })));
+                    } else {
+                        pl.appendChild(stmtRow("No expenses in period", 0, { indent: true, blank: true }));
+                    }
+                    pl.appendChild(stmtRow("Total operating expenses", opex, { total: true }));
+                    pl.appendChild(stmtRow(avgMargin != null ? "Net income (est.)" : "Net (sales − expenses)", netIncome, { grand: true, signed: true }));
+                    pl.appendChild(
+                        el(
+                            "div",
+                            { class: "stmt-note" },
+                            avgMargin != null
+                                ? "COGS is estimated from Costing weighted avg margin applied to period sales (not item-level actual cost). Owner drawings and internal transfers are not operating expenses."
+                                : "Open Costing with priced products to estimate COGS and gross profit. Until then, Net is sales minus recorded expenses only.",
+                        ),
+                    );
+                    section.appendChild(pl);
+
+                    // ---- Balance Sheet ----
+                    const assets = await companyAssets();
+                    const fixedAssets = assets.reduce((s, a) => s + (Number(a.currentValue != null ? a.currentValue : a.cost) || 0), 0);
+                    const liquid = (bal.cash || 0) + (bal.gcash || 0) + (bal.bank || 0);
+                    const currentAssets = liquid + (bal.receivable || 0);
+                    const totalAssets = currentAssets + fixedAssets;
+
+                    const planned = await companyPlanned();
+                    const unpaidPlanned = planned.filter((p) => !p.paid);
+                    const liabilities = unpaidPlanned.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+                    const equity = totalAssets - liabilities;
+
+                    const bs = el("div", { class: "card stmt-card" });
+                    bs.appendChild(el("div", { class: "stmt-title" }, "Balance Sheet"));
+                    bs.appendChild(el("div", { class: "stmt-period" }, "As of now (point-in-time)"));
+                    bs.appendChild(stmtRow("Assets", 0, { section: true }));
+                    bs.appendChild(stmtRow("Cash on hand", bal.cash || 0, { indent: true }));
+                    bs.appendChild(stmtRow("GCash", bal.gcash || 0, { indent: true }));
+                    bs.appendChild(stmtRow("Bank", bal.bank || 0, { indent: true }));
+                    bs.appendChild(stmtRow("Accounts receivable", bal.receivable || 0, { indent: true }));
+                    bs.appendChild(stmtRow("Current assets", currentAssets, { total: true }));
+                    bs.appendChild(stmtRow("Fixed assets (equipment, etc.)", fixedAssets, { indent: true }));
+                    if (assets.length) {
+                        assets.forEach((a) => {
+                            const v = Number(a.currentValue != null ? a.currentValue : a.cost) || 0;
+                            if (v || a.name) bs.appendChild(stmtRow("· " + (a.name || "Asset"), v, { indent: true }));
+                        });
+                    }
+                    bs.appendChild(stmtRow("Total assets", totalAssets, { grand: true }));
+                    bs.appendChild(stmtRow("Liabilities", 0, { section: true }));
+                    if (unpaidPlanned.length) {
+                        unpaidPlanned.forEach((p) => {
+                            bs.appendChild(stmtRow((p.name || "Obligation") + (p.type ? " [" + p.type + "]" : ""), Number(p.amount) || 0, { indent: true }));
+                        });
+                    } else {
+                        bs.appendChild(stmtRow("No unpaid planned obligations recorded", 0, { indent: true, blank: true }));
+                    }
+                    bs.appendChild(stmtRow("Total liabilities", liabilities, { total: true }));
+                    bs.appendChild(stmtRow("Equity (assets − liabilities)", equity, { grand: true, signed: true }));
+                    bs.appendChild(
+                        el(
+                            "div",
+                            { class: "stmt-note" },
+                            "Liabilities here are unpaid items from Forecast → Planned expenses (e.g. SpayLater). Formal loans not logged there won’t appear. Equity is a plug for management use.",
+                        ),
+                    );
+                    section.appendChild(bs);
+
+                    // ---- Cash Flow ----
+                    const salesCashLike = sumBy(periodTxs, (t) => t.type === "sale" && (t.payment === "cash" || t.payment === "gcash" || t.payment === "bank"));
+                    // Gross credit sales booked in the period (whether or not later collected)
+                    const creditSalesPeriod = sumBy(periodTxs, (t) => t.type === "sale" && t.payment === "receivable");
+                    const expCashLike = sumBy(periodTxs, (t) => t.type === "expense" && (t.payment === "cash" || t.payment === "gcash" || t.payment === "bank"));
+                    // Collections: transfers receivable → cash/gcash/bank
+                    const collections = sumBy(
+                        periodTxs,
+                        (t) => t.type === "transfer" && t.fromAccount === "receivable" && (t.toAccount === "cash" || t.toAccount === "gcash" || t.toAccount === "bank"),
+                    );
+                    // Other AR movements in period (rare: transfer into receivable, or expense paid via receivable)
+                    const arOtherIn = sumBy(periodTxs, (t) => t.type === "transfer" && t.toAccount === "receivable");
+                    const arOtherOut = sumBy(
+                        periodTxs,
+                        (t) =>
+                            (t.type === "expense" && t.payment === "receivable") ||
+                            (t.type === "transfer" && t.fromAccount === "receivable" && t.toAccount !== "cash" && t.toAccount !== "gcash" && t.toAccount !== "bank"),
+                    );
+
+                    // Owner / financing style transfers
+                    const ownerIn = sumBy(periodTxs, (t) => t.type === "transfer" && t.fromAccount === "owner");
+                    const ownerOut = sumBy(periodTxs, (t) => t.type === "transfer" && t.toAccount === "owner");
+                    // Investing-ish: expenses tagged investment or planned investment payments
+                    const investExp = sumBy(periodTxs, (t) => t.type === "expense" && /invest|equipment|printer|capital/i.test((t.category || "") + " " + (t.item || "")));
+
+                    const opsIn = salesCashLike + collections;
+                    const opsOut = expCashLike;
+                    const opsNet = opsIn - opsOut;
+                    const finNet = ownerIn - ownerOut;
+                    const invNet = -investExp;
+                    const netCashChange = opsNet + invNet + finNet;
+
+                    // AR rollforward so BS receivable and period activity reconcile
+                    // Ending AR (balance sheet) = opening + credit sales − collections ± other
+                    // Opening = ending − period net AR change (works for any report range)
+                    const endingAR = Number(bal.receivable) || 0;
+                    const periodArIncrease = creditSalesPeriod + arOtherIn - collections - arOtherOut;
+                    const openingAR = endingAR - periodArIncrease;
+                    // Still-open credit sales (sale rows not marked collected) — informational; ledger AR is source of truth
+                    const openCreditSales = sumBy(allTxs, (t) => t.type === "sale" && t.payment === "receivable" && !t.collectedAt);
+                    const arGap = Math.round((endingAR - openCreditSales) * 100) / 100;
+
+                    const cf = el("div", { class: "card stmt-card" });
+                    cf.appendChild(el("div", { class: "stmt-title" }, "Cash Flow Statement"));
+                    cf.appendChild(el("div", { class: "stmt-period" }, periodLabel + " · Cash, GCash & bank movements"));
+                    cf.appendChild(stmtRow("Operating activities", 0, { section: true }));
+                    cf.appendChild(stmtRow("Cash sales (cash / GCash / bank)", salesCashLike, { indent: true }));
+                    cf.appendChild(stmtRow("Receivable collections", collections, { indent: true }));
+                    cf.appendChild(stmtRow("Cash operating expenses", -expCashLike, { indent: true, signed: true }));
+                    cf.appendChild(stmtRow("Net cash from operations", opsNet, { total: true, signed: true }));
+                    cf.appendChild(stmtRow("Investing activities", 0, { section: true }));
+                    cf.appendChild(stmtRow("Equipment / investment-like expenses", -investExp, { indent: true, signed: true }));
+                    cf.appendChild(stmtRow("Net cash from investing", invNet, { total: true, signed: true }));
+                    cf.appendChild(stmtRow("Financing activities", 0, { section: true }));
+                    cf.appendChild(stmtRow("Owner contributions (from Owner)", ownerIn, { indent: true }));
+                    cf.appendChild(stmtRow("Owner drawings (to Owner)", -ownerOut, { indent: true, signed: true }));
+                    cf.appendChild(stmtRow("Net cash from financing", finNet, { total: true, signed: true }));
+                    cf.appendChild(stmtRow("Net change in liquid cash", netCashChange, { grand: true, signed: true }));
+                    section.appendChild(cf);
+
+                    // ---- Accounts receivable reconciliation (ties BS ↔ period activity) ----
+                    const arCard = el("div", { class: "card stmt-card" });
+                    arCard.appendChild(el("div", { class: "stmt-title" }, "Accounts receivable reconciliation"));
+                    arCard.appendChild(el("div", { class: "stmt-period" }, "Why BS receivable can differ from “credit sales this period” — those are different measures"));
+                    arCard.appendChild(stmtRow("Opening AR (start of period)", openingAR, { indent: true }));
+                    arCard.appendChild(stmtRow("+ Credit sales booked this period", creditSalesPeriod, { indent: true }));
+                    if (arOtherIn > 0) arCard.appendChild(stmtRow("+ Other transfers into AR", arOtherIn, { indent: true }));
+                    arCard.appendChild(stmtRow("− Collections this period", collections, { indent: true }));
+                    if (arOtherOut > 0) arCard.appendChild(stmtRow("− Other AR reductions", arOtherOut, { indent: true }));
+                    arCard.appendChild(stmtRow("Ending AR (Balance Sheet)", endingAR, { grand: true }));
+                    arCard.appendChild(
+                        el(
+                            "div",
+                            { class: "stmt-note" },
+                            "Credit sales this period (" +
+                                fmtPeso(creditSalesPeriod) +
+                                ") is activity, not the unpaid balance. " +
+                                "Ending AR on the Balance Sheet is what customers still owe after collections. " +
+                                (Math.abs(periodArIncrease) > 0.005 ? "Net AR change this period: " + fmtPeso(periodArIncrease) + "." : "No net AR change this period."),
+                        ),
+                    );
+                    if (Math.abs(arGap) > 0.05) {
+                        arCard.appendChild(
+                            el(
+                                "div",
+                                { class: "stmt-note" },
+                                "Note: sum of open receivable sales (not marked collected) is " +
+                                    fmtPeso(openCreditSales) +
+                                    " vs ledger AR " +
+                                    fmtPeso(endingAR) +
+                                    " (Δ " +
+                                    fmtPeso(arGap) +
+                                    "). Often starting receivable, a collection without Mark as paid, or Mark as paid without a transfer. Ledger AR on the Balance Sheet is the figure to use.",
+                            ),
+                        );
+                    }
+                    section.appendChild(arCard);
+
+                    // Copy-friendly block for AI
+                    const copyCard = el("div", { class: "card stmt-card" });
+                    copyCard.appendChild(el("div", { class: "stmt-title" }, "Copy statements for AI"));
+                    const text = [
+                        "=== Financial statements (" + periodLabel + ") ===",
+                        "",
+                        "INCOME STATEMENT",
+                        "Revenue (sales): " + fmtPeso(revenue),
+                        avgMargin != null ? "Est. COGS @" + fmtPct(avgMargin) + " margin: " + fmtPeso(estimatedCogs) : "COGS: (not estimated — no Costing margin)",
+                        avgMargin != null ? "Gross profit: " + fmtPeso(grossProfit) : null,
+                        "Operating expenses: " + fmtPeso(opex),
+                        expCats.map(([c, a]) => "  - " + c + ": " + fmtPeso(a)).join("\n"),
+                        "Net income (est.): " + fmtPeso(netIncome),
+                        "",
+                        "BALANCE SHEET (as of now)",
+                        "Cash: " + fmtPeso(bal.cash),
+                        "GCash: " + fmtPeso(bal.gcash),
+                        "Bank: " + fmtPeso(bal.bank),
+                        "Accounts receivable (ending): " + fmtPeso(endingAR),
+                        "Fixed assets: " + fmtPeso(fixedAssets),
+                        "Total assets: " + fmtPeso(totalAssets),
+                        "Liabilities (unpaid planned): " + fmtPeso(liabilities),
+                        "Equity (plug): " + fmtPeso(equity),
+                        "",
+                        "AR RECONCILIATION (" + periodLabel + ")",
+                        "Opening AR: " + fmtPeso(openingAR),
+                        "+ Credit sales booked this period: " + fmtPeso(creditSalesPeriod),
+                        "− Collections this period: " + fmtPeso(collections),
+                        "= Ending AR (matches Balance Sheet): " + fmtPeso(endingAR),
+                        "Note: credit sales this period is period activity, NOT the unpaid balance.",
+                        "",
+                        "CASH FLOW (" + periodLabel + ")",
+                        "Net from operations: " + fmtPeso(opsNet),
+                        "Net from investing: " + fmtPeso(invNet),
+                        "Net from financing: " + fmtPeso(finNet),
+                        "Net change in liquid cash: " + fmtPeso(netCashChange),
+                    ]
+                        .filter((line) => line != null && line !== "")
+                        .join("\n");
+                    const ta = el("textarea", {
+                        class: "finput",
+                        style: "min-height:120px;font-family:var(--mono);font-size:11.5px;line-height:1.4;resize:vertical",
+                        readonly: "readonly",
+                    });
+                    ta.value = text;
+                    copyCard.appendChild(ta);
+                    const copyBtn = el("button", { type: "button", class: "bigbtn sale small2" }, "Copy statements");
+                    copyBtn.addEventListener("click", async () => {
+                        try {
+                            await navigator.clipboard.writeText(ta.value);
+                            toast("Statements copied");
+                        } catch (e) {
+                            ta.select();
+                            toast("Select & copy manually");
+                        }
+                    });
+                    copyCard.appendChild(copyBtn);
+                    section.appendChild(copyCard);
+
+                    return section;
                 }
                 function summaryCard(label, amount, cls) {
                     return el("div", { class: "summary-card" }, [el("div", { class: "sc-label" }, label), el("div", { class: "sc-value " + cls }, fmtPeso(amount))]);
