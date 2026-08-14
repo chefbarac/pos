@@ -1288,6 +1288,7 @@
             <a href="#/add" class="navbtn" data-route="add"><span class="navicon">&#43;</span><span>Add</span></a>
             <a href="#/history" class="navbtn" data-route="history"><span class="navicon">&#8801;</span><span>History</span></a>
             <a href="#/reports" class="navbtn" data-route="reports"><span class="navicon">&#9776;</span><span>Reports</span></a>
+            <a href="#/forecast" class="navbtn" data-route="forecast"><span class="navicon">&#9733;</span><span>Forecast</span></a>
             <a href="#/settings" class="navbtn" data-route="settings"><span class="navicon">&#9881;</span><span>Settings</span></a>
         </nav>
 
@@ -1669,7 +1670,7 @@
 
                 /* ---------- IndexedDB layer ---------- */
                 const DB_NAME = "littleLedgerDB";
-                const DB_VERSION = 2;
+                const DB_VERSION = 4;
                 let dbPromise = null;
 
                 function openDB() {
@@ -1702,6 +1703,23 @@
                             }
                             if (!db.objectStoreNames.contains("companies")) {
                                 db.createObjectStore("companies", { keyPath: "id", autoIncrement: true });
+                            }
+                            // Forecast data (company-scoped)
+                            if (!db.objectStoreNames.contains("assets")) {
+                                const assetStore = db.createObjectStore("assets", { keyPath: "id", autoIncrement: true });
+                                assetStore.createIndex("companyId", "companyId");
+                            }
+                            if (!db.objectStoreNames.contains("recurringExpenses")) {
+                                const recStore = db.createObjectStore("recurringExpenses", { keyPath: "id", autoIncrement: true });
+                                recStore.createIndex("companyId", "companyId");
+                            }
+                            if (!db.objectStoreNames.contains("plannedExpenses")) {
+                                const planStore = db.createObjectStore("plannedExpenses", { keyPath: "id", autoIncrement: true });
+                                planStore.createIndex("companyId", "companyId");
+                            }
+                            if (!db.objectStoreNames.contains("otherIncome")) {
+                                const incStore = db.createObjectStore("otherIncome", { keyPath: "id", autoIncrement: true });
+                                incStore.createIndex("companyId", "companyId");
                             }
                         };
                         req.onsuccess = (e) => resolve(e.target.result);
@@ -1807,6 +1825,7 @@
                         startingCash: 0,
                         startingGcash: 0,
                         startingBank: 0,
+                        startingReceivable: 0,
                         createdAt: new Date().toISOString(),
                     };
                     const id = await dbAdd("companies", company);
@@ -1829,6 +1848,7 @@
                             startingCash: (legacyCash && legacyCash.value) || 0,
                             startingGcash: (legacyGcash && legacyGcash.value) || 0,
                             startingBank: (legacyBank && legacyBank.value) || 0,
+                            startingReceivable: 0,
                             createdAt: new Date().toISOString(),
                         };
                         const id = await dbAdd("companies", company);
@@ -1997,6 +2017,8 @@
                     // by default on the flow chart so the chart opens on gross activity, not profit.
                     trendHidden: { balance: [], flow: ["net"] },
                     editingId: null,
+                    forecastHorizonDays: 30, // projection window for cash-on-hand / revenue
+                    forecastTargetDate: null, // optional ISO date string for "cash on hand by date"
                 };
 
                 /* ---------- Routing ---------- */
@@ -2015,6 +2037,7 @@
                     else if (route === "add") main.appendChild(await renderAdd());
                     else if (route === "history") main.appendChild(await renderHistory());
                     else if (route === "reports") main.appendChild(await renderReports());
+                    else if (route === "forecast") main.appendChild(await renderForecast());
                     else if (route === "settings") main.appendChild(await renderSettings());
                     else main.appendChild(await renderHome());
                     window.scrollTo(0, 0);
@@ -2052,8 +2075,14 @@
                     const startCash = company ? company.startingCash : 0;
                     const startGcash = company ? company.startingGcash : 0;
                     const startBank = company ? company.startingBank : 0;
+                    const startReceivable = company ? company.startingReceivable : 0;
                     const txs = txsOverride || (await allTx());
-                    const bal = { cash: Number(startCash) || 0, gcash: Number(startGcash) || 0, bank: Number(startBank) || 0 };
+                    const bal = {
+                        cash: Number(startCash) || 0,
+                        gcash: Number(startGcash) || 0,
+                        bank: Number(startBank) || 0,
+                        receivable: Number(startReceivable) || 0,
+                    };
                     for (const t of txs) {
                         if (t.type === "sale" && bal.hasOwnProperty(t.payment)) bal[t.payment] += Number(t.amount) || 0;
                         else if (t.type === "expense" && bal.hasOwnProperty(t.payment)) bal[t.payment] -= Number(t.amount) || 0;
@@ -2111,6 +2140,7 @@
                             el("div", { class: "balitem lead" }, [el("div", { class: "bal-label" }, "Cash on Hand"), el("div", { class: "bal-value" }, fmtPeso(bal.cash))]),
                             el("div", { class: "balitem" }, [el("div", { class: "bal-label" }, "GCash"), el("div", { class: "bal-value" }, fmtPeso(bal.gcash))]),
                             el("div", { class: "balitem" }, [el("div", { class: "bal-label" }, "Bank"), el("div", { class: "bal-value" }, fmtPeso(bal.bank))]),
+                            el("div", { class: "balitem" }, [el("div", { class: "bal-label" }, "Receivable"), el("div", { class: "bal-value" }, fmtPeso(bal.receivable))]),
                         ]),
                     );
 
@@ -2223,6 +2253,16 @@
                     }
                     titleKids.push(document.createTextNode(titleText || ""));
                     if (isSale) {
+                        if (t.excludeFromForecast) {
+                            titleKids.push(el("span", { class: "badge-warn", title: "Excluded from Forecast averages and demand rankings (still in books & inventory)" }, "excl. forecast"));
+                        }
+                        if (t.payment === "receivable") {
+                            if (t.collectedAt) {
+                                titleKids.push(el("span", { class: "badge-inv ok", title: "Receivable collected" }, "collected"));
+                            } else {
+                                titleKids.push(el("span", { class: "badge-inv missing", title: "Awaiting payment — inventory already tracked" }, "receivable"));
+                            }
+                        }
                         const recorded = isSaleRecordedInInventory(t);
                         if (recorded === false) {
                             titleKids.push(el("span", { class: "badge-inv missing", title: "No stock-out in Costing for this sale yet" }, "not in inventory"));
@@ -2254,17 +2294,19 @@
                     if (p === "cash") return "Cash";
                     if (p === "gcash") return "GCash";
                     if (p === "bank") return "Bank";
+                    if (p === "receivable") return "Receivable";
                     return "Other";
                 }
                 function accountLabel(a) {
                     if (a === "cash") return "Cash";
                     if (a === "gcash") return "GCash";
                     if (a === "bank") return "Bank";
+                    if (a === "receivable") return "Receivable";
                     if (a === "owner") return "Owner";
                     return a || "";
                 }
                 function buildAccountChips(selectedValue, onChange, opts) {
-                    const accounts = (opts && opts.accounts) || ["cash", "gcash", "bank", "owner"];
+                    const accounts = (opts && opts.accounts) || ["cash", "gcash", "bank", "receivable", "owner"];
                     const row = el("div", { class: "chiprow" });
                     accounts.forEach((a) => {
                         const chip = el("button", { type: "button", class: "chip" + (a === selectedValue ? " active" : "") }, accountLabel(a));
@@ -2285,6 +2327,9 @@
                     { label: "Cash-in to GCash", from: "cash", to: "gcash" },
                     { label: "Bank Withdrawal", from: "bank", to: "cash" },
                     { label: "Bank Deposit", from: "cash", to: "bank" },
+                    { label: "Collect Receivable → Cash", from: "receivable", to: "cash" },
+                    { label: "Collect Receivable → GCash", from: "receivable", to: "gcash" },
+                    { label: "Collect Receivable → Bank", from: "receivable", to: "bank" },
                     { label: "Owner Withdrawal", from: "cash", to: "owner" },
                     { label: "Owner Investment", from: "owner", to: "cash" },
                 ];
@@ -2663,22 +2708,27 @@
                     let payRow = null;
                     form.appendChild(el("label", { class: "flabel" }, "Payment Method"));
                     payRow = el("div", { class: "chiprow", id: "f-payment-row" });
-                    ["cash", "gcash", "bank", "other"].forEach((p, i) => {
+                    const paymentOptions = isSale ? ["cash", "gcash", "bank", "receivable", "other"] : ["cash", "gcash", "bank", "other"];
+                    paymentOptions.forEach((p, i) => {
                         const chip = el("button", { type: "button", class: "chip pay" + (i === 0 ? " active" : "") }, paymentLabel(p));
                         chip.dataset.value = p;
                         chip.addEventListener("click", () => {
                             qsa(".chip.pay", payRow).forEach((c) => c.classList.remove("active"));
                             chip.classList.add("active");
                             updateChangeDue();
+                            // Amount tendered only applies to cash-like payments
+                            const tenderWrap = qs("#f-tendered-wrap");
+                            if (tenderWrap) tenderWrap.style.display = p === "receivable" ? "none" : "";
                         });
                         payRow.appendChild(chip);
                     });
                     form.appendChild(payRow);
 
-                    // Change computation (most relevant for sales, but useful whenever cash physically changes hands)
+                    // Change computation (most relevant for sales paid in cash; hidden for receivable)
                     let changeRow = null;
                     if (isSale) {
-                        form.appendChild(el("label", { class: "flabel" }, "Amount Tendered (optional)"));
+                        const tenderWrap = el("div", { id: "f-tendered-wrap" });
+                        tenderWrap.appendChild(el("label", { class: "flabel" }, "Amount Tendered (optional)"));
                         const tenderedInp = el("input", {
                             id: "f-tendered",
                             type: "number",
@@ -2689,10 +2739,10 @@
                             inputmode: "decimal",
                             oninput: updateChangeDue,
                         });
-                        form.appendChild(tenderedInp);
-
+                        tenderWrap.appendChild(tenderedInp);
                         changeRow = el("div", { class: "totalsrow change", id: "changeRow" }, [el("span", {}, "Change Due"), el("span", { class: "val", id: "changeDisplay" }, fmtPeso(0))]);
-                        form.appendChild(changeRow);
+                        tenderWrap.appendChild(changeRow);
+                        form.appendChild(tenderWrap);
                     }
 
                     function updateChangeDue() {
@@ -2872,6 +2922,9 @@
                         ["all", "All"],
                         ["no_costing", "No Costing"],
                         ["not_in_inventory", "Not in inventory"],
+                        ["receivable", "Receivable"],
+                        ["collected", "Collected"],
+                        ["excl_forecast", "Excl. forecast"],
                     ].forEach(([val, label]) => {
                         const chip = el("button", { type: "button", class: "chip" + (App.historyFilters.inventory === val ? " active" : "") }, label);
                         chip.addEventListener("click", () => {
@@ -2915,6 +2968,14 @@
                             });
                         } else if (f.inventory === "not_in_inventory") {
                             txs = txs.filter((t) => t.type === "sale" && isSaleRecordedInInventory(t) === false);
+                        } else if (f.inventory === "receivable") {
+                            // Outstanding credit sales (payment=receivable, not yet marked paid)
+                            txs = txs.filter((t) => t.type === "sale" && t.payment === "receivable" && !t.collectedAt);
+                        } else if (f.inventory === "collected") {
+                            // Receivable sales that were later marked as paid
+                            txs = txs.filter((t) => t.type === "sale" && t.payment === "receivable" && !!t.collectedAt);
+                        } else if (f.inventory === "excl_forecast") {
+                            txs = txs.filter((t) => t.type === "sale" && isExcludedFromForecast(t));
                         }
                         if (f.search) {
                             const s = f.search.toLowerCase();
@@ -2928,7 +2989,13 @@
                                     ? "No sales with unknown Costing product names in this range."
                                     : f.inventory === "not_in_inventory"
                                       ? "All sales in this range are already recorded in inventory."
-                                      : "Try a different filter or date range.";
+                                      : f.inventory === "receivable"
+                                        ? "No outstanding receivable sales in this range."
+                                        : f.inventory === "collected"
+                                          ? "No collected receivable sales in this range."
+                                          : f.inventory === "excl_forecast"
+                                            ? "No sales marked “exclude from Forecast” in this range."
+                                            : "Try a different filter or date range.";
                             listHost.appendChild(el("div", { class: "empty" }, [el("div", { class: "empty-title" }, "No transactions found"), el("div", { class: "empty-sub" }, emptySub)]));
                             return;
                         }
@@ -3041,7 +3108,8 @@
                     } else {
                         modal.appendChild(el("label", { class: "flabel" }, "Payment Method"));
                         payRow = el("div", { class: "chiprow" });
-                        ["cash", "gcash", "bank", "other"].forEach((p) => {
+                        const editPayOptions = t.type === "sale" ? ["cash", "gcash", "bank", "receivable", "other"] : ["cash", "gcash", "bank", "other"];
+                        editPayOptions.forEach((p) => {
                             const chip = el("button", { type: "button", class: "chip pay" + (t.payment === p ? " active" : "") }, paymentLabel(p));
                             chip.dataset.value = p;
                             chip.addEventListener("click", () => {
@@ -3051,6 +3119,19 @@
                             payRow.appendChild(chip);
                         });
                         modal.appendChild(payRow);
+                        if (t.type === "sale" && t.payment === "receivable" && !t.collectedAt) {
+                            modal.appendChild(
+                                el("div", { class: "help-text", style: "margin-top:8px" }, "This sale is on receivable. Inventory is tracked. Use “Mark as paid” below when the customer pays."),
+                            );
+                        } else if (t.type === "sale" && t.collectedAt) {
+                            modal.appendChild(
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:8px" },
+                                    "Collected " + new Date(t.collectedAt).toLocaleString("en-PH") + (t.collectedTo ? " → " + accountLabel(t.collectedTo) : "") + ".",
+                                ),
+                            );
+                        }
                     }
 
                     let tenderedInp = null;
@@ -3075,11 +3156,31 @@
                     const noteInp = el("input", { type: "text", class: "finput", value: t.note || "" });
                     modal.appendChild(noteInp);
 
+                    let excludeForecastChk = null;
+                    if (t.type === "sale") {
+                        const exclWrap = el("label", {
+                            class: "help-text",
+                            style: "display:flex;align-items:flex-start;gap:8px;margin-top:12px;cursor:pointer;line-height:1.4",
+                        });
+                        excludeForecastChk = el("input", {
+                            type: "checkbox",
+                            style: "margin-top:2px;flex-shrink:0;width:16px;height:16px",
+                        });
+                        if (t.excludeFromForecast) excludeForecastChk.checked = true;
+                        exclWrap.appendChild(excludeForecastChk);
+                        exclWrap.appendChild(document.createTextNode("Exclude from Forecast (bulk / personal / one-off that skews averages). Sale stays in History, balances, and inventory."));
+                        modal.appendChild(exclWrap);
+                    }
+
                     const btnKids = [
                         el("button", { type: "button", class: "bigbtn ghost" }, "Cancel"),
                         el("button", { type: "button", class: "bigbtn danger" }, "Delete"),
                         el("button", { type: "button", class: "bigbtn sale" }, "Save"),
                     ];
+                    const canMarkPaid = t.type === "sale" && t.payment === "receivable" && !t.collectedAt;
+                    if (canMarkPaid) {
+                        btnKids.push(el("button", { type: "button", class: "bigbtn transfer", style: "flex-basis:100%" }, "Mark as paid"));
+                    }
                     if (t.type === "sale") {
                         btnKids.push(el("button", { type: "button", class: "bigbtn transfer", style: "flex-basis:100%" }, "Apply inventory"));
                     }
@@ -3089,7 +3190,15 @@
                     const cancelBtn = btnRow.children[0];
                     const delBtn = btnRow.children[1];
                     const saveBtn = btnRow.children[2];
-                    const applyInvBtn = t.type === "sale" ? btnRow.children[3] : null;
+                    let markPaidBtn = null;
+                    let applyInvBtn = null;
+                    let btnIdx = 3;
+                    if (canMarkPaid) {
+                        markPaidBtn = btnRow.children[btnIdx++];
+                    }
+                    if (t.type === "sale") {
+                        applyInvBtn = btnRow.children[btnIdx];
+                    }
                     cancelBtn.addEventListener("click", () => overlay.remove());
                     overlay.addEventListener("click", (e) => {
                         if (e.target === overlay) overlay.remove();
@@ -3137,6 +3246,65 @@
                             loadRecordedPosSaleIds(true).catch(() => {});
                         });
                     }
+                    if (markPaidBtn) {
+                        markPaidBtn.addEventListener("click", () => {
+                            // Inline collector: pick Cash / GCash / Bank, then write transfer + mark sale collected
+                            if (qs("#collect-picker", modal)) return;
+                            const picker = el("div", { id: "collect-picker", style: "margin-top:12px;padding-top:12px;border-top:1px dotted var(--border)" });
+                            picker.appendChild(el("div", { class: "flabel" }, "Collect into"));
+                            const row = el("div", { class: "chiprow" });
+                            ["cash", "gcash", "bank"].forEach((to) => {
+                                const chip = el("button", { type: "button", class: "chip pay" }, accountLabel(to));
+                                chip.addEventListener("click", async () => {
+                                    const amount = Number(t.amount) || 0;
+                                    if (amount <= 0) {
+                                        toast("Invalid sale amount");
+                                        return;
+                                    }
+                                    const cid = await getActiveCompanyId();
+                                    const transfer = {
+                                        type: "transfer",
+                                        companyId: cid,
+                                        category: "Transfer",
+                                        item: "Collect Sale #" + id + " → " + accountLabel(to),
+                                        qty: null,
+                                        unitPrice: null,
+                                        amount,
+                                        payment: null,
+                                        fromAccount: "receivable",
+                                        toAccount: to,
+                                        date: new Date().toISOString(),
+                                        note: "Mark as paid · Sale #" + id,
+                                        createdAt: new Date().toISOString(),
+                                        relatedSaleId: id,
+                                        source: "receivable-collect",
+                                    };
+                                    const transferId = await dbAdd("transactions", transfer);
+                                    const updatedSale = Object.assign({}, t, {
+                                        collectedAt: new Date().toISOString(),
+                                        collectedTo: to,
+                                        collectionTransferId: transferId,
+                                    });
+                                    await dbPut("transactions", updatedSale);
+                                    overlay.remove();
+                                    toast("Marked paid · Receivable → " + accountLabel(to));
+                                    render();
+                                });
+                                row.appendChild(chip);
+                            });
+                            picker.appendChild(row);
+                            picker.appendChild(
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:6px" },
+                                    "Moves the sale amount off Receivable into the account you pick. Inventory was already recorded when the sale was saved.",
+                                ),
+                            );
+                            modal.appendChild(picker);
+                            markPaidBtn.disabled = true;
+                            markPaidBtn.style.opacity = "0.5";
+                        });
+                    }
                     saveBtn.addEventListener("click", async () => {
                         const amount = parseFloat(amtInp.value);
                         if (!amount || amount <= 0) {
@@ -3181,6 +3349,7 @@
                                 change,
                                 date: new Date(dateInp.value).toISOString(),
                                 note: noteInp.value.trim(),
+                                excludeFromForecast: excludeForecastChk ? !!excludeForecastChk.checked : !!t.excludeFromForecast,
                             });
                             if (newLines.length === 1) {
                                 updated.item = newLines[0].item;
@@ -3196,7 +3365,7 @@
                         }
                         await dbPut("transactions", updated);
                         overlay.remove();
-                        toast("Transaction updated");
+                        toast(updated.excludeFromForecast ? "Saved · excluded from Forecast" : "Transaction updated");
                         render();
                     });
 
@@ -3249,6 +3418,7 @@
                     let cash = company ? Number(company.startingCash) || 0 : 0;
                     let gcash = company ? Number(company.startingGcash) || 0 : 0;
                     let bank = company ? Number(company.startingBank) || 0 : 0;
+                    let receivable = company ? Number(company.startingReceivable) || 0 : 0;
 
                     const buckets = trendBucketDefs(range, txs.length ? txs[0].date : null);
                     let i = 0;
@@ -3265,6 +3435,7 @@
                                 if (t.payment === "cash") cash += amt;
                                 else if (t.payment === "gcash") gcash += amt;
                                 else if (t.payment === "bank") bank += amt;
+                                else if (t.payment === "receivable") receivable += amt;
                             } else if (t.type === "expense") {
                                 expenses += amt;
                                 if (t.payment === "cash") cash -= amt;
@@ -3275,13 +3446,15 @@
                                 if (t.fromAccount === "cash") cash -= amt;
                                 else if (t.fromAccount === "gcash") gcash -= amt;
                                 else if (t.fromAccount === "bank") bank -= amt;
+                                else if (t.fromAccount === "receivable") receivable -= amt;
                                 if (t.toAccount === "cash") cash += amt;
                                 else if (t.toAccount === "gcash") gcash += amt;
                                 else if (t.toAccount === "bank") bank += amt;
+                                else if (t.toAccount === "receivable") receivable += amt;
                             }
                             i++;
                         }
-                        out.push({ label: b.label, cash, gcash, bank, sales, expenses, transfers, net: sales - expenses });
+                        out.push({ label: b.label, cash, gcash, bank, receivable, sales, expenses, transfers, net: sales - expenses });
                     }
                     return out;
                 }
@@ -3533,6 +3706,7 @@
                         { key: "cash", color: "var(--green)", label: "Cash" },
                         { key: "gcash", color: "var(--gold)", label: "GCash" },
                         { key: "bank", color: "var(--ink)", label: "Bank" },
+                        { key: "receivable", color: "var(--rust)", label: "Receivable" },
                     ];
                     section.appendChild(buildTrendChartCard("Account Balances", points, balSeries, "balance"));
 
@@ -3597,7 +3771,12 @@
                     const bal = await computeAccountBalances(allTxs);
                     const balSection = el("div", { class: "section" }, [el("div", { class: "section-title" }, "ACCOUNT BALANCES (ALL-TIME)")]);
                     balSection.appendChild(
-                        el("div", { class: "summary-grid" }, [summaryCard("Cash", bal.cash, "sales"), summaryCard("GCash", bal.gcash, "sales"), summaryCard("Bank", bal.bank, "sales")]),
+                        el("div", { class: "summary-grid" }, [
+                            summaryCard("Cash", bal.cash, "sales"),
+                            summaryCard("GCash", bal.gcash, "sales"),
+                            summaryCard("Bank", bal.bank, "sales"),
+                            summaryCard("Receivable", bal.receivable, bal.receivable > 0 ? "expenses" : "sales"),
+                        ]),
                     );
                     wrap.appendChild(balSection);
 
@@ -3640,9 +3819,10 @@
                     wrap.appendChild(catSection);
 
                     // payment method breakdown
-                    const payTotals = { cash: 0, gcash: 0, bank: 0, other: 0 };
+                    const payTotals = { cash: 0, gcash: 0, bank: 0, receivable: 0, other: 0 };
                     txs.filter((t) => t.type === "sale").forEach((t) => {
-                        payTotals[t.payment] = (payTotals[t.payment] || 0) + t.amount;
+                        const key = payTotals.hasOwnProperty(t.payment) ? t.payment : "other";
+                        payTotals[key] = (payTotals[key] || 0) + t.amount;
                     });
                     const paySection = el("div", { class: "section" }, [el("div", { class: "section-title" }, "SALES BY PAYMENT METHOD")]);
                     const payMax = Math.max(1, ...Object.values(payTotals));
@@ -3686,6 +3866,1434 @@
                 function summaryCard(label, amount, cls) {
                     return el("div", { class: "summary-card" }, [el("div", { class: "sc-label" }, label), el("div", { class: "sc-value " + cls }, fmtPeso(amount))]);
                 }
+                function summaryCardText(label, text, cls) {
+                    return el("div", { class: "summary-card" }, [el("div", { class: "sc-label" }, label), el("div", { class: "sc-value " + (cls || "") }, text)]);
+                }
+                function fmtPct(n) {
+                    if (n == null || !isFinite(Number(n))) return "—";
+                    return Number(n).toFixed(1).replace(/\.0$/, "") + "%";
+                }
+
+                /* ---------- FORECAST ---------- */
+                const DEFAULT_ASSET_SEED = [
+                    { name: "PC / Computer", category: "Equipment", cost: 0, currentValue: 0 },
+                    { name: "Printer", category: "Equipment", cost: 0, currentValue: 0 },
+                    { name: "Laminator", category: "Equipment", cost: 0, currentValue: 0 },
+                ];
+                const DEFAULT_RECURRING_SEED = [
+                    { name: "Electricity", amount: 0, frequency: "monthly" },
+                    { name: "WiFi / Internet", amount: 0, frequency: "monthly" },
+                    { name: "Labor / Salary", amount: 0, frequency: "monthly" },
+                    { name: "Maintenance", amount: 0, frequency: "monthly" },
+                ];
+
+                async function companyAssets() {
+                    const cid = await getActiveCompanyId();
+                    return (await dbGetAll("assets")).filter((a) => a.companyId === cid);
+                }
+                async function companyRecurring() {
+                    const cid = await getActiveCompanyId();
+                    return (await dbGetAll("recurringExpenses")).filter((r) => r.companyId === cid);
+                }
+                async function companyPlanned() {
+                    const cid = await getActiveCompanyId();
+                    return (await dbGetAll("plannedExpenses")).filter((p) => p.companyId === cid);
+                }
+                async function companyOtherIncome() {
+                    const cid = await getActiveCompanyId();
+                    return (await dbGetAll("otherIncome")).filter((o) => o.companyId === cid);
+                }
+
+                async function seedForecastIfEmpty() {
+                    const cid = await getActiveCompanyId();
+                    if (cid == null) return;
+                    const assets = await companyAssets();
+                    if (assets.length === 0) {
+                        for (const a of DEFAULT_ASSET_SEED) {
+                            await dbAdd("assets", Object.assign({ companyId: cid, purchaseDate: "", notes: "", createdAt: new Date().toISOString() }, a));
+                        }
+                    }
+                    const rec = await companyRecurring();
+                    if (rec.length === 0) {
+                        for (const r of DEFAULT_RECURRING_SEED) {
+                            await dbAdd("recurringExpenses", Object.assign({ companyId: cid, notes: "", createdAt: new Date().toISOString() }, r));
+                        }
+                    }
+                    // Optional example row for external income (e.g. copra) — only if store is empty
+                    const other = await companyOtherIncome();
+                    if (other.length === 0) {
+                        await dbAdd("otherIncome", {
+                            companyId: cid,
+                            name: "Copra sale",
+                            amount: 0,
+                            frequency: "monthly",
+                            expectedDate: "",
+                            notes: "Other income that can support shop investments (set amount when expected)",
+                            createdAt: new Date().toISOString(),
+                        });
+                    }
+                }
+
+                /** Expected other income over a horizon (days). monthly/weekly/daily prorated; one-time counted if due in window or no date. */
+                function otherIncomeInWindow(items, horizonDays, now, horizonEnd) {
+                    let total = 0;
+                    const details = [];
+                    (items || []).forEach((o) => {
+                        if (o.received) return;
+                        const amt = Number(o.amount) || 0;
+                        if (amt <= 0) return;
+                        const freq = o.frequency || "one-time";
+                        let inWindow = 0;
+                        if (freq === "monthly") inWindow = (amt / 30) * horizonDays;
+                        else if (freq === "weekly") inWindow = (amt / 7) * horizonDays;
+                        else if (freq === "daily") inWindow = amt * horizonDays;
+                        else if (freq === "yearly") inWindow = (amt / 365) * horizonDays;
+                        else {
+                            // one-time: include if expectedDate in window, or no date (treat as expected within horizon)
+                            if (!o.expectedDate) inWindow = amt;
+                            else {
+                                const d = startOfDay(new Date(o.expectedDate));
+                                if (d >= now && d <= horizonEnd) inWindow = amt;
+                            }
+                        }
+                        if (inWindow > 0) {
+                            total += inWindow;
+                            details.push({ name: o.name, amount: inWindow, frequency: freq });
+                        }
+                    });
+                    return { total, details };
+                }
+
+                function monthlyFromFrequency(amount, frequency) {
+                    const a = Number(amount) || 0;
+                    if (frequency === "weekly") return a * (52 / 12);
+                    if (frequency === "daily") return a * 30;
+                    if (frequency === "yearly") return a / 12;
+                    return a; // monthly
+                }
+
+                function daysInHorizon(horizonDays, targetDateStr) {
+                    if (targetDateStr) {
+                        const target = startOfDay(new Date(targetDateStr));
+                        const now = startOfDay(new Date());
+                        const diff = Math.round((target - now) / 86400000);
+                        return Math.max(1, diff);
+                    }
+                    return Math.max(1, Number(horizonDays) || 30);
+                }
+
+                /** Sales marked excludeFromForecast stay in books/inventory but are ignored by Forecast averages & demand. */
+                function isExcludedFromForecast(t) {
+                    return !!(t && t.excludeFromForecast);
+                }
+
+                /** Average daily sales from the last N days (calendar days). Excludes forecast-excluded sales. */
+                async function computeAvgDailySales(lookbackDays) {
+                    const txs = await allTx();
+                    const now = new Date();
+                    const from = startOfDay(now);
+                    from.setDate(from.getDate() - (lookbackDays - 1));
+                    const inRangeSales = txs.filter((t) => t.type === "sale" && inRange(t.date, from, endOfDay(now)));
+                    const excluded = inRangeSales.filter(isExcludedFromForecast);
+                    const sales = inRangeSales.filter((t) => !isExcludedFromForecast(t));
+                    const total = sumBy(sales, () => true);
+                    const excludedTotal = sumBy(excluded, () => true);
+                    // Use calendar days so quiet days pull the average down realistically
+                    return {
+                        total,
+                        avgDaily: total / lookbackDays,
+                        count: sales.length,
+                        lookbackDays,
+                        excludedCount: excluded.length,
+                        excludedTotal,
+                    };
+                }
+
+                /**
+                 * Match Costing's materialCurrentQty:
+                 * startingQty + sum(in) − sum(out), with type "adjust" setting absolute qty.
+                 * Previously we only summed moves (from 0), so POS sales stock-outs without
+                 * matching stock-ins showed negative inventory even when startingQty was set.
+                 */
+                function costingMaterialCurrentQty(mat, moves) {
+                    let qty = Number(mat.startingQty) || 0;
+                    const sorted = (moves || [])
+                        .filter((m) => m.materialId === mat.id)
+                        .slice()
+                        .sort((a, b) => (a.date || 0) - (b.date || 0) || (a.id || 0) - (b.id || 0));
+                    sorted.forEach((m) => {
+                        const q = Number(m.qty) || 0;
+                        if (m.type === "in") qty += q;
+                        else if (m.type === "out") qty -= q;
+                        else if (m.type === "adjust") qty = q;
+                    });
+                    return qty;
+                }
+
+                async function loadCostingInventorySnapshot() {
+                    const result = { materials: [], products: [], ok: false, message: "" };
+                    try {
+                        const cdb = await openCostingDB();
+                        if (!cdb.objectStoreNames.contains("materials")) {
+                            result.message = "Costing materials not available";
+                            return result;
+                        }
+                        const materials = await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll());
+                        const products = cdb.objectStoreNames.contains("products") ? await costingReq(cdb.transaction("products", "readonly").objectStore("products").getAll()) : [];
+                        let moves = [];
+                        if (cdb.objectStoreNames.contains("stockMoves")) {
+                            moves = await costingReq(cdb.transaction("stockMoves", "readonly").objectStore("stockMoves").getAll());
+                        }
+                        result.materials = (materials || []).map((m) => {
+                            const stock = costingMaterialCurrentQty(m, moves);
+                            return {
+                                id: m.id,
+                                name: m.name || "Material",
+                                unit: m.unit || "",
+                                stock,
+                                startingQty: Number(m.startingQty) || 0,
+                                // Costing field is reorderLevel (not reorderAt)
+                                reorderAt: m.reorderLevel != null ? Number(m.reorderLevel) : m.reorderAt != null ? Number(m.reorderAt) : null,
+                                costPerUnit: Number(m.costPerUnit) || Number(m.unitCost) || null,
+                            };
+                        });
+                        result.products = products || [];
+                        // Same weighted avg margin as Costing Products tab (sellable units × product margin)
+                        result.metrics = computeCostingProductMetrics(result.products, result.materials, moves);
+                        result.ok = true;
+                        return result;
+                    } catch (e) {
+                        result.message = String(e && e.message ? e.message : e);
+                        return result;
+                    }
+                }
+
+                /**
+                 * Mirrors Costing's Products summary chips:
+                 * - product margin = (sellingPrice − costItems sum) / sellingPrice × 100
+                 * - avg margin = Σ(margin × sellableUnits) / Σ(sellableUnits)
+                 * Sellable units: bottleneck from non-optional recipe lines vs material stock;
+                 * products with no recipe count as 1 unit so list prices still roll up.
+                 */
+                function computeCostingProductMetrics(products, materials, moves) {
+                    const empty = {
+                        avgMargin: null,
+                        productCount: 0,
+                        unitsSum: 0,
+                        totalCost: 0,
+                        totalRevenue: 0,
+                        totalProfit: 0,
+                        simpleAvgMargin: null,
+                    };
+                    if (!products || !products.length) return empty;
+
+                    const stockById = {};
+                    (materials || []).forEach((m) => {
+                        // materials may already have .stock from snapshot, else recompute
+                        stockById[m.id] = m.stock != null ? Number(m.stock) : costingMaterialCurrentQty(m, moves);
+                    });
+
+                    function recipeLines(p) {
+                        if (!p || !p.costItems) return [];
+                        return p.costItems
+                            .filter((c) => c.materialId && c.invQty != null && Number(c.invQty) > 0 && !c.optional)
+                            .map((c) => ({ materialId: c.materialId, qty: Number(c.invQty) || 0 }));
+                    }
+
+                    // Allocate stock across products in name order (same spirit as Costing bottleneck)
+                    const remaining = Object.assign({}, stockById);
+                    const unitsById = {};
+                    products
+                        .slice()
+                        .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+                        .forEach((p) => {
+                            const lines = recipeLines(p);
+                            if (!lines.length) {
+                                unitsById[p.id] = 1;
+                                return;
+                            }
+                            let max = Infinity;
+                            lines.forEach((ln) => {
+                                const avail = remaining[ln.materialId] != null ? remaining[ln.materialId] : 0;
+                                const per = Number(ln.qty) || 0;
+                                if (per <= 0) return;
+                                max = Math.min(max, avail / per);
+                            });
+                            const units = isFinite(max) ? Math.max(0, Math.floor(max)) : 0;
+                            unitsById[p.id] = units;
+                            lines.forEach((ln) => {
+                                remaining[ln.materialId] = (remaining[ln.materialId] || 0) - units * (Number(ln.qty) || 0);
+                            });
+                        });
+
+                    let totalCost = 0,
+                        totalRevenue = 0,
+                        marginWeighted = 0,
+                        unitsSum = 0,
+                        simpleMarginSum = 0,
+                        simpleCount = 0;
+
+                    products.forEach((p) => {
+                        const cost = (p.costItems || []).reduce((s, c) => s + (Number(c.amount) || 0), 0);
+                        const price = Number(p.sellingPrice) || 0;
+                        const profit = price - cost;
+                        const margin = price > 0 ? (profit / price) * 100 : 0;
+                        const lines = recipeLines(p);
+                        const units = lines.length ? Number(unitsById[p.id]) || 0 : 1;
+                        totalCost += units * cost;
+                        totalRevenue += units * price;
+                        if (units > 0 && isFinite(margin)) {
+                            marginWeighted += margin * units;
+                            unitsSum += units;
+                        }
+                        if (price > 0 && isFinite(margin)) {
+                            simpleMarginSum += margin;
+                            simpleCount++;
+                        }
+                    });
+
+                    const totalProfit = totalRevenue - totalCost;
+                    return {
+                        avgMargin: unitsSum ? marginWeighted / unitsSum : simpleCount ? simpleMarginSum / simpleCount : null,
+                        simpleAvgMargin: simpleCount ? simpleMarginSum / simpleCount : null,
+                        productCount: products.length,
+                        unitsSum,
+                        totalCost,
+                        totalRevenue,
+                        totalProfit,
+                    };
+                }
+
+                /** Top sold item names from POS history — drives equipment / consumable suggestions. */
+                /**
+                 * Returns { byAmount, byQty, all } so demand can be judged by unit volume,
+                 * not only peso value (high unit price can overstate demand for low-volume SKUs).
+                 */
+                async function topSoldItems(lookbackDays, limit) {
+                    const txs = await allTx();
+                    const now = new Date();
+                    const from = startOfDay(now);
+                    from.setDate(from.getDate() - (lookbackDays - 1));
+                    const totals = {};
+                    const qtys = {};
+                    txs.filter((t) => t.type === "sale" && inRange(t.date, from, endOfDay(now)) && !isExcludedFromForecast(t)).forEach((t) => {
+                        txLines(t).forEach((ln) => {
+                            const name = (ln.item || "").trim();
+                            if (!name) return;
+                            totals[name] = (totals[name] || 0) + (Number(ln.amount) || 0);
+                            qtys[name] = (qtys[name] || 0) + (Number(ln.qty) || 1);
+                        });
+                    });
+                    const all = Object.keys(totals).map((name) => ({
+                        name,
+                        amount: totals[name],
+                        qty: qtys[name],
+                        unitPrice: qtys[name] > 0 ? totals[name] / qtys[name] : 0,
+                    }));
+                    const lim = limit || 10;
+                    const byAmount = all
+                        .slice()
+                        .sort((a, b) => b.amount - a.amount)
+                        .slice(0, lim);
+                    const byQty = all
+                        .slice()
+                        .sort((a, b) => b.qty - a.qty || b.amount - a.amount)
+                        .slice(0, lim);
+                    return { byAmount, byQty, all };
+                }
+
+                function categorizeDemand(topByQty, topByAmount) {
+                    const buckets = {
+                        print: { qty: 0, amount: 0, labels: [] },
+                        laminate: { qty: 0, amount: 0, labels: [] },
+                        photo: { qty: 0, amount: 0, labels: [] },
+                        ukay: { qty: 0, amount: 0, labels: [] },
+                        supplies: { qty: 0, amount: 0, labels: [] },
+                        other: { qty: 0, amount: 0, labels: [] },
+                    };
+                    function bucket(name) {
+                        const n = (name || "").toLowerCase();
+                        if (/laminat/.test(n)) return "laminate";
+                        if (/print|photocopy|xerox|copy|scan|document|b&w|colored|bond paper/.test(n)) return "print";
+                        if (/photo|picture|id\b|passport/.test(n)) return "photo";
+                        if (/ukay|shirt|clothes|apparel/.test(n)) return "ukay";
+                        if (/ballpen|notebook|pencil|paper|supplies/.test(n)) return "supplies";
+                        return "other";
+                    }
+                    const seen = new Set();
+                    [...(topByQty || []), ...(topByAmount || [])].forEach((t) => {
+                        if (!t || seen.has(t.name)) return;
+                        seen.add(t.name);
+                        const b = bucket(t.name);
+                        buckets[b].qty += Number(t.qty) || 0;
+                        buckets[b].amount += Number(t.amount) || 0;
+                        buckets[b].labels.push(t.name);
+                    });
+                    return buckets;
+                }
+
+                function equipmentHintsFromSales(topByQty, topByAmount) {
+                    const buckets = categorizeDemand(topByQty, topByAmount);
+                    const ranked = Object.entries(buckets)
+                        .filter(([k]) => k !== "other")
+                        .map(([key, v]) => ({ key, qty: v.qty, amount: v.amount, labels: v.labels }))
+                        .filter((x) => x.qty > 0 || x.amount > 0)
+                        .sort((a, b) => b.qty - a.qty || b.amount - a.amount);
+
+                    const hints = [];
+                    const leader = ranked[0];
+                    const byKey = (k) => ranked.find((r) => r.key === k);
+
+                    const print = byKey("print");
+                    const laminate = byKey("laminate");
+                    const photo = byKey("photo");
+                    const ukay = byKey("ukay");
+
+                    if (print && (print.qty > 0 || print.amount > 0)) {
+                        const volLead = !leader || leader.key === "print" || print.qty >= (leader.qty || 0) * 0.5;
+                        hints.push({
+                            equipment: "Printer / high-volume printer",
+                            reason:
+                                "Print/copy volume: ~" +
+                                Math.round(print.qty) +
+                                " units / " +
+                                fmtPeso(print.amount) +
+                                " revenue in the lookback. " +
+                                (volLead
+                                    ? "Highest (or near-highest) unit demand — capacity or a backup unit protects throughput."
+                                    : "Meaningful print volume; weigh vs other categories by units, not only peso totals."),
+                            priority: volLead || print.qty >= 20 ? "high" : "medium",
+                        });
+                    }
+                    if (laminate && laminate.qty > 0) {
+                        // High peso / low qty should not auto-rank above print volume
+                        const qtyLead = leader && leader.key === "laminate";
+                        hints.push({
+                            equipment: "Laminator (or second unit)",
+                            reason:
+                                "Lamination: ~" +
+                                Math.round(laminate.qty) +
+                                " units / " +
+                                fmtPeso(laminate.amount) +
+                                ". " +
+                                (qtyLead
+                                    ? "Leads by unit volume — film + reliable laminator matter."
+                                    : "May look large in ₱ if unit price is high; unit count is lower than print/copy — do not treat revenue alone as demand."),
+                            priority: qtyLead ? "high" : laminate.qty >= 15 ? "medium" : "low",
+                        });
+                    }
+                    if (photo && photo.qty > 0) {
+                        hints.push({
+                            equipment: "Photo printer / ID camera setup",
+                            reason: "Photo/ID: ~" + Math.round(photo.qty) + " units / " + fmtPeso(photo.amount) + " — dedicated gear helps if volume keeps growing.",
+                            priority: photo.qty >= 10 ? "medium" : "low",
+                        });
+                    }
+                    if (ukay && (ukay.qty > 0 || ukay.amount > 0)) {
+                        hints.push({
+                            equipment: "Display / storage for apparel",
+                            reason: "Ukay-ukay volume benefits more from display space than print hardware.",
+                            priority: "low",
+                        });
+                    }
+                    if (!hints.length && (topByQty || []).length) {
+                        hints.push({
+                            equipment: "Review top SKUs by unit volume before big hardware buys",
+                            reason: "Match the next equipment peso to #1 by quantity (jobs/units), not only #1 by revenue.",
+                            priority: "low",
+                        });
+                    }
+                    return hints;
+                }
+
+                function replenishmentSuggestions(materials, topItems, avgDailySales) {
+                    const suggestions = [];
+                    const topNames = topItems.map((t) => t.name.toLowerCase());
+                    const consumableKeywords = ["bond", "paper", "film", "laminat", "ink", "toner", "photo paper", "a4", "legal"];
+                    materials.forEach((m) => {
+                        const name = (m.name || "").toLowerCase();
+                        const isConsumable = consumableKeywords.some((k) => name.includes(k));
+                        if (!isConsumable && m.reorderAt == null) return;
+                        const stock = Number(m.stock) || 0;
+                        const reorder = m.reorderAt != null ? m.reorderAt : isConsumable ? 50 : null;
+                        if (reorder == null) return;
+                        // Rough daily use: if material name appears in top sold items, scale by qty share
+                        let dailyUse = 0;
+                        topItems.forEach((ti) => {
+                            if (ti.name.toLowerCase().includes(name.split(" ")[0]) || name.includes(ti.name.toLowerCase().split(" ")[0])) {
+                                dailyUse += (ti.qty || 0) / 30;
+                            }
+                        });
+                        if (!dailyUse && isConsumable) dailyUse = Math.max(1, stock > 0 ? stock / 60 : 5); // fallback burn rate
+                        const daysLeft = dailyUse > 0 ? stock / dailyUse : stock > 0 ? 999 : 0;
+                        const need = stock <= reorder || daysLeft < 14;
+                        if (!need && stock > reorder) return;
+                        const targetDays = 30;
+                        const suggestedQty = Math.max(0, Math.ceil(dailyUse * targetDays - stock));
+                        suggestions.push({
+                            name: m.name,
+                            stock,
+                            unit: m.unit || "pcs",
+                            daysLeft: daysLeft >= 999 ? null : Math.round(daysLeft),
+                            suggestedQty: suggestedQty || Math.max(reorder - stock, 0),
+                            reorderAt: reorder,
+                            priority: stock <= 0 ? "critical" : daysLeft < 7 ? "high" : "medium",
+                        });
+                    });
+                    // Also suggest from sales names when Costing has no materials
+                    if (!suggestions.length && topItems.length) {
+                        topItems.slice(0, 5).forEach((ti) => {
+                            const n = ti.name.toLowerCase();
+                            if (consumableKeywords.some((k) => n.includes(k)) || /paper|film|ink|toner|pen|notebook/.test(n)) {
+                                suggestions.push({
+                                    name: ti.name,
+                                    stock: null,
+                                    unit: "based on sales",
+                                    daysLeft: null,
+                                    suggestedQty: Math.max(10, Math.ceil((ti.qty || 0) * 1.2)),
+                                    reorderAt: null,
+                                    priority: "medium",
+                                    note: "From recent sales volume (Costing stock not linked)",
+                                });
+                            }
+                        });
+                    }
+                    return suggestions.sort((a, b) => {
+                        const rank = { critical: 0, high: 1, medium: 2, low: 3 };
+                        return (rank[a.priority] || 9) - (rank[b.priority] || 9);
+                    });
+                }
+
+                function buildAiFinancialSummary(ctx) {
+                    const lines = [];
+                    lines.push("=== Icon Print / Little Ledger — Financial snapshot (paste into AI for advice) ===");
+                    lines.push("Generated: " + new Date().toLocaleString("en-PH"));
+                    lines.push("Business: " + (ctx.businessName || "My Shop"));
+                    lines.push("");
+                    lines.push("--- Current balances ---");
+                    lines.push("Cash on hand: " + fmtPeso(ctx.bal.cash));
+                    lines.push("GCash: " + fmtPeso(ctx.bal.gcash));
+                    lines.push("Bank: " + fmtPeso(ctx.bal.bank));
+                    lines.push("Receivable (outstanding): " + fmtPeso(ctx.bal.receivable));
+                    lines.push("Liquid (cash+GCash+bank): " + fmtPeso(ctx.liquid));
+                    lines.push("");
+                    lines.push("--- Assets & valuation ---");
+                    lines.push("Long-term assets (book/current value): " + fmtPeso(ctx.assetValue));
+                    lines.push("Current assets (liquid + receivable): " + fmtPeso(ctx.currentAssets));
+                    lines.push("Estimated business valuation (current assets + fixed assets): " + fmtPeso(ctx.valuation));
+                    (ctx.assets || []).forEach((a) => {
+                        lines.push("  • " + a.name + ": cost " + fmtPeso(a.cost) + " / current " + fmtPeso(a.currentValue != null ? a.currentValue : a.cost));
+                    });
+                    lines.push("");
+                    lines.push("--- Costing product margins (from Costing app Products) ---");
+                    if (ctx.avgMarginPct != null) {
+                        lines.push("Weighted avg margin (sellable units): " + fmtPct(ctx.avgMarginPct));
+                        if (ctx.simpleAvgMargin != null) lines.push("Unweighted avg margin (per product): " + fmtPct(ctx.simpleAvgMargin));
+                        lines.push("Product count: " + (ctx.productCount != null ? ctx.productCount : "—"));
+                        lines.push("Potential revenue (at current stock × price): " + fmtPeso(ctx.costingPotentialRevenue || 0));
+                        lines.push("Potential cost: " + fmtPeso(ctx.costingPotentialCost || 0));
+                        lines.push("Potential profit: " + fmtPeso(ctx.costingPotentialProfit || 0));
+                    } else {
+                        lines.push("(Costing margins not available — open Costing on same domain with priced products)");
+                    }
+                    lines.push("");
+                    lines.push("--- Recent sales (last " + ctx.lookbackDays + " days) ---");
+                    lines.push("Total sales (forecast basis): " + fmtPeso(ctx.salesTotal));
+                    lines.push("Avg daily sales: " + fmtPeso(ctx.avgDaily));
+                    lines.push("Sale count (included): " + ctx.saleCount);
+                    if (ctx.excludedCount) {
+                        lines.push(
+                            "Excluded from forecast: " +
+                                ctx.excludedCount +
+                                " sale(s) totaling " +
+                                fmtPeso(ctx.excludedTotal || 0) +
+                                " (bulk/personal/one-offs — still in books, not used for averages or demand ranking)",
+                        );
+                    }
+                    lines.push("");
+                    lines.push("IMPORTANT — demand ranking:");
+                    lines.push("  • Unit VOLUME (quantity) = how many jobs/items customers actually ordered → primary signal for capacity/equipment.");
+                    lines.push("  • Revenue (₱ amount) can be high on low volume if unit price is high (e.g. lamination) → do NOT treat ₱ rank alone as demand.");
+                    lines.push("");
+                    lines.push("Top by UNIT VOLUME (quantity first):");
+                    (ctx.topByQty || ctx.topItems || []).forEach((t, i) =>
+                        lines.push(
+                            "  " +
+                                (i + 1) +
+                                ". " +
+                                t.name +
+                                " — qty " +
+                                Math.round(t.qty || 0) +
+                                " · " +
+                                fmtPeso(t.amount) +
+                                " · ~" +
+                                fmtPeso(t.unitPrice != null ? t.unitPrice : t.qty ? t.amount / t.qty : 0) +
+                                "/unit",
+                        ),
+                    );
+                    lines.push("Top by REVENUE (peso amount — secondary):");
+                    (ctx.topByAmount || ctx.topItems || []).forEach((t, i) => lines.push("  " + (i + 1) + ". " + t.name + " — " + fmtPeso(t.amount) + " · qty " + Math.round(t.qty || 0)));
+                    if (ctx.demandNote) lines.push("Demand note: " + ctx.demandNote);
+                    lines.push("");
+                    lines.push("--- Other / external income (not from POS sales) ---");
+                    if (!(ctx.otherIncome || []).length) lines.push("  (none recorded)");
+                    (ctx.otherIncome || []).forEach((o) => {
+                        lines.push(
+                            "  • " +
+                                o.name +
+                                ": " +
+                                fmtPeso(o.amount) +
+                                " / " +
+                                (o.frequency || "one-time") +
+                                (o.expectedDate ? " expected " + o.expectedDate : "") +
+                                (o.notes ? " — " + o.notes : "") +
+                                (o.received ? " [received]" : ""),
+                        );
+                    });
+                    if (ctx.otherIncomeInWindow != null) {
+                        lines.push("Expected other income in projection window: " + fmtPeso(ctx.otherIncomeInWindow));
+                    }
+                    lines.push("");
+                    lines.push("--- Recurring monthly burden ---");
+                    lines.push("Estimated monthly fixed costs: " + fmtPeso(ctx.monthlyRecurring));
+                    (ctx.recurring || []).forEach((r) => lines.push("  • " + r.name + ": " + fmtPeso(r.amount) + " / " + (r.frequency || "monthly")));
+                    lines.push("");
+                    lines.push("--- Planned / future expenses (e.g. SpayLater, investments) ---");
+                    if (!(ctx.planned || []).length) lines.push("  (none recorded)");
+                    (ctx.planned || []).forEach((p) => {
+                        lines.push("  • " + p.name + ": " + fmtPeso(p.amount) + (p.dueDate ? " due " + p.dueDate : "") + (p.type ? " [" + p.type + "]" : "") + (p.paid ? " PAID" : ""));
+                    });
+                    lines.push("");
+                    lines.push("--- Projection (" + ctx.horizonDays + " days / target " + (ctx.targetDate || "n/a") + ") ---");
+                    lines.push("Projected POS revenue: " + fmtPeso(ctx.projectedRevenue));
+                    if (ctx.avgMarginPct != null) {
+                        lines.push("Costing avg margin applied: " + fmtPct(ctx.avgMarginPct));
+                        lines.push("Projected gross profit (revenue × margin): " + fmtPeso(ctx.projectedGrossProfit || 0));
+                        lines.push("Implied COGS in window: " + fmtPeso(ctx.projectedCogs || 0));
+                    }
+                    lines.push("Projected recurring costs in window: " + fmtPeso(ctx.projectedRecurring));
+                    lines.push("Planned expenses in window: " + fmtPeso(ctx.plannedInWindow));
+                    lines.push("Other income expected in window: " + fmtPeso(ctx.otherIncomeInWindow || 0));
+                    lines.push("Receivable expected (full outstanding assumed collectible): " + fmtPeso(ctx.bal.receivable));
+                    lines.push("Projected liquid cash on hand (rough): " + fmtPeso(ctx.projectedCash));
+                    lines.push("  Method: liquid + POS sales + other income + receivable − recurring − planned unpaid");
+                    lines.push("");
+                    lines.push("--- Investment stress test ---");
+                    if (ctx.investmentTest) {
+                        lines.push("Hypothetical purchase: " + ctx.investmentTest.name + " @ " + fmtPeso(ctx.investmentTest.amount));
+                        lines.push("Cash after purchase (if paid from liquid now): " + fmtPeso(ctx.investmentTest.cashAfter));
+                        lines.push("Projected cash at horizon after purchase: " + fmtPeso(ctx.investmentTest.projectedAfter));
+                        lines.push(
+                            "Months of recurring costs covered by remaining liquid after buy: " + (ctx.investmentTest.monthsCovered != null ? ctx.investmentTest.monthsCovered.toFixed(1) : "n/a"),
+                        );
+                        if (ctx.investmentTest.withOtherIncome != null) {
+                            lines.push("Projected cash after buy INCLUDING other income: " + fmtPeso(ctx.investmentTest.withOtherIncome));
+                        }
+                        lines.push("Verdict hint: " + ctx.investmentTest.verdict);
+                    } else {
+                        lines.push("(Use the investment simulator on Forecast, or save a planned investment.)");
+                    }
+                    lines.push("");
+                    lines.push("--- Smart suggestions (volume-aware + Costing stock) ---");
+                    (ctx.equipHints || []).forEach((h) => lines.push("  [" + h.priority + "] " + h.equipment + " — " + h.reason));
+                    (ctx.replenish || []).forEach((r) =>
+                        lines.push(
+                            "  Replenish " +
+                                r.name +
+                                ": stock " +
+                                (r.stock != null ? r.stock : "?") +
+                                " → suggest +" +
+                                r.suggestedQty +
+                                " " +
+                                (r.unit || "") +
+                                (r.daysLeft != null ? " (~" + r.daysLeft + " days left)" : ""),
+                        ),
+                    );
+                    lines.push("");
+                    lines.push("--- Decision prompt (for AI) ---");
+                    lines.push(
+                        "I run Icon Print (small print/services shop) and may also have external income (e.g. copra sales) that can support shop investments. " +
+                            "Based on the numbers above, should I buy a new printer (or other equipment) now? " +
+                            "CRITICAL: Rank customer demand by UNIT VOLUME (quantity of jobs/items), not by peso revenue alone — a high-priced low-volume service (e.g. lamination) must not be treated as higher demand than high-volume print/copy. " +
+                            "Also weigh cash on hand, other income expected in the window, receivable risk, recurring bills, SpayLater/debt, and a buffer for surprises. " +
+                            "Give a clear yes / no / wait recommendation with reasons and a safer alternative if wait.",
+                    );
+                    return lines.join("\n");
+                }
+
+                async function renderForecast() {
+                    await seedForecastIfEmpty();
+                    const wrap = el("div", { class: "page" });
+                    wrap.appendChild(el("div", { class: "page-title" }, "Forecast"));
+                    wrap.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Valuation, cash projection, investment checks, and restock ideas. Inventory signals pull from the Costing app when available. Sales projections use your actual POS history.",
+                        ),
+                    );
+
+                    const company = await getActiveCompany();
+                    const businessName = company ? company.name : "My Shop";
+                    const bal = await computeAccountBalances();
+                    const liquid = (bal.cash || 0) + (bal.gcash || 0) + (bal.bank || 0);
+                    const assets = await companyAssets();
+                    const recurring = await companyRecurring();
+                    const planned = await companyPlanned();
+                    const assetValue = assets.reduce((s, a) => s + (Number(a.currentValue != null ? a.currentValue : a.cost) || 0), 0);
+                    const currentAssets = liquid + (bal.receivable || 0);
+                    const valuation = currentAssets + assetValue;
+
+                    const lookbackDays = 30;
+                    const salesStats = await computeAvgDailySales(lookbackDays);
+                    const sold = await topSoldItems(lookbackDays, 8);
+                    // salesStats.excludedCount / excludedTotal available for UI note
+                    const topByAmount = sold.byAmount || [];
+                    const topByQty = sold.byQty || [];
+                    const topItems = topByAmount; // backward-compatible alias for replenishment matching
+                    const horizonDays = daysInHorizon(App.forecastHorizonDays, App.forecastTargetDate);
+                    const monthlyRecurring = recurring.reduce((s, r) => s + monthlyFromFrequency(r.amount, r.frequency), 0);
+                    const otherIncomeList = await companyOtherIncome();
+                    const projectedRevenue = salesStats.avgDaily * horizonDays;
+                    const costingSnap = await loadCostingInventorySnapshot();
+                    const costingMetrics = costingSnap.metrics || {};
+                    const avgMarginPct = costingMetrics.avgMargin != null && isFinite(costingMetrics.avgMargin) ? costingMetrics.avgMargin : null;
+                    // Projected gross profit from sales using Costing weighted avg margin (margin = profit/price)
+                    const projectedGrossProfit = avgMarginPct != null ? projectedRevenue * (avgMarginPct / 100) : null;
+                    const projectedCogs = avgMarginPct != null ? projectedRevenue - projectedGrossProfit : null;
+                    const projectedRecurring = (monthlyRecurring / 30) * horizonDays;
+                    const now = startOfDay(new Date());
+                    const horizonEnd = new Date(now);
+                    horizonEnd.setDate(horizonEnd.getDate() + horizonDays);
+                    const plannedUnpaid = planned.filter((p) => !p.paid);
+                    const plannedInWindow = plannedUnpaid
+                        .filter((p) => {
+                            if (!p.dueDate) return true; // unknown due → count in window as caution
+                            const d = startOfDay(new Date(p.dueDate));
+                            return d >= now && d <= horizonEnd;
+                        })
+                        .reduce((s, p) => s + (Number(p.amount) || 0), 0);
+                    const otherInc = otherIncomeInWindow(otherIncomeList, horizonDays, now, horizonEnd);
+                    const otherIncomeInWindowAmt = otherInc.total;
+                    const projectedCash = liquid + projectedRevenue + otherIncomeInWindowAmt + (bal.receivable || 0) - projectedRecurring - plannedInWindow;
+
+                    const equipHints = equipmentHintsFromSales(topByQty, topByAmount);
+                    const replenish = replenishmentSuggestions(costingSnap.materials || [], topByQty.length ? topByQty : topItems, salesStats.avgDaily);
+
+                    // Short demand note for AI / UI when revenue leader ≠ volume leader
+                    let demandNote = "";
+                    if (topByQty[0] && topByAmount[0] && topByQty[0].name !== topByAmount[0].name) {
+                        demandNote =
+                            "Volume leader is “" +
+                            topByQty[0].name +
+                            "” (qty " +
+                            Math.round(topByQty[0].qty) +
+                            "); revenue leader is “" +
+                            topByAmount[0].name +
+                            "” (" +
+                            fmtPeso(topByAmount[0].amount) +
+                            "). Prefer volume for capacity decisions.";
+                    } else if (topByQty[0]) {
+                        demandNote = "Top by volume and a major revenue line: “" + topByQty[0].name + "” (qty " + Math.round(topByQty[0].qty) + ").";
+                    }
+
+                    // ---- Horizon controls ----
+                    const ctrlCard = el("div", { class: "card" });
+                    ctrlCard.appendChild(el("div", { class: "flabel" }, "Projection window"));
+                    const horizonRow = el("div", { class: "chiprow" });
+                    [
+                        [14, "14 days"],
+                        [30, "30 days"],
+                        [60, "60 days"],
+                        [90, "90 days"],
+                    ].forEach(([d, label]) => {
+                        const chip = el("button", { type: "button", class: "chip" + (App.forecastHorizonDays === d && !App.forecastTargetDate ? " active" : "") }, label);
+                        chip.addEventListener("click", () => {
+                            App.forecastHorizonDays = d;
+                            App.forecastTargetDate = null;
+                            render();
+                        });
+                        horizonRow.appendChild(chip);
+                    });
+                    ctrlCard.appendChild(horizonRow);
+                    ctrlCard.appendChild(el("label", { class: "flabel" }, "Or cash on hand by date"));
+                    const dateRow = el("div", { class: "addrow" });
+                    const dateInp = el("input", {
+                        type: "date",
+                        class: "finput",
+                        value: App.forecastTargetDate || "",
+                    });
+                    const applyDate = el("button", { type: "button", class: "smallbtn" }, "Apply");
+                    applyDate.addEventListener("click", () => {
+                        App.forecastTargetDate = dateInp.value || null;
+                        if (App.forecastTargetDate) {
+                            App.forecastHorizonDays = daysInHorizon(30, App.forecastTargetDate);
+                        }
+                        render();
+                    });
+                    dateRow.appendChild(dateInp);
+                    dateRow.appendChild(applyDate);
+                    ctrlCard.appendChild(dateRow);
+                    ctrlCard.appendChild(el("div", { class: "help-text" }, "Horizon: " + horizonDays + " day(s)" + (App.forecastTargetDate ? " → " + App.forecastTargetDate : "") + "."));
+                    wrap.appendChild(ctrlCard);
+
+                    // ---- Valuation summary ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "BUSINESS VALUATION"));
+                    wrap.appendChild(
+                        el("div", { class: "summary-grid" }, [
+                            summaryCard("Liquid cash", liquid, "sales"),
+                            summaryCard("Receivable", bal.receivable || 0, (bal.receivable || 0) > 0 ? "expenses" : "sales"),
+                            summaryCard("Fixed assets", assetValue, "sales"),
+                            summaryCard("Est. valuation", valuation, "sales"),
+                        ]),
+                    );
+                    wrap.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Valuation ≈ cash + GCash + bank + receivable + long-term assets (at current value). Not a formal appraisal — a working number for decisions.",
+                        ),
+                    );
+
+                    // ---- Costing product economics (same Avg margin chip as Costing Products tab) ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "COSTING MARGIN (FROM PRODUCTS)"));
+                    if (costingSnap.ok && avgMarginPct != null) {
+                        wrap.appendChild(
+                            el("div", { class: "summary-grid" }, [
+                                summaryCardText("Avg margin", fmtPct(avgMarginPct), "sales"),
+                                summaryCard("Potential revenue", costingMetrics.totalRevenue || 0, "sales"),
+                                summaryCard("Potential cost", costingMetrics.totalCost || 0, "expenses"),
+                                summaryCard("Potential profit", costingMetrics.totalProfit || 0, (costingMetrics.totalProfit || 0) >= 0 ? "sales" : "expenses"),
+                            ]),
+                        );
+                        wrap.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "Pulled from Costing products — weighted by sellable units (inventory × recipe), same as the Products “Avg margin” chip. " +
+                                    (costingMetrics.productCount || 0) +
+                                    " product(s)" +
+                                    (costingMetrics.simpleAvgMargin != null ? " · unweighted avg " + fmtPct(costingMetrics.simpleAvgMargin) : "") +
+                                    ".",
+                            ),
+                        );
+                    } else {
+                        wrap.appendChild(
+                            el(
+                                "div",
+                                { class: "card" },
+                                el(
+                                    "div",
+                                    { class: "empty small" },
+                                    costingSnap.ok
+                                        ? "No product prices/costs in Costing yet — open Costing and set selling prices + cost breakdown."
+                                        : "Costing DB not available on this domain — open both apps on the same origin.",
+                                ),
+                            ),
+                        );
+                    }
+
+                    // ---- Projection ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "CASH PROJECTION"));
+                    const projCards = [
+                        summaryCard("Avg daily sales", salesStats.avgDaily, "sales"),
+                        summaryCard("Projected revenue", projectedRevenue, "sales"),
+                        summaryCard("Recurring in window", projectedRecurring, "expenses"),
+                        summaryCard("Projected cash", projectedCash, projectedCash >= 0 ? "sales" : "expenses"),
+                    ];
+                    if (avgMarginPct != null) {
+                        projCards.push(summaryCardText("Costing avg margin", fmtPct(avgMarginPct), "sales"));
+                        projCards.push(summaryCard("Projected gross profit", projectedGrossProfit, "sales"));
+                    }
+                    wrap.appendChild(el("div", { class: "summary-grid" }, projCards));
+                    wrap.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Projected cash ≈ liquid + POS sales + other income (e.g. copra) + receivable − recurring − planned unpaid. " +
+                                (otherIncomeInWindowAmt > 0 ? "Includes " + fmtPeso(otherIncomeInWindowAmt) + " expected other income in this window. " : "") +
+                                (avgMarginPct != null ? "Gross profit uses Costing weighted avg margin (" + fmtPct(avgMarginPct) + ") × POS revenue only. " : "") +
+                                (salesStats.excludedCount
+                                    ? salesStats.excludedCount +
+                                      " sale(s) excluded from averages (" +
+                                      fmtPeso(salesStats.excludedTotal) +
+                                      ") — open History → Excl. forecast, or edit a sale and uncheck the box."
+                                    : "Tip: open a sale → check “Exclude from Forecast” for bulk/personal one-offs that skew demand."),
+                        ),
+                    );
+                    if (demandNote) {
+                        wrap.appendChild(el("div", { class: "help-text" }, "Demand: " + demandNote));
+                    }
+
+                    // ---- Other / external income (copra, etc.) ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "OTHER INCOME (OUTSIDE POS)"));
+                    const incCard = el("div", { class: "card" });
+                    incCard.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Money you expect from outside the shop (e.g. copra sale) that can support a printer or other investment. Counts toward projected cash and the AI brief.",
+                        ),
+                    );
+                    const incList = el("div", { class: "presetlist" });
+                    otherIncomeList.forEach((o) => {
+                        const nameInp = el("input", { type: "text", class: "finput presetrow-name", value: o.name || "" });
+                        const amtInp = el("input", {
+                            type: "number",
+                            class: "finput presetrow-price",
+                            value: o.amount != null ? o.amount : "",
+                            min: "0",
+                            step: "0.01",
+                        });
+                        const freqSel = el("select", { class: "finput presetrow-cat" });
+                        [
+                            ["one-time", "One-time"],
+                            ["monthly", "Monthly"],
+                            ["weekly", "Weekly"],
+                            ["yearly", "Yearly"],
+                        ].forEach(([v, lab]) => {
+                            const opt = el("option", { value: v }, lab);
+                            if ((o.frequency || "one-time") === v) opt.selected = true;
+                            freqSel.appendChild(opt);
+                        });
+                        const dueInp = el("input", {
+                            type: "date",
+                            class: "finput",
+                            value: o.expectedDate || "",
+                            style: "max-width:130px;font-size:12px;padding:7px 6px",
+                            title: "Expected date (for one-time)",
+                        });
+                        const save = async () => {
+                            await dbPut(
+                                "otherIncome",
+                                Object.assign({}, o, {
+                                    name: nameInp.value.trim() || o.name,
+                                    amount: parseFloat(amtInp.value) || 0,
+                                    frequency: freqSel.value,
+                                    expectedDate: dueInp.value || "",
+                                }),
+                            );
+                            toast("Other income saved");
+                            render();
+                        };
+                        nameInp.addEventListener("change", save);
+                        amtInp.addEventListener("change", save);
+                        freqSel.addEventListener("change", save);
+                        dueInp.addEventListener("change", save);
+                        const row = el("div", { class: "presetrow", style: "flex-wrap:wrap" }, [nameInp, amtInp, freqSel, dueInp, el("button", { type: "button", class: "chip-x" }, "×")]);
+                        row.querySelector(".chip-x").addEventListener("click", async () => {
+                            if (!confirm('Delete "' + (o.name || "") + '"?')) return;
+                            await dbDelete("otherIncome", o.id);
+                            render();
+                        });
+                        incList.appendChild(row);
+                    });
+                    if (!otherIncomeList.length) incList.appendChild(el("div", { class: "empty small" }, "No other income sources yet."));
+                    incCard.appendChild(incList);
+                    if (otherIncomeInWindowAmt > 0) {
+                        incCard.appendChild(el("div", { class: "totalsrow grand" }, [el("span", {}, "In this projection window"), el("span", { class: "val" }, fmtPeso(otherIncomeInWindowAmt))]));
+                    }
+                    const incAdd = el("div", { class: "addrow" });
+                    const incName = el("input", { type: "text", class: "finput", placeholder: "e.g. Copra sale" });
+                    const incAmt = el("input", { type: "number", class: "finput", placeholder: "Amount", min: "0", step: "0.01", style: "max-width:90px" });
+                    const incAddBtn = el("button", { type: "button", class: "smallbtn" }, "Add");
+                    incAddBtn.addEventListener("click", async () => {
+                        const name = incName.value.trim();
+                        if (!name) {
+                            toast("Enter a name");
+                            return;
+                        }
+                        await dbAdd("otherIncome", {
+                            companyId: await getActiveCompanyId(),
+                            name,
+                            amount: parseFloat(incAmt.value) || 0,
+                            frequency: "one-time",
+                            expectedDate: "",
+                            notes: "",
+                            createdAt: new Date().toISOString(),
+                        });
+                        render();
+                    });
+                    incAdd.appendChild(incName);
+                    incAdd.appendChild(incAmt);
+                    incAdd.appendChild(incAddBtn);
+                    incCard.appendChild(incAdd);
+                    wrap.appendChild(incCard);
+
+                    // ---- Long-term assets ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "LONG-TERM ASSETS"));
+                    const assetCard = el("div", { class: "card" });
+                    assetCard.appendChild(el("div", { class: "help-text" }, "PC, printers, laminators, furniture — enter purchase cost and what they’re worth to you now."));
+                    const assetList = el("div", { class: "presetlist" });
+                    function refreshAssets() {
+                        /* full re-render via render() after edits */
+                    }
+                    if (!assets.length) {
+                        assetCard.appendChild(el("div", { class: "empty small" }, "No assets yet."));
+                    }
+                    assets.forEach((a) => {
+                        const nameInp = el("input", { type: "text", class: "finput presetrow-name", value: a.name || "" });
+                        const costInp = el("input", { type: "number", class: "finput presetrow-price", value: a.cost != null ? a.cost : "", min: "0", step: "0.01", title: "Purchase cost" });
+                        const valInp = el("input", {
+                            type: "number",
+                            class: "finput presetrow-price",
+                            value: a.currentValue != null ? a.currentValue : "",
+                            min: "0",
+                            step: "0.01",
+                            title: "Current value",
+                        });
+                        const save = async () => {
+                            await dbPut(
+                                "assets",
+                                Object.assign({}, a, {
+                                    name: nameInp.value.trim() || a.name,
+                                    cost: parseFloat(costInp.value) || 0,
+                                    currentValue: parseFloat(valInp.value) || 0,
+                                }),
+                            );
+                            toast("Asset saved");
+                            render();
+                        };
+                        nameInp.addEventListener("change", save);
+                        costInp.addEventListener("change", save);
+                        valInp.addEventListener("change", save);
+                        const row = el("div", { class: "presetrow" }, [nameInp, costInp, valInp, el("button", { type: "button", class: "chip-x", title: "Delete" }, "×")]);
+                        row.querySelector(".chip-x").addEventListener("click", async () => {
+                            if (!confirm('Delete asset "' + (a.name || "") + '"?')) return;
+                            await dbDelete("assets", a.id);
+                            render();
+                        });
+                        assetList.appendChild(row);
+                    });
+                    assetCard.appendChild(assetList);
+                    assetCard.appendChild(el("div", { class: "help-text" }, "Columns: name · purchase cost · current value"));
+                    const assetAdd = el("div", { class: "addrow" });
+                    const assetName = el("input", { type: "text", class: "finput", placeholder: "e.g. Epson L3210" });
+                    const assetCost = el("input", { type: "number", class: "finput", placeholder: "Cost", min: "0", step: "0.01", style: "max-width:90px" });
+                    const assetAddBtn = el("button", { type: "button", class: "smallbtn" }, "Add");
+                    assetAddBtn.addEventListener("click", async () => {
+                        const name = assetName.value.trim();
+                        if (!name) {
+                            toast("Enter asset name");
+                            return;
+                        }
+                        const cost = parseFloat(assetCost.value) || 0;
+                        await dbAdd("assets", {
+                            companyId: await getActiveCompanyId(),
+                            name,
+                            category: "Equipment",
+                            cost,
+                            currentValue: cost,
+                            purchaseDate: "",
+                            notes: "",
+                            createdAt: new Date().toISOString(),
+                        });
+                        toast("Asset added");
+                        render();
+                    });
+                    assetAdd.appendChild(assetName);
+                    assetAdd.appendChild(assetCost);
+                    assetAdd.appendChild(assetAddBtn);
+                    assetCard.appendChild(assetAdd);
+                    wrap.appendChild(assetCard);
+
+                    // ---- Recurring expenses ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "RECURRING EXPENSES"));
+                    const recCard = el("div", { class: "card" });
+                    recCard.appendChild(el("div", { class: "help-text" }, "Electricity, WiFi, salary, maintenance — used in cash projections."));
+                    const recList = el("div", { class: "presetlist" });
+                    recurring.forEach((r) => {
+                        const nameInp = el("input", { type: "text", class: "finput presetrow-name", value: r.name || "" });
+                        const amtInp = el("input", { type: "number", class: "finput presetrow-price", value: r.amount != null ? r.amount : "", min: "0", step: "0.01" });
+                        const freqSel = el("select", { class: "finput presetrow-cat" });
+                        ["monthly", "weekly", "daily", "yearly"].forEach((f) => {
+                            const opt = el("option", { value: f }, f);
+                            if ((r.frequency || "monthly") === f) opt.selected = true;
+                            freqSel.appendChild(opt);
+                        });
+                        const save = async () => {
+                            await dbPut(
+                                "recurringExpenses",
+                                Object.assign({}, r, {
+                                    name: nameInp.value.trim() || r.name,
+                                    amount: parseFloat(amtInp.value) || 0,
+                                    frequency: freqSel.value,
+                                }),
+                            );
+                            toast("Recurring saved");
+                            render();
+                        };
+                        nameInp.addEventListener("change", save);
+                        amtInp.addEventListener("change", save);
+                        freqSel.addEventListener("change", save);
+                        const row = el("div", { class: "presetrow" }, [nameInp, amtInp, freqSel, el("button", { type: "button", class: "chip-x" }, "×")]);
+                        row.querySelector(".chip-x").addEventListener("click", async () => {
+                            if (!confirm('Delete "' + (r.name || "") + '"?')) return;
+                            await dbDelete("recurringExpenses", r.id);
+                            render();
+                        });
+                        recList.appendChild(row);
+                    });
+                    recCard.appendChild(recList);
+                    recCard.appendChild(el("div", { class: "totalsrow grand" }, [el("span", {}, "≈ Monthly total"), el("span", { class: "val" }, fmtPeso(monthlyRecurring))]));
+                    const recAdd = el("div", { class: "addrow" });
+                    const recName = el("input", { type: "text", class: "finput", placeholder: "e.g. Rent" });
+                    const recAmt = el("input", { type: "number", class: "finput", placeholder: "Amount", min: "0", step: "0.01", style: "max-width:90px" });
+                    const recAddBtn = el("button", { type: "button", class: "smallbtn" }, "Add");
+                    recAddBtn.addEventListener("click", async () => {
+                        const name = recName.value.trim();
+                        if (!name) {
+                            toast("Enter a name");
+                            return;
+                        }
+                        await dbAdd("recurringExpenses", {
+                            companyId: await getActiveCompanyId(),
+                            name,
+                            amount: parseFloat(recAmt.value) || 0,
+                            frequency: "monthly",
+                            notes: "",
+                            createdAt: new Date().toISOString(),
+                        });
+                        render();
+                    });
+                    recAdd.appendChild(recName);
+                    recAdd.appendChild(recAmt);
+                    recAdd.appendChild(recAddBtn);
+                    recCard.appendChild(recAdd);
+                    wrap.appendChild(recCard);
+
+                    // ---- Planned / future expenses (SpayLater, investments) ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "PLANNED & FUTURE EXPENSES"));
+                    const planCard = el("div", { class: "card" });
+                    planCard.appendChild(el("div", { class: "help-text" }, "SpayLater installments, supplier bills, planned printer purchase — anything with a due date or known amount."));
+                    const planList = el("div", { class: "presetlist" });
+                    planned
+                        .slice()
+                        .sort((a, b) => String(a.dueDate || "9999").localeCompare(String(b.dueDate || "9999")))
+                        .forEach((p) => {
+                            const nameInp = el("input", { type: "text", class: "finput presetrow-name", value: p.name || "" });
+                            const amtInp = el("input", { type: "number", class: "finput presetrow-price", value: p.amount != null ? p.amount : "", min: "0", step: "0.01" });
+                            const dueInp = el("input", { type: "date", class: "finput", value: p.dueDate || "", style: "max-width:130px;font-size:12px;padding:7px 6px" });
+                            const typeSel = el("select", { class: "finput presetrow-cat" });
+                            [
+                                ["spaylater", "SpayLater"],
+                                ["investment", "Investment"],
+                                ["supplier", "Supplier"],
+                                ["other", "Other"],
+                            ].forEach(([v, lab]) => {
+                                const opt = el("option", { value: v }, lab);
+                                if ((p.type || "other") === v) opt.selected = true;
+                                typeSel.appendChild(opt);
+                            });
+                            const save = async () => {
+                                await dbPut(
+                                    "plannedExpenses",
+                                    Object.assign({}, p, {
+                                        name: nameInp.value.trim() || p.name,
+                                        amount: parseFloat(amtInp.value) || 0,
+                                        dueDate: dueInp.value || "",
+                                        type: typeSel.value,
+                                    }),
+                                );
+                                toast("Planned expense saved");
+                                render();
+                            };
+                            nameInp.addEventListener("change", save);
+                            amtInp.addEventListener("change", save);
+                            dueInp.addEventListener("change", save);
+                            typeSel.addEventListener("change", save);
+                            const paidBtn = el(
+                                "button",
+                                {
+                                    type: "button",
+                                    class: "chip" + (p.paid ? " active" : ""),
+                                    style: "font-size:11px;padding:6px 8px",
+                                },
+                                p.paid ? "Paid" : "Unpaid",
+                            );
+                            paidBtn.addEventListener("click", async () => {
+                                await dbPut("plannedExpenses", Object.assign({}, p, { paid: !p.paid }));
+                                render();
+                            });
+                            const row = el("div", { class: "presetrow", style: "flex-wrap:wrap" }, [nameInp, amtInp, dueInp, typeSel, paidBtn, el("button", { type: "button", class: "chip-x" }, "×")]);
+                            row.querySelector(".chip-x").addEventListener("click", async () => {
+                                if (!confirm("Delete this planned expense?")) return;
+                                await dbDelete("plannedExpenses", p.id);
+                                render();
+                            });
+                            planList.appendChild(row);
+                        });
+                    if (!planned.length) planList.appendChild(el("div", { class: "empty small" }, "No planned expenses yet."));
+                    planCard.appendChild(planList);
+                    const planAdd = el("div", { class: "addrow" });
+                    const planName = el("input", { type: "text", class: "finput", placeholder: "e.g. SpayLater printer" });
+                    const planAmt = el("input", { type: "number", class: "finput", placeholder: "Amount", min: "0", step: "0.01", style: "max-width:90px" });
+                    const planAddBtn = el("button", { type: "button", class: "smallbtn" }, "Add");
+                    planAddBtn.addEventListener("click", async () => {
+                        const name = planName.value.trim();
+                        if (!name) {
+                            toast("Enter a name");
+                            return;
+                        }
+                        await dbAdd("plannedExpenses", {
+                            companyId: await getActiveCompanyId(),
+                            name,
+                            amount: parseFloat(planAmt.value) || 0,
+                            dueDate: "",
+                            type: "other",
+                            paid: false,
+                            notes: "",
+                            createdAt: new Date().toISOString(),
+                        });
+                        render();
+                    });
+                    planAdd.appendChild(planName);
+                    planAdd.appendChild(planAmt);
+                    planAdd.appendChild(planAddBtn);
+                    planCard.appendChild(planAdd);
+                    wrap.appendChild(planCard);
+
+                    // ---- Investment simulator ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "INVESTMENT SIMULATOR"));
+                    const invCard = el("div", { class: "card form" });
+                    invCard.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Test a big purchase (new printer, etc.) against cash movement. Includes expected other income (e.g. copra) in the horizon projection. Does not save a transaction.",
+                        ),
+                    );
+                    invCard.appendChild(el("label", { class: "flabel" }, "What are you buying?"));
+                    const invName = el("input", { type: "text", class: "finput", id: "inv-name", placeholder: "e.g. New Epson printer", value: "New printer" });
+                    invCard.appendChild(invName);
+                    invCard.appendChild(el("label", { class: "flabel" }, "Price"));
+                    const invPrice = el("input", { type: "number", class: "finput famount", id: "inv-price", placeholder: "0.00", min: "0", step: "0.01", value: "15000" });
+                    invCard.appendChild(invPrice);
+                    const invResult = el("div", { id: "inv-result", class: "totalsblock" });
+                    invCard.appendChild(invResult);
+                    function runInvSim() {
+                        const price = parseFloat(invPrice.value) || 0;
+                        const name = invName.value.trim() || "Purchase";
+                        const cashAfter = liquid - price;
+                        const projectedAfter = projectedCash - price;
+                        const withOtherIncome = projectedAfter; // projectedCash already includes other income
+                        const monthsCovered = monthlyRecurring > 0 ? cashAfter / monthlyRecurring : null;
+                        const volTop = topByQty[0] ? topByQty[0].name + " (qty " + Math.round(topByQty[0].qty) + ")" : "n/a";
+                        let verdict = "";
+                        if (price <= 0) verdict = "Enter a price.";
+                        else if (cashAfter < 0 && otherIncomeInWindowAmt + liquid < price)
+                            verdict = "Not enough liquid today even with expected other income in the window — need credit, SpayLater, larger external income, or wait.";
+                        else if (cashAfter < 0)
+                            verdict = "Short on liquid today, but expected other income (~" + fmtPeso(otherIncomeInWindowAmt) + ") in the horizon may cover the gap if it arrives on time.";
+                        else if (monthsCovered != null && monthsCovered < 1) verdict = "Possible, but remaining cash covers under 1 month of fixed costs — high stress if sales or other income slip.";
+                        else if (monthsCovered != null && monthsCovered < 2) verdict = "Tight. Prefer ~2+ months of fixed costs after the buy, or confirm other income timing.";
+                        else if (projectedAfter < monthlyRecurring) verdict = "Horizon projection looks thin after the purchase — confirm volume demand (" + volTop + ") justifies the machine.";
+                        else
+                            verdict =
+                                "Buffer looks workable on paper (incl. other income in projection). Demand by volume: " + volTop + ". Still allow for ink/maintenance and delayed external income.";
+                        invResult.innerHTML = "";
+                        invResult.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Liquid now"), el("span", { class: "val" }, fmtPeso(liquid))]));
+                        if (otherIncomeInWindowAmt > 0) {
+                            invResult.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Other income in window"), el("span", { class: "val" }, fmtPeso(otherIncomeInWindowAmt))]));
+                        }
+                        invResult.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "After paying " + name), el("span", { class: "val" }, fmtPeso(cashAfter))]));
+                        invResult.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Projected cash @ horizon after buy"), el("span", { class: "val" }, fmtPeso(projectedAfter))]));
+                        if (monthsCovered != null) {
+                            invResult.appendChild(
+                                el("div", { class: "totalsrow" }, [el("span", {}, "Months of fixed costs covered after buy"), el("span", { class: "val" }, monthsCovered.toFixed(1) + " mo")]),
+                            );
+                        }
+                        invResult.appendChild(el("div", { class: "help-text", style: "margin-top:8px" }, verdict));
+                        invCard._lastSim = {
+                            name,
+                            amount: price,
+                            cashAfter,
+                            projectedAfter,
+                            monthsCovered,
+                            withOtherIncome,
+                            verdict,
+                        };
+                    }
+                    invPrice.addEventListener("input", runInvSim);
+                    invName.addEventListener("input", runInvSim);
+                    const simBtn = el("button", { type: "button", class: "bigbtn transfer small2" }, "Run simulation");
+                    simBtn.addEventListener("click", runInvSim);
+                    invCard.appendChild(simBtn);
+                    const addAsPlanned = el("button", { type: "button", class: "bigbtn ghost small2" }, "Save as planned investment");
+                    addAsPlanned.addEventListener("click", async () => {
+                        const price = parseFloat(invPrice.value) || 0;
+                        const name = invName.value.trim() || "New investment";
+                        if (price <= 0) {
+                            toast("Enter a price");
+                            return;
+                        }
+                        await dbAdd("plannedExpenses", {
+                            companyId: await getActiveCompanyId(),
+                            name,
+                            amount: price,
+                            dueDate: "",
+                            type: "investment",
+                            paid: false,
+                            notes: "From investment simulator",
+                            createdAt: new Date().toISOString(),
+                        });
+                        toast("Saved under planned expenses");
+                        render();
+                    });
+                    invCard.appendChild(addAsPlanned);
+                    wrap.appendChild(invCard);
+                    runInvSim();
+
+                    // ---- Smart suggestions ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "SMART SUGGESTIONS"));
+                    const sugCard = el("div", { class: "card" });
+                    sugCard.appendChild(el("div", { class: "chartcard-title" }, "Equipment based on recent demand"));
+                    if (!equipHints.length) {
+                        sugCard.appendChild(el("div", { class: "empty small" }, "Not enough sales history yet to suggest equipment."));
+                    } else {
+                        equipHints.forEach((h) => {
+                            sugCard.appendChild(
+                                el("div", { class: "txrow", style: "cursor:default" }, [
+                                    el("div", { class: "txrow-main" }, [
+                                        el("div", { class: "txrow-title" }, [
+                                            document.createTextNode(h.equipment + " "),
+                                            el("span", { class: "badge-inv " + (h.priority === "high" ? "missing" : "ok") }, h.priority),
+                                        ]),
+                                        el("div", { class: "txrow-sub" }, h.reason),
+                                    ]),
+                                ]),
+                            );
+                        });
+                    }
+                    sugCard.appendChild(el("div", { class: "chartcard-title", style: "margin-top:14px" }, "Replenishment (Costing stock + sales)"));
+                    if (!costingSnap.ok) {
+                        sugCard.appendChild(el("div", { class: "help-text" }, "Costing DB not reachable — suggestions fall back to sales names only. " + (costingSnap.message || "")));
+                    }
+                    if (!replenish.length) {
+                        sugCard.appendChild(el("div", { class: "empty small" }, "No low-stock or consumable signals right now."));
+                    } else {
+                        replenish.forEach((r) => {
+                            sugCard.appendChild(
+                                el("div", { class: "txrow", style: "cursor:default" }, [
+                                    el("div", { class: "txrow-main" }, [
+                                        el("div", { class: "txrow-title" }, [
+                                            document.createTextNode(r.name + " "),
+                                            el("span", { class: "badge-inv " + (r.priority === "critical" || r.priority === "high" ? "missing" : "ok") }, r.priority),
+                                        ]),
+                                        el(
+                                            "div",
+                                            { class: "txrow-sub" },
+                                            (r.stock != null ? "Stock " + r.stock + " " + (r.unit || "") : "Sales-based") +
+                                                (r.daysLeft != null ? " · ~" + r.daysLeft + " days left" : "") +
+                                                (r.note ? " · " + r.note : ""),
+                                        ),
+                                    ]),
+                                    el("div", { class: "txrow-amt sales" }, "+" + r.suggestedQty),
+                                ]),
+                            );
+                        });
+                    }
+                    if (topByQty.length) {
+                        sugCard.appendChild(el("div", { class: "chartcard-title", style: "margin-top:14px" }, "Top by unit volume (last " + lookbackDays + "d) — primary demand"));
+                        topByQty.slice(0, 5).forEach((t, i) => {
+                            sugCard.appendChild(
+                                el("div", { class: "toprow" }, [
+                                    el("span", { class: "toprow-rank" }, String(i + 1)),
+                                    el("span", { class: "toprow-name" }, t.name + " · qty " + Math.round(t.qty)),
+                                    el("span", { class: "toprow-amt" }, fmtPeso(t.amount)),
+                                ]),
+                            );
+                        });
+                    }
+                    if (topByAmount.length) {
+                        sugCard.appendChild(el("div", { class: "chartcard-title", style: "margin-top:14px" }, "Top by revenue ₱ (secondary — high price can overstate demand)"));
+                        topByAmount.slice(0, 5).forEach((t, i) => {
+                            sugCard.appendChild(
+                                el("div", { class: "toprow" }, [
+                                    el("span", { class: "toprow-rank" }, String(i + 1)),
+                                    el("span", { class: "toprow-name" }, t.name + " · qty " + Math.round(t.qty)),
+                                    el("span", { class: "toprow-amt" }, fmtPeso(t.amount)),
+                                ]),
+                            );
+                        });
+                    }
+                    if (demandNote) {
+                        sugCard.appendChild(el("div", { class: "help-text", style: "margin-top:8px" }, demandNote));
+                    }
+                    wrap.appendChild(sugCard);
+
+                    // ---- AI summary ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "AI DISCUSSION BRIEF"));
+                    const aiCard = el("div", { class: "card" });
+                    aiCard.appendChild(
+                        el("div", { class: "help-text" }, "Copy this summary and paste it into ChatGPT, Grok, or another AI to debate purchases (new printer, etc.) with your real numbers."),
+                    );
+                    const sim = invCard._lastSim || null;
+                    const summaryText = buildAiFinancialSummary({
+                        businessName,
+                        bal,
+                        liquid,
+                        assetValue,
+                        currentAssets,
+                        valuation,
+                        assets,
+                        lookbackDays,
+                        salesTotal: salesStats.total,
+                        avgDaily: salesStats.avgDaily,
+                        saleCount: salesStats.count,
+                        excludedCount: salesStats.excludedCount || 0,
+                        excludedTotal: salesStats.excludedTotal || 0,
+                        topItems,
+                        topByQty,
+                        topByAmount,
+                        demandNote,
+                        otherIncome: otherIncomeList,
+                        otherIncomeInWindow: otherIncomeInWindowAmt,
+                        monthlyRecurring,
+                        recurring,
+                        planned,
+                        horizonDays,
+                        targetDate: App.forecastTargetDate,
+                        projectedRevenue,
+                        projectedRecurring,
+                        plannedInWindow,
+                        projectedCash,
+                        avgMarginPct,
+                        simpleAvgMargin: costingMetrics.simpleAvgMargin,
+                        productCount: costingMetrics.productCount,
+                        costingPotentialRevenue: costingMetrics.totalRevenue,
+                        costingPotentialCost: costingMetrics.totalCost,
+                        costingPotentialProfit: costingMetrics.totalProfit,
+                        projectedGrossProfit,
+                        projectedCogs,
+                        investmentTest: sim,
+                        equipHints,
+                        replenish,
+                    });
+                    const ta = el("textarea", {
+                        class: "finput",
+                        style: "min-height:180px;font-family:var(--mono);font-size:11.5px;line-height:1.45;resize:vertical",
+                        readonly: "readonly",
+                    });
+                    ta.value = summaryText;
+                    aiCard.appendChild(ta);
+                    const copyBtn = el("button", { type: "button", class: "bigbtn sale" }, "Copy summary for AI");
+                    copyBtn.addEventListener("click", async () => {
+                        try {
+                            await navigator.clipboard.writeText(summaryText);
+                            toast("Copied — paste into your AI chat");
+                        } catch (e) {
+                            ta.select();
+                            toast("Select & copy the text manually");
+                        }
+                    });
+                    aiCard.appendChild(copyBtn);
+                    wrap.appendChild(aiCard);
+
+                    wrap.appendChild(el("div", { class: "footnote" }, "Forecast is a decision aid, not accounting advice. Projections assume recent sales continue and receivables are collected."));
+
+                    return wrap;
+                }
 
                 /* ---------- SETTINGS ---------- */
                 async function renderSettings() {
@@ -3697,6 +5305,7 @@
                     const startingCash = company ? company.startingCash : 0;
                     const startingGcash = company ? company.startingGcash : 0;
                     const startingBank = company ? company.startingBank : 0;
+                    const startingReceivable = company ? company.startingReceivable || 0 : 0;
                     const cats = company ? company.categories : { sale: DEFAULT_SALE_CATEGORIES.slice(), expense: DEFAULT_EXPENSE_CATEGORIES.slice() };
 
                     // Companies card — switch between businesses/branches, each with its own isolated cash flow
@@ -3745,6 +5354,12 @@
                             for (const t of allTxAll) if (t.companyId === company.id) await dbDelete("transactions", t.id);
                             const allPresetsAll = await dbGetAll("presets");
                             for (const p of allPresetsAll) if (p.companyId === company.id) await dbDelete("presets", p.id);
+                            try {
+                                for (const a of await dbGetAll("assets")) if (a.companyId === company.id) await dbDelete("assets", a.id);
+                                for (const r of await dbGetAll("recurringExpenses")) if (r.companyId === company.id) await dbDelete("recurringExpenses", r.id);
+                                for (const p of await dbGetAll("plannedExpenses")) if (p.companyId === company.id) await dbDelete("plannedExpenses", p.id);
+                                for (const o of await dbGetAll("otherIncome")) if (o.companyId === company.id) await dbDelete("otherIncome", o.id);
+                            } catch (e) {}
                             await dbDelete("companies", company.id);
                             const remaining = await listCompanies();
                             await setSetting("activeCompanyId", remaining[0].id);
@@ -3804,9 +5419,22 @@
                             return inp;
                         })(),
                     ]);
+                    const recvCol = el("div", { class: "fcol" }, [
+                        el("label", { class: "flabel" }, "Receivable"),
+                        (function () {
+                            const inp = el("input", { type: "number", class: "finput", value: startingReceivable, min: "0", step: "0.01" });
+                            inp.addEventListener("change", async () => {
+                                await updateActiveCompany({ startingReceivable: parseFloat(inp.value) || 0 });
+                                toast("Starting receivable saved");
+                                render();
+                            });
+                            return inp;
+                        })(),
+                    ]);
                     row.appendChild(cashCol);
                     row.appendChild(gcashCol);
                     row.appendChild(bankCol);
+                    row.appendChild(recvCol);
                     bizCard.appendChild(row);
                     wrap.appendChild(bizCard);
 
@@ -3846,6 +5474,12 @@
                                 await dbClear("presets");
                                 await dbClear("settings");
                                 await dbClear("companies");
+                                try {
+                                    await dbClear("assets");
+                                    await dbClear("recurringExpenses");
+                                    await dbClear("plannedExpenses");
+                                    await dbClear("otherIncome");
+                                } catch (e) {}
                                 await seedIfEmpty();
                                 toast("All data cleared");
                                 location.hash = "#/home";
@@ -4062,15 +5696,28 @@
 
                 /* ---------- Export / Import ---------- */
                 async function exportDB() {
-                    const [transactions, presets, settingsArr, companies] = await Promise.all([dbGetAll("transactions"), dbGetAll("presets"), dbGetAll("settings"), dbGetAll("companies")]);
+                    const [transactions, presets, settingsArr, companies, assets, recurringExpenses, plannedExpenses, otherIncome] = await Promise.all([
+                        dbGetAll("transactions"),
+                        dbGetAll("presets"),
+                        dbGetAll("settings"),
+                        dbGetAll("companies"),
+                        dbGetAll("assets").catch(() => []),
+                        dbGetAll("recurringExpenses").catch(() => []),
+                        dbGetAll("plannedExpenses").catch(() => []),
+                        dbGetAll("otherIncome").catch(() => []),
+                    ]);
                     const payload = {
                         app: "little-ledger-pos",
                         exportedAt: new Date().toISOString(),
-                        version: 2,
+                        version: 4,
                         transactions,
                         presets,
                         settings: settingsArr,
                         companies,
+                        assets,
+                        recurringExpenses,
+                        plannedExpenses,
+                        otherIncome,
                     };
                     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
                     const url = URL.createObjectURL(blob);
@@ -4099,6 +5746,12 @@
                         await dbClear("presets");
                         await dbClear("settings");
                         await dbClear("companies");
+                        try {
+                            await dbClear("assets");
+                            await dbClear("recurringExpenses");
+                            await dbClear("plannedExpenses");
+                            await dbClear("otherIncome");
+                        } catch (e) {}
 
                         const hasCompanies = Array.isArray(data.companies) && data.companies.length > 0;
                         if (hasCompanies) {
@@ -4106,6 +5759,10 @@
                             for (const t of data.transactions) await dbPut("transactions", t);
                             for (const p of data.presets) await dbPut("presets", p);
                             for (const s of data.settings) await dbPut("settings", s);
+                            if (Array.isArray(data.assets)) for (const a of data.assets) await dbPut("assets", a);
+                            if (Array.isArray(data.recurringExpenses)) for (const r of data.recurringExpenses) await dbPut("recurringExpenses", r);
+                            if (Array.isArray(data.plannedExpenses)) for (const p of data.plannedExpenses) await dbPut("plannedExpenses", p);
+                            if (Array.isArray(data.otherIncome)) for (const o of data.otherIncome) await dbPut("otherIncome", o);
                         } else {
                             // Old single-tenant backup (no companies array) — wrap everything into one company.
                             const legacySettings = {};
@@ -4116,6 +5773,7 @@
                                 startingCash: legacySettings.startingCash || 0,
                                 startingGcash: legacySettings.startingGcash || 0,
                                 startingBank: legacySettings.startingBank || 0,
+                                startingReceivable: legacySettings.startingReceivable || 0,
                                 createdAt: new Date().toISOString(),
                             };
                             const cid = await dbAdd("companies", company);
