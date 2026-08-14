@@ -2431,10 +2431,11 @@
                     if (a === "bank") return "Bank";
                     if (a === "receivable") return "Receivable";
                     if (a === "owner") return "Owner";
+                    if (a === "businessFunds") return "Business Funds";
                     return a || "";
                 }
                 function buildAccountChips(selectedValue, onChange, opts) {
-                    const accounts = (opts && opts.accounts) || ["cash", "gcash", "bank", "receivable", "owner"];
+                    const accounts = (opts && opts.accounts) || ["cash", "gcash", "bank", "receivable", "owner", "businessFunds"];
                     const row = el("div", { class: "chiprow" });
                     accounts.forEach((a) => {
                         const chip = el("button", { type: "button", class: "chip" + (a === selectedValue ? " active" : "") }, accountLabel(a));
@@ -2819,7 +2820,7 @@
                             if (step.type === "transfer") {
                                 const fromSel = el("select", { class: "finput" });
                                 const toSel = el("select", { class: "finput" });
-                                ["cash", "gcash", "bank", "receivable", "owner"].forEach((a) => {
+                                ["cash", "gcash", "bank", "receivable", "owner", "businessFunds"].forEach((a) => {
                                     const o1 = el("option", { value: a }, accountLabel(a));
                                     const o2 = el("option", { value: a }, accountLabel(a));
                                     if (a === step.fromAccount) o1.selected = true;
@@ -3065,6 +3066,12 @@
                     { label: "Collect Receivable → Bank", from: "receivable", to: "bank" },
                     { label: "Owner Withdrawal", from: "cash", to: "owner" },
                     { label: "Owner Investment", from: "owner", to: "cash" },
+                    { label: "Bank → Business Funds", from: "bank", to: "businessFunds" },
+                    { label: "Business Funds → Bank", from: "businessFunds", to: "bank" },
+                    { label: "Cash → Business Funds", from: "cash", to: "businessFunds" },
+                    { label: "Business Funds → Cash", from: "businessFunds", to: "cash" },
+                    { label: "GCash → Business Funds", from: "gcash", to: "businessFunds" },
+                    { label: "Business Funds → GCash", from: "businessFunds", to: "gcash" },
                 ];
 
                 function lineSubtotal() {
@@ -3196,12 +3203,12 @@
 
                         const saveBtn = el("button", { type: "submit", class: "bigbtn transfer" }, "Save Transfer");
                         form.appendChild(saveBtn);
-                        const saveTplBtn = el("button", { type: "button", class: "bigbtn ghost small2" }, "Save into cut-off pack");
+                        /* const saveTplBtn = el("button", { type: "button", class: "bigbtn ghost small2" }, "Save into cut-off pack");
                         saveTplBtn.addEventListener("click", () => {
                             const def = (qs("#f-item") && qs("#f-item").value.trim()) || accountLabel(App.transferFrom) + " → " + accountLabel(App.transferTo);
                             saveCurrentAsTemplate({ defaultName: def });
                         });
-                        form.appendChild(saveTplBtn);
+                        form.appendChild(saveTplBtn); */
 
                         form.addEventListener("submit", async (e) => {
                             e.preventDefault();
@@ -4559,7 +4566,7 @@
                     const transfers = txs.filter((t) => t.type === "transfer").sort((a, b) => new Date(b.date) - new Date(a.date));
                     const transferSection = el("div", { class: "section" }, [el("div", { class: "section-title" }, "FUND TRANSFERS THIS PERIOD")]);
                     if (transfers.length === 0) {
-                        transferSection.appendChild(el("div", { class: "empty small" }, "No GCash, bank, or owner transfers in this period."));
+                        transferSection.appendChild(el("div", { class: "empty small" }, "No GCash, bank, owner, or business funds transfers in this period."));
                     } else {
                         transfers.forEach((t) => transferSection.appendChild(txRow(t)));
                     }
@@ -4804,16 +4811,18 @@
                             (t.type === "transfer" && t.fromAccount === "receivable" && t.toAccount !== "cash" && t.toAccount !== "gcash" && t.toAccount !== "bank"),
                     );
 
-                    // Owner / financing style transfers
+                    // Owner / Business Funds / financing style transfers
                     const ownerIn = sumBy(periodTxs, (t) => t.type === "transfer" && t.fromAccount === "owner");
                     const ownerOut = sumBy(periodTxs, (t) => t.type === "transfer" && t.toAccount === "owner");
+                    const businessFundsIn = sumBy(periodTxs, (t) => t.type === "transfer" && t.fromAccount === "businessFunds");
+                    const businessFundsOut = sumBy(periodTxs, (t) => t.type === "transfer" && t.toAccount === "businessFunds");
                     // Investing-ish: expenses tagged investment or planned investment payments
                     const investExp = sumBy(periodTxs, (t) => t.type === "expense" && /invest|equipment|printer|capital/i.test((t.category || "") + " " + (t.item || "")));
 
                     const opsIn = salesCashLike + collections;
                     const opsOut = expCashLike;
                     const opsNet = opsIn - opsOut;
-                    const finNet = ownerIn - ownerOut;
+                    const finNet = ownerIn - ownerOut + businessFundsIn - businessFundsOut;
                     const invNet = -investExp;
                     const netCashChange = opsNet + invNet + finNet;
 
@@ -4841,6 +4850,8 @@
                     cf.appendChild(stmtRow("Financing activities", 0, { section: true }));
                     cf.appendChild(stmtRow("Owner contributions (from Owner)", ownerIn, { indent: true }));
                     cf.appendChild(stmtRow("Owner drawings (to Owner)", -ownerOut, { indent: true, signed: true }));
+                    cf.appendChild(stmtRow("From Business Funds", businessFundsIn, { indent: true }));
+                    cf.appendChild(stmtRow("To Business Funds", -businessFundsOut, { indent: true, signed: true }));
                     cf.appendChild(stmtRow("Net cash from financing", finNet, { total: true, signed: true }));
                     cf.appendChild(stmtRow("Net change in liquid cash", netCashChange, { grand: true, signed: true }));
                     section.appendChild(cf);
@@ -4917,6 +4928,10 @@
                         "CASH FLOW (" + periodLabel + ")",
                         "Net from operations: " + fmtPeso(opsNet),
                         "Net from investing: " + fmtPeso(invNet),
+                        "Owner contributions: " + fmtPeso(ownerIn),
+                        "Owner drawings: " + fmtPeso(ownerOut),
+                        "From Business Funds: " + fmtPeso(businessFundsIn),
+                        "To Business Funds: " + fmtPeso(businessFundsOut),
                         "Net from financing: " + fmtPeso(finNet),
                         "Net change in liquid cash: " + fmtPeso(netCashChange),
                     ]
@@ -5591,7 +5606,7 @@
                                 (r.daysLeft != null ? " (~" + r.daysLeft + " days left)" : ""),
                         ),
                     );
-                    lines.push("");
+                    /* lines.push("");
                     lines.push("--- Decision prompt (for AI) ---");
                     lines.push(
                         "I run Icon Print (small print/services shop) and may also have external income (e.g. copra sales) that can support shop investments. " +
@@ -5599,7 +5614,7 @@
                             "CRITICAL: Rank customer demand by UNIT VOLUME (quantity of jobs/items), not by peso revenue alone — a high-priced low-volume service (e.g. lamination) must not be treated as higher demand than high-volume print/copy. " +
                             "Also weigh cash on hand, other income expected in the window, receivable risk, recurring bills, SpayLater/debt, and a buffer for surprises. " +
                             "Give a clear yes / no / wait recommendation with reasons and a safer alternative if wait.",
-                    );
+                    ); */
                     return lines.join("\n");
                 }
 
