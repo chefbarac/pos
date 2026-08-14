@@ -3544,7 +3544,7 @@
                     const saveLabel = isSale ? "Save Sale" : "Save Expense";
                     const saveBtn = el("button", { type: "submit", class: "bigbtn " + App.addType }, saveLabel);
                     form.appendChild(saveBtn);
-                    const saveTplBtn = el("button", { type: "button", class: "bigbtn ghost small2" }, "Save into cut-off pack");
+                    /* const saveTplBtn = el("button", { type: "button", class: "bigbtn ghost small2" }, "Save into cut-off pack");
                     saveTplBtn.addEventListener("click", () => {
                         let def = "";
                         if (App.saleLines.length === 1) def = App.saleLines[0].item || "";
@@ -3552,7 +3552,7 @@
                         else if (qs("#ln-item")) def = qs("#ln-item").value.trim();
                         saveCurrentAsTemplate({ defaultName: def || (isSale ? "Sale template" : "Expense template") });
                     });
-                    form.appendChild(saveTplBtn);
+                    form.appendChild(saveTplBtn); */
 
                     form.addEventListener("submit", async (e) => {
                         e.preventDefault();
