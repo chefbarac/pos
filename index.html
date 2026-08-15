@@ -3057,24 +3057,6 @@
                 }
 
                 /* ---------- ADD ---------- */
-                const TRANSFER_QUICK_TYPES = [
-                    { label: "GCash Cash-out", from: "gcash", to: "cash" },
-                    { label: "Cash-in to GCash", from: "cash", to: "gcash" },
-                    { label: "Bank Withdrawal", from: "bank", to: "cash" },
-                    { label: "Bank Deposit", from: "cash", to: "bank" },
-                    { label: "Collect Receivable → Cash", from: "receivable", to: "cash" },
-                    { label: "Collect Receivable → GCash", from: "receivable", to: "gcash" },
-                    { label: "Collect Receivable → Bank", from: "receivable", to: "bank" },
-                    { label: "Owner Withdrawal", from: "cash", to: "owner" },
-                    { label: "Owner Investment", from: "owner", to: "cash" },
-                    { label: "Bank → Business Funds", from: "bank", to: "businessFunds" },
-                    { label: "Business Funds → Bank", from: "businessFunds", to: "bank" },
-                    { label: "Cash → Business Funds", from: "cash", to: "businessFunds" },
-                    { label: "Business Funds → Cash", from: "businessFunds", to: "cash" },
-                    { label: "GCash → Business Funds", from: "gcash", to: "businessFunds" },
-                    { label: "Business Funds → GCash", from: "businessFunds", to: "gcash" },
-                ];
-
                 function lineSubtotal() {
                     return App.saleLines.reduce((s, ln) => s + (Number(ln.amount) || 0), 0);
                 }
@@ -3083,7 +3065,6 @@
                     const company = await getActiveCompany();
                     const cats = company ? company.categories : { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES };
                     const presetsAll = await companyPresets();
-                    const txTemplates = await companyTxTemplates(); // packs can mix sale/expense/transfer
                     const isTransfer = App.addType === "transfer";
                     const isLineBased = App.addType === "sale" || App.addType === "expense";
                     if (isLineBased && (!App.selectedCategory || !cats[App.addType].includes(App.selectedCategory))) {
@@ -3133,47 +3114,9 @@
                     ]);
                     wrap.appendChild(tabs);
 
-                    // Cut-off packs (can mix sale + expense + transfer)
-                    if (txTemplates.length) {
-                        const tplCard = el("div", { class: "card", style: "padding:12px 14px;margin-bottom:12px" });
-                        tplCard.appendChild(el("div", { class: "flabel", style: "margin-top:0" }, "Cut-off packs"));
-                        tplCard.appendChild(
-                            el("div", { class: "help-text", style: "margin-bottom:8px" }, "Tap a pack to record its steps (sales, expenses, transfers) in one go. Build packs in Settings."),
-                        );
-                        const tplRow = el("div", { class: "chiprow" });
-                        txTemplates.forEach((tpl) => {
-                            const steps = templateSteps(tpl);
-                            const n = steps.length;
-                            const types = Array.from(new Set(steps.map((s) => s.type).filter(Boolean)));
-                            const label = tpl.name || "Pack";
-                            const hint = n > 1 ? " · " + n + " steps" : tpl.amount != null && Number(tpl.amount) > 0 ? " · " + fmtPeso(tpl.amount) : "";
-                            const chip = el("button", { type: "button", class: "chip preset" }, label + hint);
-                            chip.title = types.length ? types.join(" + ") : "Apply pack";
-                            chip.addEventListener("click", () => applyTxTemplate(tpl));
-                            tplRow.appendChild(chip);
-                        });
-                        tplCard.appendChild(tplRow);
-                        wrap.appendChild(tplCard);
-                    }
-
                     const form = el("form", { class: "card form" });
 
                     if (isTransfer) {
-                        form.appendChild(el("label", { class: "flabel" }, "Quick Type"));
-                        const typeRow = el("div", { class: "chiprow" });
-                        TRANSFER_QUICK_TYPES.forEach((tp) => {
-                            const chip = el("button", { type: "button", class: "chip" }, tp.label);
-                            chip.addEventListener("click", () => {
-                                App.transferFrom = tp.from;
-                                App.transferTo = tp.to;
-                                render();
-                                const itemInp = qs("#f-item");
-                                if (itemInp && !itemInp.value.trim()) itemInp.value = tp.label;
-                            });
-                            typeRow.appendChild(chip);
-                        });
-                        form.appendChild(typeRow);
-
                         form.appendChild(el("label", { class: "flabel" }, "From"));
                         form.appendChild(
                             buildAccountChips(App.transferFrom, (v) => {
@@ -6675,7 +6618,7 @@
                         el(
                             "div",
                             { class: "help-text" },
-                            "Cut-off packs can combine sales, expenses, and transfers in one run — e.g. groceries + savings + bank→GCash. Tap a pack on the Add page to record every step.",
+                            "Cut-off packs can combine sales, expenses, and transfers in one run — e.g. groceries + savings + bank→GCash. Use Run on a pack below to record every step.",
                         ),
                     );
                     const list = el("div", { class: "presetlist" });
