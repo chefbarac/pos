@@ -1367,6 +1367,179 @@
             <a href="#/settings" class="navbtn" data-route="settings"><span class="navicon">&#9881;</span><span>Settings</span></a>
         </nav>
 
+        <script type="importmap">
+{
+  "imports": {
+    "yjs": "https://esm.sh/yjs@13.6.18",
+    "y-indexeddb": "https://esm.sh/y-indexeddb@9.0.12?deps=yjs@13.6.18",
+    "y-websocket": "https://esm.sh/y-websocket@2.0.4?deps=yjs@13.6.18",
+    "y-protocols": "https://esm.sh/y-protocols@1.0.6",
+    "lib0": "https://esm.sh/lib0@0.2.99"
+  }
+}
+</script>
+<script type="module">
+import * as Y from "yjs";
+import { IndexeddbPersistence } from "y-indexeddb";
+import { WebsocketProvider } from "y-websocket";
+
+class PosSyncManager {
+  constructor() {
+    this.ydoc = null;
+    this.provider = null;
+    this.persistence = null;
+    this.status = "disconnected";
+    this._statusHandlers = new Set();
+    this.host = localStorage.getItem("pos_sync_host") || "ws://localhost:1234";
+    this.key = localStorage.getItem("pos_sync_key") || "";
+    this.yTransactions = null;
+    this.yPresets = null;
+    this.yCompanies = null;
+    this.ySettings = null;
+    this.yAssets = null;
+    this.yRecurring = null;
+    this.yPlanned = null;
+    this.yOtherIncome = null;
+    this.yTxTemplates = null;
+    this._onRemote = null;
+  }
+
+  onStatus(fn) {
+    this._statusHandlers.add(fn);
+    fn(this.status);
+    return () => this._statusHandlers.delete(fn);
+  }
+  _setStatus(s) {
+    this.status = s;
+    this._statusHandlers.forEach((fn) => fn(s));
+  }
+  setConfig(host, key) {
+    this.host = (host || "").trim();
+    this.key = (key || "").trim();
+    localStorage.setItem("pos_sync_host", this.host);
+    localStorage.setItem("pos_sync_key", this.key);
+  }
+  getConfig() {
+    return { host: this.host, key: this.key };
+  }
+  isConnected() {
+    return this.status === "connected";
+  }
+
+  async connect(onRemoteChange) {
+    if (!this.host || !this.key) throw new Error("Host and Sync Key required");
+    this.disconnect();
+    this._onRemote = onRemoteChange;
+    this._setStatus("connecting");
+
+    this.ydoc = new Y.Doc();
+    this.yTransactions = this.ydoc.getMap("transactions");
+    this.yPresets = this.ydoc.getMap("presets");
+    this.yCompanies = this.ydoc.getMap("companies");
+    this.ySettings = this.ydoc.getMap("settings");
+    this.yAssets = this.ydoc.getMap("assets");
+    this.yRecurring = this.ydoc.getMap("recurringExpenses");
+    this.yPlanned = this.ydoc.getMap("plannedExpenses");
+    this.yOtherIncome = this.ydoc.getMap("otherIncome");
+    this.yTxTemplates = this.ydoc.getMap("txTemplates");
+
+    this.persistence = new IndexeddbPersistence("pos_yjs_" + this.key, this.ydoc);
+    await this.persistence.whenSynced;
+
+    this.provider = new WebsocketProvider(this.host, this.key, this.ydoc, { connect: true });
+    this.provider.on("status", (e) => {
+      if (e.status === "connected") this._setStatus("connected");
+      else if (e.status === "disconnected") this._setStatus("disconnected");
+    });
+    this.provider.on("connection-error", () => this._setStatus("error"));
+
+    const emit = () => {
+      if (this._onRemote) this._onRemote(this.exportAll());
+    };
+    [
+      this.yTransactions, this.yPresets, this.yCompanies, this.ySettings,
+      this.yAssets, this.yRecurring, this.yPlanned, this.yOtherIncome, this.yTxTemplates
+    ].forEach((m) => m && m.observe(emit));
+
+    setTimeout(() => {
+      if (this.provider && this.provider.wsconnected) this._setStatus("connected");
+    }, 800);
+  }
+
+  disconnect() {
+    if (this.provider) { this.provider.destroy(); this.provider = null; }
+    if (this.persistence) { this.persistence.destroy(); this.persistence = null; }
+    if (this.ydoc) { this.ydoc.destroy(); this.ydoc = null; }
+    this._setStatus("disconnected");
+  }
+
+  bootstrap(local) {
+    if (!this.yTransactions) return;
+    const apply = (ymap, arr) => {
+      (arr || []).forEach((rec) => {
+        if (rec == null || rec.id == null) return;
+        const key = String(rec.id);
+        const existing = ymap.get(key);
+        if (!existing) ymap.set(key, rec);
+        else if ((rec.updatedAt || rec.createdAt || 0) >= (existing.updatedAt || existing.createdAt || 0)) {
+          ymap.set(key, rec);
+        }
+      });
+    };
+    apply(this.yTransactions, local.transactions);
+    apply(this.yPresets, local.presets);
+    apply(this.yCompanies, local.companies);
+    apply(this.yAssets, local.assets);
+    apply(this.yRecurring, local.recurringExpenses);
+    apply(this.yPlanned, local.plannedExpenses);
+    apply(this.yOtherIncome, local.otherIncome);
+    apply(this.yTxTemplates, local.txTemplates);
+    if (local.settings) {
+      Object.keys(local.settings).forEach((k) => {
+        if (!this.ySettings.has(k)) this.ySettings.set(k, local.settings[k]);
+      });
+    }
+  }
+
+  exportAll() {
+    const toArr = (ymap) => (ymap ? Array.from(ymap.values()) : []);
+    return {
+      transactions: toArr(this.yTransactions),
+      presets: toArr(this.yPresets),
+      companies: toArr(this.yCompanies),
+      assets: toArr(this.yAssets),
+      recurringExpenses: toArr(this.yRecurring),
+      plannedExpenses: toArr(this.yPlanned),
+      otherIncome: toArr(this.yOtherIncome),
+      txTemplates: toArr(this.yTxTemplates),
+      settings: this.ySettings ? Object.fromEntries(this.ySettings.entries()) : {},
+    };
+  }
+
+  pushRecord(store, record) {
+    if (!this.isConnected() || !record || record.id == null) return;
+    const map = {
+      transactions: this.yTransactions,
+      presets: this.yPresets,
+      companies: this.yCompanies,
+      assets: this.yAssets,
+      recurringExpenses: this.yRecurring,
+      plannedExpenses: this.yPlanned,
+      otherIncome: this.yOtherIncome,
+      txTemplates: this.yTxTemplates,
+    }[store];
+    if (map) map.set(String(record.id), record);
+  }
+
+  pushSetting(key, value) {
+    if (!this.isConnected() || !this.ySettings) return;
+    this.ySettings.set(key, value);
+  }
+}
+
+window.PosSync = new PosSyncManager();
+</script>
+
         <script>
             /* ============ Little Ledger POS — app logic ============ */
             (function () {
