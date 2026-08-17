@@ -6571,6 +6571,74 @@
                     dataCard.appendChild(
                         el("div", { class: "help-text" }, "Export your data to move it to another phone or computer, or to keep a safety backup. Importing replaces all current data on this device."),
                     );
+
+                    wrap.appendChild(el("div", { class: "section-title" }, "SYNC (MULTI-DEVICE)"));
+const syncCard = el("div", { class: "card form" });
+syncCard.appendChild(el("div", { class: "help-text" }, "Sync this company’s data across PCs. Same Host + Sync Key on every device. Use a different key than Costing / Icon Print."));
+
+const hostInp = el("input", { type: "text", class: "finput", id: "posSyncHost", placeholder: "ws://localhost:1234" });
+const keyInp = el("input", { type: "text", class: "finput", id: "posSyncKey", placeholder: "my-shop-pos" });
+const statusP = el("p", { class: "help-text", id: "posSyncStatus" }, "Disconnected");
+const connectBtn = el("button", { type: "button", class: "bigbtn sale small2" }, "Connect");
+const disconnectBtn = el("button", { type: "button", class: "bigbtn ghost small2" }, "Disconnect");
+
+if (window.PosSync) {
+  const cfg = window.PosSync.getConfig();
+  hostInp.value = cfg.host || "ws://localhost:1234";
+  keyInp.value = cfg.key || "";
+  window.PosSync.onStatus((s) => {
+    statusP.textContent = ({ disconnected: "Disconnected", connecting: "Connecting…", connected: "Connected", error: "Error" })[s] || s;
+  });
+}
+
+connectBtn.addEventListener("click", async () => {
+  if (!window.PosSync) {
+    toast("Sync module still loading");
+    return;
+  }
+  window.PosSync.setConfig(hostInp.value.trim(), keyInp.value.trim());
+  try {
+    await window.PosSync.connect(async (remote) => {
+      await applyRemotePos(remote);
+    });
+    const [transactions, presets, companies, settingsArr, assets, recurringExpenses, plannedExpenses, otherIncome, txTemplates] = await Promise.all([
+      dbGetAll("transactions"),
+      dbGetAll("presets"),
+      dbGetAll("companies"),
+      dbGetAll("settings"),
+      dbGetAll("assets").catch(() => []),
+      dbGetAll("recurringExpenses").catch(() => []),
+      dbGetAll("plannedExpenses").catch(() => []),
+      dbGetAll("otherIncome").catch(() => []),
+      dbGetAll("txTemplates").catch(() => []),
+    ]);
+    const settings = {};
+    (settingsArr || []).forEach((s) => { settings[s.key] = s.value; });
+    window.PosSync.bootstrap({
+      transactions, presets, companies, settings,
+      assets, recurringExpenses, plannedExpenses, otherIncome, txTemplates,
+    });
+    toast("Sync connected");
+  } catch (err) {
+    toast("Sync failed: " + (err.message || err));
+  }
+});
+
+disconnectBtn.addEventListener("click", () => {
+  window.PosSync?.disconnect();
+  toast("Sync disconnected");
+});
+
+syncCard.appendChild(el("label", { class: "flabel" }, "Host"));
+syncCard.appendChild(hostInp);
+syncCard.appendChild(el("label", { class: "flabel" }, "Sync Key"));
+syncCard.appendChild(keyInp);
+syncCard.appendChild(statusP);
+syncCard.appendChild(connectBtn);
+syncCard.appendChild(disconnectBtn);
+wrap.appendChild(syncCard);
+
+
                     const exportBtn = el("button", { type: "button", class: "bigbtn sale" }, "Export Database (.json)");
                     exportBtn.addEventListener("click", exportDB);
                     dataCard.appendChild(exportBtn);
@@ -6611,6 +6679,30 @@
 
                     return wrap;
                 }
+
+                async function applyRemotePos(remote) {
+  if (!remote) return;
+  const putAll = async (store, arr) => {
+    for (const rec of arr || []) {
+      if (rec && rec.id != null) await dbPut(store, rec);
+    }
+  };
+  await putAll("transactions", remote.transactions);
+  await putAll("presets", remote.presets);
+  await putAll("companies", remote.companies);
+  await putAll("assets", remote.assets);
+  await putAll("recurringExpenses", remote.recurringExpenses);
+  await putAll("plannedExpenses", remote.plannedExpenses);
+  await putAll("otherIncome", remote.otherIncome);
+  await putAll("txTemplates", remote.txTemplates);
+  if (remote.settings) {
+    for (const [key, value] of Object.entries(remote.settings)) {
+      await setSetting(key, value); // your existing helper
+    }
+  }
+  // Refresh current view
+  if (typeof render === "function") render();
+}
 
                 async function txTemplateManager() {
                     const card = el("div", { class: "card" });
