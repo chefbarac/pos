@@ -6765,7 +6765,16 @@ if (window.PosSync) {
 }
 
 connectBtn.addEventListener("click", async () => {
-  if (!window.PosSync) {
+  initSync();
+});
+
+disconnectBtn.addEventListener("click", () => {
+  window.PosSync?.disconnect();
+  toast("Sync disconnected");
+});
+
+async function initSync(){
+    if (!window.PosSync) {
     toast("Sync module still loading");
     return;
   }
@@ -6795,12 +6804,7 @@ connectBtn.addEventListener("click", async () => {
   } catch (err) {
     toast("Sync failed: " + (err.message || err));
   }
-});
-
-disconnectBtn.addEventListener("click", () => {
-  window.PosSync?.disconnect();
-  toast("Sync disconnected");
-});
+}
 
 syncCard.appendChild(el("label", { class: "flabel" }, "Host"));
 syncCard.appendChild(hostInp);
@@ -7417,6 +7421,8 @@ wrap.appendChild(syncCard);
                         // Hash was already set (e.g. reload/deep link) — no hashchange event will fire, so render directly.
                         render();
                     }
+
+                    initSync();
                 }
 
                 document.addEventListener("DOMContentLoaded", init);
