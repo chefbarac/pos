@@ -4693,7 +4693,11 @@
                         return el("div", { class: cls }, [el("span", {}, label)]);
                     }
                     const amtCls = "stmt-amt" + (opts.signed && amount > 0 ? " pos" : opts.signed && amount < 0 ? " neg" : "");
-                    const show = opts.blank ? "" : fmtPeso(amount);
+                    let show = "";
+                    if (opts.blank) show = "";
+                    else if (opts.text != null) show = String(opts.text);
+                    else if (opts.pct) show = fmtPct(amount);
+                    else show = fmtPeso(amount);
                     return el("div", { class: cls }, [el("span", {}, label), el("span", { class: amtCls }, show)]);
                 }
 
@@ -4724,16 +4728,34 @@
                         });
                     const expCats = Object.entries(expByCat).sort((a, b) => b[1] - a[1]);
 
-                    // Costing margin → estimated COGS
+                    // Costing: margin → estimated COGS; material stock × unit cost → inventory asset
                     let avgMargin = null;
                     let estimatedCogs = null;
                     let grossProfit = null;
+                    let costingSnap = { ok: false, materials: [], products: [], metrics: {} };
+                    let inventoryValue = 0; // materials on hand at cost
+                    let inventoryDetail = []; // top material lines by value
+                    let inventoryBelowReorder = 0;
+                    let potentialFGRevenue = null;
+                    let potentialFGCost = null;
+                    let potentialFGProfit = null;
                     try {
-                        const snap = await loadCostingInventorySnapshot();
-                        if (snap.ok && snap.metrics && snap.metrics.avgMargin != null && isFinite(snap.metrics.avgMargin)) {
-                            avgMargin = snap.metrics.avgMargin;
-                            estimatedCogs = revenue * (1 - avgMargin / 100);
-                            grossProfit = revenue - estimatedCogs;
+                        costingSnap = await loadCostingInventorySnapshot();
+                        if (costingSnap.ok) {
+                            const inv = computeInventoryAtCost(costingSnap.materials || []);
+                            inventoryValue = inv.total;
+                            inventoryDetail = inv.lines;
+                            inventoryBelowReorder = inv.belowReorder;
+                            if (costingSnap.metrics) {
+                                if (costingSnap.metrics.avgMargin != null && isFinite(costingSnap.metrics.avgMargin)) {
+                                    avgMargin = costingSnap.metrics.avgMargin;
+                                    estimatedCogs = revenue * (1 - avgMargin / 100);
+                                    grossProfit = revenue - estimatedCogs;
+                                }
+                                potentialFGRevenue = costingSnap.metrics.totalRevenue;
+                                potentialFGCost = costingSnap.metrics.totalCost;
+                                potentialFGProfit = costingSnap.metrics.totalProfit;
+                            }
                         }
                     } catch (e) {}
 
@@ -4781,7 +4803,7 @@
                     const assets = await companyAssets();
                     const fixedAssets = assets.reduce((s, a) => s + (Number(a.currentValue != null ? a.currentValue : a.cost) || 0), 0);
                     const liquid = (bal.cash || 0) + (bal.gcash || 0) + (bal.bank || 0);
-                    const currentAssets = liquid + (bal.receivable || 0);
+                    const currentAssets = liquid + (bal.receivable || 0) + inventoryValue;
                     const totalAssets = currentAssets + fixedAssets;
 
                     const planned = await companyPlanned();
@@ -4799,6 +4821,7 @@
                     bs.appendChild(stmtRow("GCash", bal.gcash || 0, { indent: true }));
                     bs.appendChild(stmtRow("Bank", bal.bank || 0, { indent: true }));
                     bs.appendChild(stmtRow("Accounts receivable", bal.receivable || 0, { indent: true }));
+                    bs.appendChild(stmtRow(costingSnap.ok ? "Inventory (materials at cost)" : "Inventory (Costing not linked)", inventoryValue, { indent: true }));
                     bs.appendChild(stmtRow("Current assets", currentAssets, { total: true }));
                     bs.appendChild(stmtRow("Fixed assets (equipment, etc.)", fixedAssets, { indent: true }));
                     if (assets.length) {
@@ -4823,7 +4846,7 @@
                         el(
                             "div",
                             { class: "stmt-note" },
-                            "Liabilities include Accounts Payable (credit expenses) plus unpaid items from Forecast → Planned expenses (e.g. SpayLater). Equity is a plug for management use.",
+                            "Inventory is materials on hand × unit cost from the Costing app (same domain). Liabilities include Accounts Payable plus unpaid Forecast planned expenses. Equity is assets − liabilities (management plug).",
                         ),
                     );
                     section.appendChild(bs);
@@ -4885,6 +4908,8 @@
                     cf.appendChild(stmtRow("Cash sales (cash / GCash / bank)", salesCashLike, { indent: true }));
                     cf.appendChild(stmtRow("Receivable collections", collections, { indent: true }));
                     cf.appendChild(stmtRow("Cash operating expenses", -expCashLike, { indent: true, signed: true }));
+                    if (apSettlements > 0) cf.appendChild(stmtRow("Accounts payable settlements", -apSettlements, { indent: true, signed: true }));
+                    if (creditExpensesPeriod > 0) cf.appendChild(stmtRow("(memo) Credit expenses booked — no cash yet", creditExpensesPeriod, { indent: true }));
                     cf.appendChild(stmtRow("Net cash from operations", opsNet, { total: true, signed: true }));
                     cf.appendChild(stmtRow("Investing activities", 0, { section: true }));
                     cf.appendChild(stmtRow("Equipment / investment-like expenses", -investExp, { indent: true, signed: true }));
@@ -4936,6 +4961,89 @@
                     }
                     section.appendChild(arCard);
 
+                    // ---- Accounts payable reconciliation ----
+                    const endingAP = apBalance;
+                    const periodApIncrease = creditExpensesPeriod - apSettlements;
+                    const openingAP = endingAP - periodApIncrease;
+                    const openPayableExpenses = sumBy(allTxs, (t) => t.type === "expense" && t.payment === "payable" && !t.settledAt);
+                    const apGap = Math.round((endingAP - openPayableExpenses) * 100) / 100;
+
+                    const apCard = el("div", { class: "card stmt-card" });
+                    apCard.appendChild(el("div", { class: "stmt-title" }, "Accounts payable reconciliation"));
+                    apCard.appendChild(el("div", { class: "stmt-period" }, "Credit expenses vs settlements — ties to Balance Sheet payable"));
+                    apCard.appendChild(stmtRow("Opening AP (start of period)", openingAP, { indent: true }));
+                    apCard.appendChild(stmtRow("+ Credit expenses booked this period", creditExpensesPeriod, { indent: true }));
+                    apCard.appendChild(stmtRow("− Settlements this period", apSettlements, { indent: true }));
+                    apCard.appendChild(stmtRow("Ending AP (Balance Sheet)", endingAP, { grand: true }));
+                    apCard.appendChild(
+                        el(
+                            "div",
+                            { class: "stmt-note" },
+                            "Credit expenses this period (" +
+                                fmtPeso(creditExpensesPeriod) +
+                                ") increase what you owe. Settlements reduce AP when you Mark as paid from Cash / GCash / Bank. " +
+                                (Math.abs(periodApIncrease) > 0.005 ? "Net AP change this period: " + fmtPeso(periodApIncrease) + "." : "No net AP change this period."),
+                        ),
+                    );
+                    if (Math.abs(apGap) > 0.05) {
+                        apCard.appendChild(
+                            el(
+                                "div",
+                                { class: "stmt-note" },
+                                "Note: sum of open payable expenses (not marked settled) is " +
+                                    fmtPeso(openPayableExpenses) +
+                                    " vs ledger AP " +
+                                    fmtPeso(endingAP) +
+                                    " (Δ " +
+                                    fmtPeso(apGap) +
+                                    "). Starting payable or a settle without Mark as paid can explain gaps. Ledger AP on the Balance Sheet is the figure to use.",
+                            ),
+                        );
+                    }
+                    section.appendChild(apCard);
+
+                    // ---- Inventory (Costing) memo ----
+                    const invCard = el("div", { class: "card stmt-card" });
+                    invCard.appendChild(el("div", { class: "stmt-title" }, "Inventory (from Costing)"));
+                    invCard.appendChild(
+                        el(
+                            "div",
+                            { class: "stmt-period" },
+                            costingSnap.ok ? "Materials on hand × unit cost · same origin as Costing app" : "Costing DB not available on this domain — open both apps on the same origin",
+                        ),
+                    );
+                    if (costingSnap.ok) {
+                        invCard.appendChild(stmtRow("Inventory at cost (Balance Sheet)", inventoryValue, { total: true }));
+                        invCard.appendChild(stmtRow("Materials tracked", 0, { indent: true, text: String((costingSnap.materials || []).length) }));
+                        if (inventoryBelowReorder > 0) {
+                            invCard.appendChild(stmtRow("At or below reorder level", 0, { indent: true, text: String(inventoryBelowReorder) }));
+                        }
+                        if (potentialFGRevenue != null && isFinite(potentialFGRevenue)) {
+                            invCard.appendChild(stmtRow("Potential revenue (stock × sell prices)", potentialFGRevenue, { indent: true }));
+                            invCard.appendChild(stmtRow("Potential cost (recipe / cost items)", potentialFGCost || 0, { indent: true }));
+                            invCard.appendChild(stmtRow("Potential profit at current stock", potentialFGProfit || 0, { indent: true, signed: true }));
+                        }
+                        if (avgMargin != null) {
+                            invCard.appendChild(stmtRow("Costing weighted avg margin", avgMargin, { indent: true, pct: true }));
+                        }
+                        inventoryDetail.slice(0, 6).forEach((ln) => {
+                            invCard.appendChild(stmtRow("· " + ln.name + (ln.unit ? " (" + fmtNumish(ln.stock) + " " + ln.unit + ")" : ""), ln.value, { indent: true }));
+                        });
+                        if (inventoryDetail.length > 6) {
+                            invCard.appendChild(el("div", { class: "stmt-note" }, "+" + (inventoryDetail.length - 6) + " more materials in Costing inventory"));
+                        }
+                        invCard.appendChild(
+                            el(
+                                "div",
+                                { class: "stmt-note" },
+                                "Inventory value uses material stock × cost/unit from Costing. Potential revenue/profit is sellable finished units from recipes vs current stock (same as Costing Products summary) — not double-counted on the Balance Sheet.",
+                            ),
+                        );
+                    } else {
+                        invCard.appendChild(el("div", { class: "stmt-note" }, costingSnap.message || "Link Costing on the same domain to value inventory on the Balance Sheet."));
+                    }
+                    section.appendChild(invCard);
+
                     // Copy-friendly block for AI
                     const copyCard = el("div", { class: "card stmt-card" });
                     copyCard.appendChild(el("div", { class: "stmt-title" }, "Copy statements for AI"));
@@ -4955,9 +5063,13 @@
                         "GCash: " + fmtPeso(bal.gcash),
                         "Bank: " + fmtPeso(bal.bank),
                         "Accounts receivable (ending): " + fmtPeso(endingAR),
+                        "Inventory (materials at cost): " + fmtPeso(inventoryValue) + (costingSnap.ok ? "" : " (Costing not linked)"),
+                        "Current assets: " + fmtPeso(currentAssets),
                         "Fixed assets: " + fmtPeso(fixedAssets),
                         "Total assets: " + fmtPeso(totalAssets),
-                        "Liabilities (unpaid planned): " + fmtPeso(liabilities),
+                        "Accounts payable: " + fmtPeso(endingAP),
+                        "Other liabilities (unpaid planned): " + fmtPeso(plannedLiab),
+                        "Total liabilities: " + fmtPeso(liabilities),
                         "Equity (plug): " + fmtPeso(equity),
                         "",
                         "AR RECONCILIATION (" + periodLabel + ")",
@@ -4967,8 +5079,33 @@
                         "= Ending AR (matches Balance Sheet): " + fmtPeso(endingAR),
                         "Note: credit sales this period is period activity, NOT the unpaid balance.",
                         "",
+                        "AP RECONCILIATION (" + periodLabel + ")",
+                        "Opening AP: " + fmtPeso(openingAP),
+                        "+ Credit expenses this period: " + fmtPeso(creditExpensesPeriod),
+                        "− Settlements this period: " + fmtPeso(apSettlements),
+                        "= Ending AP (matches Balance Sheet): " + fmtPeso(endingAP),
+                        "",
+                        costingSnap.ok
+                            ? "INVENTORY (Costing)\n" +
+                              "At cost: " +
+                              fmtPeso(inventoryValue) +
+                              "\nMaterials: " +
+                              (costingSnap.materials || []).length +
+                              (inventoryBelowReorder ? "\nBelow reorder: " + inventoryBelowReorder : "") +
+                              (potentialFGRevenue != null
+                                  ? "\nPotential FG revenue: " +
+                                    fmtPeso(potentialFGRevenue) +
+                                    "\nPotential FG cost: " +
+                                    fmtPeso(potentialFGCost || 0) +
+                                    "\nPotential FG profit: " +
+                                    fmtPeso(potentialFGProfit || 0)
+                                  : "") +
+                              (avgMargin != null ? "\nWeighted avg margin: " + fmtPct(avgMargin) : "")
+                            : "INVENTORY: Costing not available on this origin",
+                        "",
                         "CASH FLOW (" + periodLabel + ")",
                         "Net from operations: " + fmtPeso(opsNet),
+                        "  (includes AP settlements: " + fmtPeso(apSettlements) + ")",
                         "Net from investing: " + fmtPeso(invNet),
                         "Owner contributions: " + fmtPeso(ownerIn),
                         "Owner drawings: " + fmtPeso(ownerOut),
@@ -5166,6 +5303,40 @@
                         else if (m.type === "adjust") qty = q;
                     });
                     return qty;
+                }
+
+                /** Materials on hand × costPerUnit (negative stock treated as 0 for valuation). */
+                function computeInventoryAtCost(materials) {
+                    const lines = [];
+                    let total = 0;
+                    let belowReorder = 0;
+                    (materials || []).forEach((m) => {
+                        const stock = Number(m.stock);
+                        const qty = isFinite(stock) ? Math.max(0, stock) : 0;
+                        const unitCost = Number(m.costPerUnit);
+                        const cost = isFinite(unitCost) ? unitCost : 0;
+                        const value = qty * cost;
+                        if (m.reorderAt != null && isFinite(Number(m.reorderAt)) && stock <= Number(m.reorderAt)) belowReorder++;
+                        if (value > 0 || qty > 0) {
+                            lines.push({
+                                name: m.name || "Material",
+                                stock: qty,
+                                unit: m.unit || "",
+                                unitCost: cost,
+                                value,
+                            });
+                        }
+                        total += value;
+                    });
+                    lines.sort((a, b) => b.value - a.value);
+                    return { total, lines, belowReorder };
+                }
+
+                function fmtNumish(n) {
+                    const v = Number(n);
+                    if (!isFinite(v)) return "—";
+                    if (Math.abs(v - Math.round(v)) < 1e-9) return String(Math.round(v));
+                    return v.toLocaleString("en-PH", { maximumFractionDigits: 2 });
                 }
 
                 async function loadCostingInventorySnapshot() {
