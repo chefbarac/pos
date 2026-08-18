@@ -1363,6 +1363,7 @@
             <a href="#/add" class="navbtn" data-route="add"><span class="navicon">&#43;</span><span>Add</span></a>
             <a href="#/history" class="navbtn" data-route="history"><span class="navicon">&#8801;</span><span>History</span></a>
             <a href="#/reports" class="navbtn" data-route="reports"><span class="navicon">&#9776;</span><span>Reports</span></a>
+            <a href="#/metrics" class="navbtn" data-route="metrics"><span class="navicon">&#9670;</span><span>Metrics</span></a>
             <a href="#/forecast" class="navbtn" data-route="forecast"><span class="navicon">&#9733;</span><span>Forecast</span></a>
             <a href="#/settings" class="navbtn" data-route="settings"><span class="navicon">&#9881;</span><span>Settings</span></a>
         </nav>
@@ -2102,6 +2103,10 @@
                     editingId: null,
                     forecastHorizonDays: 30, // projection window for cash-on-hand / revenue
                     forecastTargetDate: null, // optional ISO date string for "cash on hand by date"
+                    metricsRange: "month", // today|week|month|quarter|year|custom
+                    metricsCustom: { from: null, to: null },
+                    valuationMultiples: { low: 1.5, base: 2.0, high: 2.5 },
+                    operatingHours: null, // { open: "08:00", close: "18:00", days: [1,2,3,4,5,6] } optional
                 };
 
                 /* ---------- Routing ---------- */
@@ -2132,6 +2137,7 @@
                     else if (route === "add") main.appendChild(await renderAdd());
                     else if (route === "history") main.appendChild(await renderHistory());
                     else if (route === "reports") main.appendChild(await renderReports());
+                    else if (route === "metrics") main.appendChild(await renderBusinessMetrics());
                     else if (route === "forecast") main.appendChild(await renderForecast());
                     else if (route === "settings") main.appendChild(await renderSettings());
                     else main.appendChild(await renderHome());
@@ -4699,9 +4705,10 @@
                     return el("div", { class: cls }, [el("span", {}, label), el("span", { class: amtCls }, show)]);
                 }
 
-                function reportPeriodBounds(range) {
+                function reportPeriodBounds(range, customOpts) {
                     const now = new Date();
                     let from, to;
+                    const custom = customOpts || (range === "custom" ? App.metricsCustom || App.reportCustom : App.reportCustom);
                     if (range === "today") {
                         from = startOfDay(now);
                         to = endOfDay(now);
@@ -4711,17 +4718,53 @@
                     } else if (range === "month") {
                         from = startOfMonth(now);
                         to = endOfDay(now);
+                    } else if (range === "quarter") {
+                        const m = now.getMonth();
+                        const qStart = Math.floor(m / 3) * 3;
+                        from = startOfDay(new Date(now.getFullYear(), qStart, 1));
+                        to = endOfDay(now);
+                    } else if (range === "year") {
+                        from = startOfDay(new Date(now.getFullYear(), 0, 1));
+                        to = endOfDay(now);
                     } else if (range === "all") {
                         from = null;
                         to = endOfDay(now);
-                    } else if (range === "custom" && App.reportCustom && App.reportCustom.from) {
-                        from = startOfDay(new Date(App.reportCustom.from));
-                        to = App.reportCustom.to ? endOfDay(new Date(App.reportCustom.to)) : endOfDay(now);
+                    } else if (range === "custom" && custom && custom.from) {
+                        from = startOfDay(new Date(custom.from));
+                        to = custom.to ? endOfDay(new Date(custom.to)) : endOfDay(now);
                     } else {
                         from = startOfDay(now);
                         to = endOfDay(now);
                     }
                     return { from, to };
+                }
+
+                /** Previous period of equal length immediately before [from, to]. */
+                function previousPeriodBounds(from, to) {
+                    if (!from || !to) return { from: null, to: null };
+                    const ms = to.getTime() - from.getTime();
+                    const prevTo = new Date(from.getTime() - 1);
+                    const prevFrom = new Date(prevTo.getTime() - ms);
+                    return { from: prevFrom, to: prevTo };
+                }
+
+                function growthPct(current, previous) {
+                    if (previous == null || !isFinite(previous)) return null;
+                    if (previous === 0) return current === 0 ? 0 : null;
+                    return ((current - previous) / Math.abs(previous)) * 100;
+                }
+
+                function fmtGrowth(pct) {
+                    if (pct == null || !isFinite(pct)) return "—";
+                    const sign = pct > 0 ? "+" : "";
+                    return sign + pct.toFixed(1) + "%";
+                }
+
+                function medianOf(nums) {
+                    const a = (nums || []).filter((n) => isFinite(n)).slice().sort((x, y) => x - y);
+                    if (!a.length) return null;
+                    const mid = Math.floor(a.length / 2);
+                    return a.length % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2;
                 }
 
                 async function renderFinancialStatements(periodTxs, allTxs, bal, range) {
@@ -5835,6 +5878,768 @@
                     if (n == null || !isFinite(Number(n))) return "—";
                     return Number(n).toFixed(1).replace(/\.0$/, "") + "%";
                 }
+
+
+                /* ---------- BUSINESS METRICS & VALUATION ---------- */
+                /**
+                 * Aggregate KPIs for a transaction set. Sales only for revenue/txn metrics.
+                 * Transfers and owner moves are excluded from revenue (existing accounting model).
+                 */
+                function aggregateSalesMetrics(txs, opts) {
+                    opts = opts || {};
+                    const sales = (txs || []).filter((t) => t.type === "sale");
+                    const expenses = (txs || []).filter((t) => t.type === "expense");
+                    let revenue = 0;
+                    const amounts = [];
+                    const byCategory = {};
+                    const byPayment = {};
+                    const byItem = {}; // name -> { qty, revenue, count }
+                    const byDow = [0, 0, 0, 0, 0, 0, 0]; // Sun..Sat revenue
+                    const byDowTx = [0, 0, 0, 0, 0, 0, 0];
+                    const byHour = new Array(24).fill(0);
+                    const byHourTx = new Array(24).fill(0);
+                    const dayKeys = new Set();
+
+                    sales.forEach((t) => {
+                        const amt = Number(t.amount) || 0;
+                        revenue += amt;
+                        amounts.push(amt);
+                        const pay = t.payment || "other";
+                        byPayment[pay] = (byPayment[pay] || 0) + amt;
+
+                        const d = new Date(t.date);
+                        if (!isNaN(d.getTime())) {
+                            byDow[d.getDay()] += amt;
+                            byDowTx[d.getDay()]++;
+                            byHour[d.getHours()] += amt;
+                            byHourTx[d.getHours()]++;
+                            dayKeys.add(d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()));
+                        }
+
+                        txLines(t).forEach((ln) => {
+                            const cat = ln.category || t.category || "Other";
+                            const item = (ln.item || ln.name || t.item || "Item").trim() || "Item";
+                            const la = Number(ln.amount) || 0;
+                            const q = Number(ln.qty) || 0;
+                            byCategory[cat] = (byCategory[cat] || 0) + la;
+                            if (!byItem[item]) byItem[item] = { name: item, category: cat, qty: 0, revenue: 0, count: 0 };
+                            byItem[item].qty += q > 0 ? q : 1;
+                            byItem[item].revenue += la;
+                            byItem[item].count += 1;
+                        });
+                    });
+
+                    const txnCount = sales.length;
+                    const avgTxn = txnCount ? revenue / txnCount : 0;
+                    const medTxn = medianOf(amounts);
+                    const operatingDays = dayKeys.size || 0;
+
+                    return {
+                        revenue,
+                        txnCount,
+                        avgTxn,
+                        medTxn,
+                        expenseTotal: sumBy(expenses, () => true),
+                        byCategory,
+                        byPayment,
+                        byItem,
+                        byDow,
+                        byDowTx,
+                        byHour,
+                        byHourTx,
+                        operatingDays,
+                        amounts,
+                    };
+                }
+
+                async function estimatePeriodCogsAndOpex(periodTxs, periodFrom, periodTo) {
+                    let cogs = null;
+                    let cogsSource = "none";
+                    let avgMargin = null;
+                    let opex = 0;
+                    let inventoryValue = 0;
+                    let costingOk = false;
+                    try {
+                        const snap = await loadCostingInventorySnapshot();
+                        costingOk = !!snap.ok;
+                        if (snap.ok) {
+                            const inv = typeof computeInventoryAtCost === "function" ? computeInventoryAtCost(snap.materials || []) : { total: 0 };
+                            inventoryValue = inv.total || 0;
+                            if (snap.metrics && snap.metrics.avgMargin != null && isFinite(snap.metrics.avgMargin)) {
+                                avgMargin = snap.metrics.avgMargin;
+                            }
+                            if (typeof computePeriodCogsFromMoves === "function" && periodFrom && periodTo) {
+                                const cogsRes = computePeriodCogsFromMoves(snap.moves || [], snap.materials || [], periodFrom, periodTo);
+                                if (cogsRes && cogsRes.hasData) {
+                                    cogs = cogsRes.cogs;
+                                    cogsSource = "stock-outs";
+                                }
+                            }
+                            const matNames = typeof materialNameSetFromSnap === "function" ? materialNameSetFromSnap(snap) : new Set();
+                            if (typeof splitExpensesInventoryVsOpex === "function") {
+                                const split = splitExpensesInventoryVsOpex(periodTxs, matNames);
+                                opex = split.opexTotal;
+                            } else {
+                                opex = sumBy(periodTxs, (t) => t.type === "expense");
+                            }
+                        } else {
+                            opex = sumBy(periodTxs, (t) => t.type === "expense");
+                        }
+                    } catch (e) {
+                        opex = sumBy(periodTxs, (t) => t.type === "expense");
+                    }
+                    const revenue = sumBy(periodTxs, (t) => t.type === "sale");
+                    if (cogs == null && avgMargin != null && revenue > 0) {
+                        cogs = revenue * (1 - avgMargin / 100);
+                        cogsSource = "margin-estimate";
+                    }
+                    if (cogs == null) cogs = 0;
+                    return { cogs, cogsSource, avgMargin, opex, inventoryValue, costingOk, revenue };
+                }
+
+                function scoreBusinessHealth(ctx) {
+                    // Returns null if insufficient data
+                    const checks = [];
+                    let score = 50;
+                    let factors = 0;
+
+                    if (ctx.revenueGrowth != null && isFinite(ctx.revenueGrowth)) {
+                        factors++;
+                        if (ctx.revenueGrowth >= 15) {
+                            score += 12;
+                            checks.push({ ok: true, text: "Revenue growing " + fmtGrowth(ctx.revenueGrowth) });
+                        } else if (ctx.revenueGrowth >= 0) {
+                            score += 6;
+                            checks.push({ ok: true, text: "Revenue stable/up " + fmtGrowth(ctx.revenueGrowth) });
+                        } else if (ctx.revenueGrowth > -10) {
+                            score -= 4;
+                            checks.push({ ok: false, text: "Revenue soft " + fmtGrowth(ctx.revenueGrowth) });
+                        } else {
+                            score -= 12;
+                            checks.push({ ok: false, text: "Revenue down " + fmtGrowth(ctx.revenueGrowth) });
+                        }
+                    }
+
+                    if (ctx.grossMarginPct != null && isFinite(ctx.grossMarginPct)) {
+                        factors++;
+                        if (ctx.grossMarginPct >= 40) {
+                            score += 10;
+                            checks.push({ ok: true, text: "Gross margin healthy (" + fmtPct(ctx.grossMarginPct) + ")" });
+                        } else if (ctx.grossMarginPct >= 25) {
+                            score += 5;
+                            checks.push({ ok: true, text: "Gross margin OK (" + fmtPct(ctx.grossMarginPct) + ")" });
+                        } else {
+                            score -= 8;
+                            checks.push({ ok: false, text: "Gross margin thin (" + fmtPct(ctx.grossMarginPct) + ")" });
+                        }
+                    }
+
+                    if (ctx.txnGrowth != null && isFinite(ctx.txnGrowth)) {
+                        factors++;
+                        if (ctx.txnGrowth >= 10) {
+                            score += 8;
+                            checks.push({ ok: true, text: "Transaction volume up " + fmtGrowth(ctx.txnGrowth) });
+                        } else if (ctx.txnGrowth >= 0) {
+                            score += 3;
+                            checks.push({ ok: true, text: "Transaction volume stable" });
+                        } else {
+                            score -= 6;
+                            checks.push({ ok: false, text: "Fewer transactions " + fmtGrowth(ctx.txnGrowth) });
+                        }
+                    }
+
+                    if (ctx.avgTxnGrowth != null && isFinite(ctx.avgTxnGrowth)) {
+                        factors++;
+                        if (ctx.avgTxnGrowth >= 5) {
+                            score += 6;
+                            checks.push({ ok: true, text: "Average ticket growing" });
+                        } else if (ctx.avgTxnGrowth < -8) {
+                            score -= 6;
+                            checks.push({ ok: false, text: "Average transaction value declining" });
+                        }
+                    }
+
+                    if (ctx.liquid != null && ctx.payable != null) {
+                        factors++;
+                        if (ctx.liquid > ctx.payable * 1.5) {
+                            score += 8;
+                            checks.push({ ok: true, text: "Cash covers payables comfortably" });
+                        } else if (ctx.liquid >= ctx.payable) {
+                            score += 3;
+                            checks.push({ ok: true, text: "Cash covers payables" });
+                        } else if (ctx.payable > 0) {
+                            score -= 10;
+                            checks.push({ ok: false, text: "High outstanding payables vs liquid cash" });
+                        }
+                    }
+
+                    if (ctx.netMarginPct != null && isFinite(ctx.netMarginPct)) {
+                        factors++;
+                        if (ctx.netMarginPct >= 15) {
+                            score += 8;
+                            checks.push({ ok: true, text: "Net margin solid (" + fmtPct(ctx.netMarginPct) + ")" });
+                        } else if (ctx.netMarginPct < 0) {
+                            score -= 12;
+                            checks.push({ ok: false, text: "Negative net margin" });
+                        } else if (ctx.netMarginPct < 5) {
+                            score -= 4;
+                            checks.push({ ok: false, text: "Thin net margin (" + fmtPct(ctx.netMarginPct) + ")" });
+                        }
+                    }
+
+                    if (factors < 3) return { score: null, checks: [], message: "Insufficient data for a reliable health score." };
+                    score = Math.max(0, Math.min(100, Math.round(score)));
+                    return { score, checks, message: null };
+                }
+
+                function metricsPeriodLabel(range) {
+                    if (range === "today") return "Today";
+                    if (range === "week") return "This week";
+                    if (range === "month") return "This month";
+                    if (range === "quarter") return "This quarter";
+                    if (range === "year") return "This year";
+                    if (range === "custom") return "Custom range";
+                    return "Period";
+                }
+
+                async function renderBusinessMetrics() {
+                    const wrap = el("div", { class: "page" });
+                    wrap.appendChild(el("div", { class: "page-title" }, "Business Metrics"));
+                    wrap.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Decision dashboard from existing sales, expenses, inventory, and account balances. Does not change POS checkout. Transfers and owner moves are not counted as revenue.",
+                        ),
+                    );
+
+                    // ---- Period controls ----
+                    const rangeCard = el("div", { class: "card" });
+                    rangeCard.appendChild(el("div", { class: "flabel" }, "Reporting period"));
+                    const rangeRow = el("div", { class: "chiprow" });
+                    [
+                        ["today", "Today"],
+                        ["week", "Week"],
+                        ["month", "Month"],
+                        ["quarter", "Quarter"],
+                        ["year", "Year"],
+                        ["custom", "Custom"],
+                    ].forEach(([val, label]) => {
+                        const chip = el("button", { type: "button", class: "chip" + (App.metricsRange === val ? " active" : "") }, label);
+                        chip.addEventListener("click", () => {
+                            App.metricsRange = val;
+                            softRender();
+                        });
+                        rangeRow.appendChild(chip);
+                    });
+                    rangeCard.appendChild(rangeRow);
+                    if (App.metricsRange === "custom") {
+                        const crow = el("div", { class: "addrow", style: "margin-top:8px" });
+                        const fromInp = el("input", { type: "date", class: "finput", value: (App.metricsCustom && App.metricsCustom.from) || "" });
+                        const toInp = el("input", { type: "date", class: "finput", value: (App.metricsCustom && App.metricsCustom.to) || "" });
+                        const apply = el("button", { type: "button", class: "smallbtn" }, "Apply");
+                        apply.addEventListener("click", () => {
+                            App.metricsCustom = { from: fromInp.value || null, to: toInp.value || null };
+                            softRender();
+                        });
+                        crow.appendChild(fromInp);
+                        crow.appendChild(toInp);
+                        crow.appendChild(apply);
+                        rangeCard.appendChild(crow);
+                    }
+                    wrap.appendChild(rangeCard);
+
+                    const allTxs = await allTx();
+                    const bounds = reportPeriodBounds(App.metricsRange, App.metricsCustom);
+                    const periodFrom = bounds.from;
+                    const periodTo = bounds.to;
+                    const periodTxs =
+                        periodFrom == null
+                            ? allTxs
+                            : allTxs.filter((t) => inRange(t.date, periodFrom, periodTo));
+                    const prevBounds = previousPeriodBounds(periodFrom || startOfDay(new Date(0)), periodTo || endOfDay(new Date()));
+                    const prevTxs =
+                        prevBounds.from && prevBounds.to
+                            ? allTxs.filter((t) => inRange(t.date, prevBounds.from, prevBounds.to))
+                            : [];
+
+                    const cur = aggregateSalesMetrics(periodTxs);
+                    const prev = aggregateSalesMetrics(prevTxs);
+                    const pl = await estimatePeriodCogsAndOpex(periodTxs, periodFrom, periodTo);
+                    const prevPl = await estimatePeriodCogsAndOpex(prevTxs, prevBounds.from, prevBounds.to);
+
+                    const grossProfit = pl.revenue - pl.cogs;
+                    const netIncome = grossProfit - pl.opex;
+                    const grossMarginPct = pl.revenue > 0 ? (grossProfit / pl.revenue) * 100 : null;
+                    const netMarginPct = pl.revenue > 0 ? (netIncome / pl.revenue) * 100 : null;
+                    const profitPerTxn = cur.txnCount ? netIncome / cur.txnCount : null;
+                    const gpPerTxn = cur.txnCount ? grossProfit / cur.txnCount : null;
+
+                    const revenueGrowth = prev.txnCount || prev.revenue ? growthPct(cur.revenue, prev.revenue) : null;
+                    const txnGrowth = prev.txnCount || prev.revenue ? growthPct(cur.txnCount, prev.txnCount) : null;
+                    const gpGrowth = prev.revenue || prev.txnCount ? growthPct(grossProfit, prevPl.revenue - prevPl.cogs) : null;
+                    const netGrowth = prev.revenue || prev.txnCount ? growthPct(netIncome, prevPl.revenue - prevPl.cogs - prevPl.opex) : null;
+                    const avgTxnGrowth = prev.avgTxn ? growthPct(cur.avgTxn, prev.avgTxn) : null;
+
+                    const bal = await computeAccountBalances(allTxs);
+                    const liquid = (bal.cash || 0) + (bal.gcash || 0) + (bal.bank || 0);
+                    let assetValue = 0;
+                    try {
+                        const assets = await companyAssets();
+                        assetValue = assets.reduce((s, a) => s + (Number(a.currentValue != null ? a.currentValue : a.cost) || 0), 0);
+                    } catch (e) {}
+
+                    const periodLabel = metricsPeriodLabel(App.metricsRange);
+
+                    // ---- How much are we selling? ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "REVENUE · " + periodLabel.toUpperCase()));
+                    wrap.appendChild(
+                        el("div", { class: "summary-grid" }, [
+                            summaryCard("Total revenue", cur.revenue, "sales"),
+                            summaryCardText("vs prior period", prev.revenue || prev.txnCount ? fmtPeso(prev.revenue) : "n/a", ""),
+                            summaryCardText("Revenue growth", revenueGrowth != null ? fmtGrowth(revenueGrowth) : "Insufficient data", revenueGrowth != null && revenueGrowth >= 0 ? "sales" : "expenses"),
+                            summaryCard("Avg transaction", cur.avgTxn, "sales"),
+                        ]),
+                    );
+                    if (cur.medTxn != null) {
+                        wrap.appendChild(el("div", { class: "help-text" }, "Median transaction: " + fmtPeso(cur.medTxn) + " · Prior period revenue: " + fmtPeso(prev.revenue) + " · Source: POS sales only (excludes transfers)."));
+                    }
+
+                    // ---- Transactions ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "TRANSACTIONS"));
+                    const txnCards = [
+                        summaryCardText("Sale transactions", String(cur.txnCount), "sales"),
+                        summaryCardText("Txn growth", txnGrowth != null ? fmtGrowth(txnGrowth) : "—", txnGrowth != null && txnGrowth >= 0 ? "sales" : "expenses"),
+                        summaryCardText("Operating days (with sales)", String(cur.operatingDays), ""),
+                        summaryCard("Revenue / operating day", cur.operatingDays ? cur.revenue / cur.operatingDays : 0, "sales"),
+                    ];
+                    wrap.appendChild(el("div", { class: "summary-grid" }, txnCards));
+                    wrap.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "A transaction is one completed sale/order — not unique customers. " +
+                                (cur.operatingDays
+                                    ? "Transactions per operating day: " + (cur.txnCount / cur.operatingDays).toFixed(1) + "."
+                                    : "No sales days in this period."),
+                        ),
+                    );
+
+                    // Optional operating hours efficiency
+                    const hoursCfg = App.operatingHours;
+                    if (hoursCfg && hoursCfg.open && hoursCfg.close && cur.operatingDays) {
+                        const [oh, om] = hoursCfg.open.split(":").map(Number);
+                        const [ch, cm] = hoursCfg.close.split(":").map(Number);
+                        let hoursPerDay = ch + cm / 60 - (oh + om / 60);
+                        if (hoursPerDay <= 0) hoursPerDay = 8;
+                        const totalHours = hoursPerDay * cur.operatingDays;
+                        wrap.appendChild(
+                            el("div", { class: "summary-grid" }, [
+                                summaryCard("Revenue / hour", totalHours ? cur.revenue / totalHours : 0, "sales"),
+                                summaryCardText("Txn / hour", totalHours ? (cur.txnCount / totalHours).toFixed(2) : "—", ""),
+                                summaryCard("Gross profit / hour", totalHours ? grossProfit / totalHours : 0, "sales"),
+                            ]),
+                        );
+                    } else {
+                        wrap.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "Configure optional operating hours below to unlock revenue/profit per hour. Not required for other metrics.",
+                            ),
+                        );
+                    }
+
+                    // ---- Profitability ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "PROFITABILITY"));
+                    const profitCards = [
+                        summaryCard("Gross revenue", pl.revenue, "sales"),
+                        summaryCard("COGS" + (pl.cogsSource === "margin-estimate" ? " (est.)" : ""), pl.cogs, "expenses"),
+                        summaryCard("Gross profit", grossProfit, grossProfit >= 0 ? "sales" : "expenses"),
+                        summaryCardText("Gross margin", grossMarginPct != null ? fmtPct(grossMarginPct) : "—", "sales"),
+                        summaryCard("Operating expenses", pl.opex, "expenses"),
+                        summaryCard("Net income", netIncome, netIncome >= 0 ? "sales" : "expenses"),
+                        summaryCardText("Net margin", netMarginPct != null ? fmtPct(netMarginPct) : "—", netIncome >= 0 ? "sales" : "expenses"),
+                        summaryCard("Profit / transaction", profitPerTxn != null ? profitPerTxn : 0, "sales"),
+                    ];
+                    wrap.appendChild(el("div", { class: "summary-grid" }, profitCards));
+                    const cogsNote =
+                        pl.cogsSource === "stock-outs"
+                            ? "COGS from Costing stock-outs in period."
+                            : pl.cogsSource === "margin-estimate"
+                              ? "COGS estimated from Costing average product margin — label as estimated."
+                              : "COGS unavailable (no Costing consumption data). Treated as ₱0 for display.";
+                    wrap.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            cogsNote +
+                                " Inventory purchases are not treated as opex when Costing materials are linked. Same model as Financial Statements.",
+                        ),
+                    );
+                    if (gpGrowth != null || netGrowth != null) {
+                        wrap.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "Gross profit growth: " +
+                                    (gpGrowth != null ? fmtGrowth(gpGrowth) : "Insufficient data") +
+                                    " · Net profit growth: " +
+                                    (netGrowth != null ? fmtGrowth(netGrowth) : "Insufficient data") +
+                                    " · Avg ticket growth: " +
+                                    (avgTxnGrowth != null ? fmtGrowth(avgTxnGrowth) : "—"),
+                            ),
+                        );
+                    }
+
+                    // ---- Service / product performance ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "SERVICE / PRODUCT PERFORMANCE"));
+                    const itemRows = Object.values(cur.byItem)
+                        .map((it) => {
+                            const estCogs =
+                                pl.avgMargin != null && it.revenue > 0 ? it.revenue * (1 - pl.avgMargin / 100) : null;
+                            const gp = estCogs != null ? it.revenue - estCogs : null;
+                            const gm = it.revenue > 0 && gp != null ? (gp / it.revenue) * 100 : null;
+                            const share = cur.revenue > 0 ? (it.revenue / cur.revenue) * 100 : 0;
+                            return Object.assign({}, it, { estCogs, gp, gm, share });
+                        })
+                        .sort((a, b) => b.revenue - a.revenue);
+
+                    const topByRev = itemRows.slice(0, 8);
+                    const topByGp = itemRows
+                        .filter((r) => r.gp != null)
+                        .slice()
+                        .sort((a, b) => b.gp - a.gp)
+                        .slice(0, 8);
+
+                    const perfCard = el("div", { class: "card" });
+                    perfCard.appendChild(el("div", { class: "chartcard-title" }, "Top by revenue"));
+                    if (!topByRev.length) {
+                        perfCard.appendChild(el("div", { class: "empty small" }, "No sales line items in this period."));
+                    } else {
+                        topByRev.forEach((r, i) => {
+                            perfCard.appendChild(
+                                el("div", { class: "toprow" }, [
+                                    el("span", { class: "toprow-rank" }, String(i + 1)),
+                                    el(
+                                        "span",
+                                        { class: "toprow-name" },
+                                        r.name +
+                                            " · qty " +
+                                            Math.round(r.qty) +
+                                            (r.gm != null ? " · GM " + fmtPct(r.gm) : "") +
+                                            " · " +
+                                            r.share.toFixed(0) +
+                                            "%",
+                                    ),
+                                    el("span", { class: "toprow-amt" }, fmtPeso(r.revenue)),
+                                ]),
+                            );
+                        });
+                    }
+                    if (topByGp.length) {
+                        perfCard.appendChild(el("div", { class: "chartcard-title", style: "margin-top:12px" }, "Most profitable (est. gross profit)"));
+                        perfCard.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                pl.avgMargin != null
+                                    ? "Gross profit per item uses Costing avg margin " + fmtPct(pl.avgMargin) + " (estimated unless item-level recipes are applied)."
+                                    : "Item-level COGS unavailable — rank by revenue only until Costing margins exist.",
+                            ),
+                        );
+                        topByGp.forEach((r, i) => {
+                            perfCard.appendChild(
+                                el("div", { class: "toprow" }, [
+                                    el("span", { class: "toprow-rank" }, String(i + 1)),
+                                    el("span", { class: "toprow-name" }, r.name + (r.gm != null ? " · GM " + fmtPct(r.gm) : "")),
+                                    el("span", { class: "toprow-amt" }, fmtPeso(r.gp)),
+                                ]),
+                            );
+                        });
+                    }
+                    wrap.appendChild(perfCard);
+
+                    // ---- Sales mix ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "SALES MIX"));
+                    const mixCard = el("div", { class: "card" });
+                    const catEntries = Object.entries(cur.byCategory).sort((a, b) => b[1] - a[1]);
+                    if (catEntries.length) {
+                        mixCard.appendChild(el("div", { class: "chartcard-title" }, "Revenue by category"));
+                        const maxCat = Math.max(...catEntries.map((e) => e[1]), 1);
+                        catEntries.forEach(([cat, amt]) => {
+                            mixCard.appendChild(
+                                el("div", { class: "barrow" }, [
+                                    el("div", { class: "barrow-label" }, cat),
+                                    el("div", { class: "barrow-track" }, [el("div", { class: "barrow-fill", style: "width:" + ((amt / maxCat) * 100).toFixed(0) + "%" })]),
+                                    el("div", { class: "barrow-amt" }, fmtPeso(amt)),
+                                ]),
+                            );
+                        });
+                    }
+                    const payEntries = Object.entries(cur.byPayment).sort((a, b) => b[1] - a[1]);
+                    if (payEntries.length) {
+                        mixCard.appendChild(el("div", { class: "chartcard-title", style: "margin-top:12px" }, "Revenue by payment method"));
+                        const maxPay = Math.max(...payEntries.map((e) => e[1]), 1);
+                        payEntries.forEach(([pay, amt]) => {
+                            mixCard.appendChild(
+                                el("div", { class: "barrow" }, [
+                                    el("div", { class: "barrow-label" }, paymentLabel(pay)),
+                                    el("div", { class: "barrow-track" }, [el("div", { class: "barrow-fill alt", style: "width:" + ((amt / maxPay) * 100).toFixed(0) + "%" })]),
+                                    el("div", { class: "barrow-amt" }, fmtPeso(amt)),
+                                ]),
+                            );
+                        });
+                    }
+                    if (!catEntries.length && !payEntries.length) {
+                        mixCard.appendChild(el("div", { class: "empty small" }, "No mix data for this period."));
+                    }
+                    wrap.appendChild(mixCard);
+
+                    // ---- Time analysis ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "WHEN WE'RE BUSIEST"));
+                    const timeCard = el("div", { class: "card" });
+                    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+                    // Show Mon-Sun order
+                    const order = [1, 2, 3, 4, 5, 6, 0];
+                    const maxDow = Math.max(...cur.byDow, 1);
+                    timeCard.appendChild(el("div", { class: "chartcard-title" }, "Sales by day of week"));
+                    order.forEach((di) => {
+                        const amt = cur.byDow[di];
+                        const n = cur.byDowTx[di];
+                        const avg = n ? amt / n : 0;
+                        timeCard.appendChild(
+                            el("div", { class: "barrow" }, [
+                                el("div", { class: "barrow-label" }, dayNames[di]),
+                                el("div", { class: "barrow-track" }, [el("div", { class: "barrow-fill", style: "width:" + ((amt / maxDow) * 100).toFixed(0) + "%" })]),
+                                el("div", { class: "barrow-amt" }, fmtPeso(amt)),
+                            ]),
+                        );
+                        if (n) {
+                            timeCard.appendChild(
+                                el("div", { class: "help-text", style: "margin:-4px 0 6px 102px" }, n + " txn · avg " + fmtPeso(avg)),
+                            );
+                        }
+                    });
+                    const peakDay = order.reduce((best, di) => (cur.byDow[di] > cur.byDow[best] ? di : best), order[0]);
+                    const weakDay = order.reduce((best, di) => (cur.byDow[di] < cur.byDow[best] ? di : best), order[0]);
+                    if (cur.revenue > 0) {
+                        timeCard.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "Strongest: " + dayNames[peakDay] + " · Weakest: " + dayNames[weakDay] + ".",
+                            ),
+                        );
+                    }
+
+                    timeCard.appendChild(el("div", { class: "chartcard-title", style: "margin-top:14px" }, "Sales by hour"));
+                    const hourHasData = cur.byHourTx.some((n) => n > 0);
+                    if (!hourHasData) {
+                        timeCard.appendChild(el("div", { class: "empty small" }, "Hourly analysis unavailable — no transaction timestamps in period."));
+                    } else {
+                        const maxH = Math.max(...cur.byHour, 1);
+                        // Show only hours with activity or 8-20 for readability
+                        for (let h = 0; h < 24; h++) {
+                            if (cur.byHourTx[h] === 0 && (h < 7 || h > 21)) continue;
+                            const label = (h < 10 ? "0" : "") + h + ":00";
+                            timeCard.appendChild(
+                                el("div", { class: "barrow" }, [
+                                    el("div", { class: "barrow-label" }, label),
+                                    el("div", { class: "barrow-track" }, [el("div", { class: "barrow-fill alt", style: "width:" + ((cur.byHour[h] / maxH) * 100).toFixed(0) + "%" })]),
+                                    el("div", { class: "barrow-amt" }, fmtPeso(cur.byHour[h])),
+                                ]),
+                            );
+                        }
+                        const peakHour = cur.byHour.indexOf(Math.max(...cur.byHour));
+                        timeCard.appendChild(el("div", { class: "help-text" }, "Peak hour: " + peakHour + ":00 · " + cur.byHourTx[peakHour] + " transactions."));
+                    }
+                    wrap.appendChild(timeCard);
+
+                    // ---- Customer tracking disclaimer ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "CUSTOMER TRACKING"));
+                    wrap.appendChild(
+                        el(
+                            "div",
+                            { class: "card" },
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "Customer-level retention metrics require optional customer identification. Current business metrics are based on transaction-level data. Walk-in sales do not need customer profiles.",
+                            ),
+                        ),
+                    );
+
+                    // ---- Inventory / assets ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "INVENTORY & ASSETS"));
+                    wrap.appendChild(
+                        el("div", { class: "summary-grid" }, [
+                            summaryCard("Inventory at cost", pl.inventoryValue, "sales"),
+                            summaryCard("Fixed assets (book)", assetValue, "sales"),
+                            summaryCard("Liquid cash", liquid, "sales"),
+                            summaryCard("Accounts payable", bal.payable || 0, (bal.payable || 0) > 0 ? "expenses" : "sales"),
+                        ]),
+                    );
+                    wrap.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Inventory turnover and machine utilization need extra tracking beyond POS tickets. Figures above are calculated from existing Costing stock and Forecast asset records when available.",
+                        ),
+                    );
+
+                    // ---- Business valuation ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "BUSINESS VALUE"));
+                    const valCard = el("div", { class: "card" });
+                    valCard.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Management estimate / planning tool — not a professional appraisal or market selling price.",
+                        ),
+                    );
+
+                    const totalAssets = liquid + (bal.receivable || 0) + pl.inventoryValue + assetValue;
+                    const totalLiab = bal.payable || 0;
+                    const nav = totalAssets - totalLiab;
+
+                    // Annualize net income from selected period
+                    let annualizedProfit = null;
+                    if (periodFrom && periodTo && pl.revenue > 0) {
+                        const days = Math.max(1, (periodTo.getTime() - periodFrom.getTime()) / 86400000);
+                        annualizedProfit = (netIncome / days) * 365;
+                    } else if (App.metricsRange === "year") {
+                        annualizedProfit = netIncome;
+                    }
+
+                    const mult = App.valuationMultiples || { low: 1.5, base: 2.0, high: 2.5 };
+                    const earnLow = annualizedProfit != null ? annualizedProfit * mult.low : null;
+                    const earnBase = annualizedProfit != null ? annualizedProfit * mult.base : null;
+                    const earnHigh = annualizedProfit != null ? annualizedProfit * mult.high : null;
+
+                    valCard.appendChild(el("div", { class: "chartcard-title" }, "A. Net asset value"));
+                    valCard.appendChild(stmtRow("Total business assets", totalAssets));
+                    valCard.appendChild(stmtRow("Total liabilities", totalLiab));
+                    valCard.appendChild(stmtRow("Net asset value", nav, { total: true, signed: true }));
+
+                    valCard.appendChild(el("div", { class: "chartcard-title", style: "margin-top:14px" }, "B. Earnings-based value"));
+                    if (annualizedProfit == null) {
+                        valCard.appendChild(el("div", { class: "empty small" }, "Insufficient historical data to annualize profit."));
+                    } else {
+                        valCard.appendChild(stmtRow("Annualized sustainable profit (from period)", annualizedProfit, { signed: true }));
+                        valCard.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "Annualized = period net income ÷ period days × 365. Adjust multiples for risk and growth.",
+                            ),
+                        );
+                        const multRow = el("div", { class: "frow", style: "margin-top:8px" });
+                        ["low", "base", "high"].forEach((k) => {
+                            const col = el("div", { class: "fcol" });
+                            col.appendChild(el("label", { class: "flabel" }, k.charAt(0).toUpperCase() + k.slice(1) + " ×"));
+                            const inp = el("input", {
+                                type: "number",
+                                class: "finput",
+                                value: mult[k],
+                                min: "0.1",
+                                step: "0.1",
+                            });
+                            inp.addEventListener("change", () => {
+                                App.valuationMultiples = Object.assign({}, App.valuationMultiples, { [k]: parseFloat(inp.value) || mult[k] });
+                                softRender();
+                            });
+                            col.appendChild(inp);
+                            multRow.appendChild(col);
+                        });
+                        valCard.appendChild(multRow);
+                        valCard.appendChild(stmtRow("Low (×" + mult.low + ")", earnLow));
+                        valCard.appendChild(stmtRow("Base (×" + mult.base + ")", earnBase, { total: true }));
+                        valCard.appendChild(stmtRow("High (×" + mult.high + ")", earnHigh));
+                    }
+
+                    valCard.appendChild(el("div", { class: "chartcard-title", style: "margin-top:14px" }, "C. Combined view"));
+                    valCard.appendChild(stmtRow("Net asset value", nav, { signed: true }));
+                    if (earnBase != null) {
+                        const lowEst = Math.min(nav, earnLow);
+                        const highEst = Math.max(nav, earnHigh);
+                        const baseEst = (nav + earnBase) / 2;
+                        valCard.appendChild(stmtRow("Earnings value (base)", earnBase));
+                        valCard.appendChild(stmtRow("Low estimated value", lowEst, { signed: true }));
+                        valCard.appendChild(stmtRow("Base estimated value", baseEst, { total: true, signed: true }));
+                        valCard.appendChild(stmtRow("High estimated value", highEst, { signed: true }));
+                    }
+                    wrap.appendChild(valCard);
+
+                    // ---- Health score ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "BUSINESS HEALTH"));
+                    const health = scoreBusinessHealth({
+                        revenueGrowth,
+                        txnGrowth,
+                        avgTxnGrowth,
+                        grossMarginPct,
+                        netMarginPct,
+                        liquid,
+                        payable: bal.payable || 0,
+                    });
+                    const healthCard = el("div", { class: "card" });
+                    if (health.score == null) {
+                        healthCard.appendChild(el("div", { class: "empty small" }, health.message || "Insufficient data"));
+                    } else {
+                        healthCard.appendChild(
+                            el("div", { class: "hero-amount", style: "color:var(--ink);font-size:36px" }, health.score + " / 100"),
+                        );
+                        healthCard.appendChild(el("div", { class: "hero-label", style: "color:var(--ink-soft)" }, "BUSINESS HEALTH SCORE"));
+                        const pos = health.checks.filter((c) => c.ok);
+                        const neg = health.checks.filter((c) => !c.ok);
+                        if (pos.length) {
+                            healthCard.appendChild(el("div", { class: "flabel", style: "margin-top:12px" }, "Positive"));
+                            pos.forEach((c) => healthCard.appendChild(el("div", { class: "help-text", style: "color:var(--green)" }, "• " + c.text)));
+                        }
+                        if (neg.length) {
+                            healthCard.appendChild(el("div", { class: "flabel", style: "margin-top:8px" }, "Needs attention"));
+                            neg.forEach((c) => healthCard.appendChild(el("div", { class: "help-text", style: "color:var(--rust)" }, "• " + c.text)));
+                        }
+                    }
+                    wrap.appendChild(healthCard);
+
+                    // ---- Optional operating hours ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "OPTIONAL · OPERATING HOURS"));
+                    const ohCard = el("div", { class: "card form" });
+                    ohCard.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Optional. Enables revenue and profit per operating hour. Does not affect POS checkout.",
+                        ),
+                    );
+                    const oh = App.operatingHours || { open: "08:00", close: "18:00" };
+                    const ohRow = el("div", { class: "frow" });
+                    const openInp = el("input", { type: "time", class: "finput", value: oh.open || "08:00" });
+                    const closeInp = el("input", { type: "time", class: "finput", value: oh.close || "18:00" });
+                    ohRow.appendChild(el("div", { class: "fcol" }, [el("label", { class: "flabel" }, "Open"), openInp]));
+                    ohRow.appendChild(el("div", { class: "fcol" }, [el("label", { class: "flabel" }, "Close"), closeInp]));
+                    ohCard.appendChild(ohRow);
+                    const saveOh = el("button", { type: "button", class: "bigbtn ghost small2" }, "Save hours");
+                    saveOh.addEventListener("click", () => {
+                        App.operatingHours = { open: openInp.value || "08:00", close: closeInp.value || "18:00" };
+                        toast("Operating hours saved for this session");
+                        softRender();
+                    });
+                    ohCard.appendChild(saveOh);
+                    wrap.appendChild(ohCard);
+
+                    wrap.appendChild(
+                        el(
+                            "div",
+                            { class: "footnote" },
+                            "Business Metrics · calculated on demand from POS transactions · same accounting rules as Reports & Forecast",
+                        ),
+                    );
+
+                    return wrap;
+                }
+
 
                 /* ---------- FORECAST ---------- */
                 const DEFAULT_ASSET_SEED = [
