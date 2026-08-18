@@ -1850,7 +1850,7 @@
 
                 /* ---------- Settings & company helpers ---------- */
                 const DEFAULT_SALE_CATEGORIES = ["Document Printing", "Ukay-Ukay", "School Supplies"];
-                const DEFAULT_EXPENSE_CATEGORIES = ["Restock", "Supplies & Materials", "Utilities", "Rent", "Transportation", "Other"];
+                const DEFAULT_EXPENSE_CATEGORIES = ["Restock", "Supplies & Materials", "Utilities", "Rent", "Transportation", "Interests/Fees", "Other"];
                 const DEFAULT_PRESET_SEED = [
                     { type: "sale", category: "Document Printing", name: "Photocopy (B&W)", price: 2 },
                     { type: "sale", category: "Document Printing", name: "Print — Colored", price: 10 },
@@ -1907,6 +1907,7 @@
                         startingGcash: 0,
                         startingBank: 0,
                         startingReceivable: 0,
+                        startingPayable: 0,
                         createdAt: new Date().toISOString(),
                     };
                     const id = await dbAdd("companies", company);
@@ -1930,6 +1931,7 @@
                             startingGcash: (legacyGcash && legacyGcash.value) || 0,
                             startingBank: (legacyBank && legacyBank.value) || 0,
                             startingReceivable: 0,
+                            startingPayable: 0,
                             createdAt: new Date().toISOString(),
                         };
                         const id = await dbAdd("companies", company);
@@ -2205,19 +2207,27 @@
                     const startGcash = company ? company.startingGcash : 0;
                     const startBank = company ? company.startingBank : 0;
                     const startReceivable = company ? company.startingReceivable : 0;
+                    const startPayable = company ? company.startingPayable : 0;
                     const txs = txsOverride || (await allTx());
                     const bal = {
                         cash: Number(startCash) || 0,
                         gcash: Number(startGcash) || 0,
                         bank: Number(startBank) || 0,
                         receivable: Number(startReceivable) || 0,
+                        payable: Number(startPayable) || 0,
                     };
                     for (const t of txs) {
-                        if (t.type === "sale" && bal.hasOwnProperty(t.payment)) bal[t.payment] += Number(t.amount) || 0;
-                        else if (t.type === "expense" && bal.hasOwnProperty(t.payment)) bal[t.payment] -= Number(t.amount) || 0;
-                        else if (t.type === "transfer") {
-                            if (bal.hasOwnProperty(t.fromAccount)) bal[t.fromAccount] -= Number(t.amount) || 0;
-                            if (bal.hasOwnProperty(t.toAccount)) bal[t.toAccount] += Number(t.amount) || 0;
+                        const amt = Number(t.amount) || 0;
+                        if (t.type === "sale" && bal.hasOwnProperty(t.payment)) bal[t.payment] += amt;
+                        else if (t.type === "expense") {
+                            // Payable expenses increase liability; cash-like payments decrease the asset account
+                            if (t.payment === "payable") bal.payable += amt;
+                            else if (bal.hasOwnProperty(t.payment)) bal[t.payment] -= amt;
+                        } else if (t.type === "transfer") {
+                            if (bal.hasOwnProperty(t.fromAccount)) bal[t.fromAccount] -= amt;
+                            // Paying AP: transfer cash/GCash/bank → payable reduces the liability
+                            if (t.toAccount === "payable") bal.payable -= amt;
+                            else if (bal.hasOwnProperty(t.toAccount)) bal[t.toAccount] += amt;
                         }
                     }
                     return bal;
@@ -2269,7 +2279,12 @@
                             el("div", { class: "balitem lead" }, [el("div", { class: "bal-label" }, "Cash on Hand"), el("div", { class: "bal-value" }, fmtPeso(bal.cash))]),
                             el("div", { class: "balitem" }, [el("div", { class: "bal-label" }, "GCash"), el("div", { class: "bal-value" }, fmtPeso(bal.gcash))]),
                             el("div", { class: "balitem" }, [el("div", { class: "bal-label" }, "Bank"), el("div", { class: "bal-value" }, fmtPeso(bal.bank))]),
+                        ]),
+                    );
+                    wrap.appendChild(
+                        el("div", { class: "balancecard", style: "margin-top:-12px;border-top:none;border-radius:0 0 var(--radius) var(--radius)" }, [
                             el("div", { class: "balitem" }, [el("div", { class: "bal-label" }, "Receivable"), el("div", { class: "bal-value" }, fmtPeso(bal.receivable))]),
+                            el("div", { class: "balitem" }, [el("div", { class: "bal-label" }, "Payable"), el("div", { class: "bal-value" }, fmtPeso(bal.payable || 0))]),
                         ]),
                     );
 
@@ -2410,6 +2425,13 @@
                             );
                         }
                     }
+                    if (t.type === "expense" && t.payment === "payable") {
+                        if (t.settledAt) {
+                            titleKids.push(el("span", { class: "badge-inv ok", title: "Payable settled" }, "settled"));
+                        } else {
+                            titleKids.push(el("span", { class: "badge-inv missing", title: "Accounts payable — still owed" }, "payable"));
+                        }
+                    }
 
                     row.appendChild(el("div", { class: "txrow-main" }, [el("div", { class: "txrow-title" }, titleKids), el("div", { class: "txrow-sub" }, subtitle)]));
                     const amtClass = isSale ? "sales" : isTransfer ? "transfer" : "expenses";
@@ -2424,6 +2446,7 @@
                     if (p === "gcash") return "GCash";
                     if (p === "bank") return "Bank";
                     if (p === "receivable") return "Receivable";
+                    if (p === "payable") return "Payable";
                     return "Other";
                 }
                 function accountLabel(a) {
@@ -2431,12 +2454,13 @@
                     if (a === "gcash") return "GCash";
                     if (a === "bank") return "Bank";
                     if (a === "receivable") return "Receivable";
+                    if (a === "payable") return "Payable";
                     if (a === "owner") return "Owner";
                     if (a === "businessFunds") return "Business Funds";
                     return a || "";
                 }
                 function buildAccountChips(selectedValue, onChange, opts) {
-                    const accounts = (opts && opts.accounts) || ["cash", "gcash", "bank", "receivable", "owner", "businessFunds"];
+                    const accounts = (opts && opts.accounts) || ["cash", "gcash", "bank", "receivable", "payable", "owner", "businessFunds"];
                     const row = el("div", { class: "chiprow" });
                     accounts.forEach((a) => {
                         const chip = el("button", { type: "button", class: "chip" + (a === selectedValue ? " active" : "") }, accountLabel(a));
@@ -2821,7 +2845,7 @@
                             if (step.type === "transfer") {
                                 const fromSel = el("select", { class: "finput" });
                                 const toSel = el("select", { class: "finput" });
-                                ["cash", "gcash", "bank", "receivable", "owner", "businessFunds"].forEach((a) => {
+                                ["cash", "gcash", "bank", "receivable", "payable", "owner", "businessFunds"].forEach((a) => {
                                     const o1 = el("option", { value: a }, accountLabel(a));
                                     const o2 = el("option", { value: a }, accountLabel(a));
                                     if (a === step.fromAccount) o1.selected = true;
@@ -2839,7 +2863,7 @@
                                 );
                             } else {
                                 const paySel = el("select", { class: "finput" });
-                                const pays = step.type === "sale" ? ["cash", "gcash", "bank", "receivable", "other"] : ["cash", "gcash", "bank", "other"];
+                                const pays = step.type === "sale" ? ["cash", "gcash", "bank", "receivable", "other"] : ["cash", "gcash", "bank", "payable", "other"];
                                 pays.forEach((p) => {
                                     const o = el("option", { value: p }, paymentLabel(p));
                                     if ((step.payment || "cash") === p) o.selected = true;
@@ -3422,7 +3446,7 @@
                     let payRow = null;
                     form.appendChild(el("label", { class: "flabel" }, "Payment Method"));
                     payRow = el("div", { class: "chiprow", id: "f-payment-row" });
-                    const paymentOptions = isSale ? ["cash", "gcash", "bank", "receivable", "other"] : ["cash", "gcash", "bank", "other"];
+                    const paymentOptions = isSale ? ["cash", "gcash", "bank", "receivable", "other"] : ["cash", "gcash", "bank", "payable", "other"];
                     paymentOptions.forEach((p, i) => {
                         const chip = el("button", { type: "button", class: "chip pay" + (i === 0 ? " active" : "") }, paymentLabel(p));
                         chip.dataset.value = p;
@@ -3432,7 +3456,7 @@
                             updateChangeDue();
                             // Amount tendered only applies to cash-like payments
                             const tenderWrap = qs("#f-tendered-wrap");
-                            if (tenderWrap) tenderWrap.style.display = p === "receivable" ? "none" : "";
+                            if (tenderWrap) tenderWrap.style.display = p === "receivable" || p === "payable" ? "none" : "";
                         });
                         payRow.appendChild(chip);
                     });
@@ -3647,13 +3671,17 @@
                         ["not_in_inventory", "Not in inventory"],
                         ["receivable", "Receivable"],
                         ["collected", "Collected"],
+                        ["payable", "Payable"],
+                        ["settled", "Settled AP"],
                         ["excl_forecast", "Excl. forecast"],
                     ].forEach(([val, label]) => {
                         const chip = el("button", { type: "button", class: "chip" + (App.historyFilters.inventory === val ? " active" : "") }, label);
                         chip.addEventListener("click", () => {
                             App.historyFilters.inventory = val;
-                            // These cleanup filters only apply to sales
-                            if (val !== "all" && App.historyFilters.type !== "sale") {
+                            // Sale-only filters force type=sale; payable filters force type=expense
+                            if (val === "payable" || val === "settled") {
+                                if (App.historyFilters.type !== "expense") App.historyFilters.type = "expense";
+                            } else if (val !== "all" && App.historyFilters.type !== "sale") {
                                 App.historyFilters.type = "sale";
                             }
                             softRender();
@@ -3697,6 +3725,10 @@
                         } else if (f.inventory === "collected") {
                             // Receivable sales that were later marked as paid
                             txs = txs.filter((t) => t.type === "sale" && t.payment === "receivable" && !!t.collectedAt);
+                        } else if (f.inventory === "payable") {
+                            txs = txs.filter((t) => t.type === "expense" && t.payment === "payable" && !t.settledAt);
+                        } else if (f.inventory === "settled") {
+                            txs = txs.filter((t) => t.type === "expense" && t.payment === "payable" && !!t.settledAt);
                         } else if (f.inventory === "excl_forecast") {
                             txs = txs.filter((t) => t.type === "sale" && isExcludedFromForecast(t));
                         }
@@ -3716,9 +3748,13 @@
                                         ? "No outstanding receivable sales in this range."
                                         : f.inventory === "collected"
                                           ? "No collected receivable sales in this range."
-                                          : f.inventory === "excl_forecast"
-                                            ? "No sales marked “exclude from Forecast” in this range."
-                                            : "Try a different filter or date range.";
+                                          : f.inventory === "payable"
+                                            ? "No open accounts-payable expenses in this range."
+                                            : f.inventory === "settled"
+                                              ? "No settled payable expenses in this range."
+                                              : f.inventory === "excl_forecast"
+                                                ? "No sales marked “exclude from Forecast” in this range."
+                                                : "Try a different filter or date range.";
                             listHost.appendChild(el("div", { class: "empty" }, [el("div", { class: "empty-title" }, "No transactions found"), el("div", { class: "empty-sub" }, emptySub)]));
                             return;
                         }
@@ -3831,7 +3867,7 @@
                     } else {
                         modal.appendChild(el("label", { class: "flabel" }, "Payment Method"));
                         payRow = el("div", { class: "chiprow" });
-                        const editPayOptions = t.type === "sale" ? ["cash", "gcash", "bank", "receivable", "other"] : ["cash", "gcash", "bank", "other"];
+                        const editPayOptions = t.type === "sale" ? ["cash", "gcash", "bank", "receivable", "other"] : ["cash", "gcash", "bank", "payable", "other"];
                         editPayOptions.forEach((p) => {
                             const chip = el("button", { type: "button", class: "chip pay" + (t.payment === p ? " active" : "") }, paymentLabel(p));
                             chip.dataset.value = p;
@@ -3852,6 +3888,22 @@
                                     "div",
                                     { class: "help-text", style: "margin-top:8px" },
                                     "Collected " + new Date(t.collectedAt).toLocaleString("en-PH") + (t.collectedTo ? " → " + accountLabel(t.collectedTo) : "") + ".",
+                                ),
+                            );
+                        } else if (t.type === "expense" && t.payment === "payable" && !t.settledAt) {
+                            modal.appendChild(
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:8px" },
+                                    "This expense is on accounts payable. Use “Mark as paid” below when you settle it from Cash, GCash, or Bank.",
+                                ),
+                            );
+                        } else if (t.type === "expense" && t.settledAt) {
+                            modal.appendChild(
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:8px" },
+                                    "Settled " + new Date(t.settledAt).toLocaleString("en-PH") + (t.settledFrom ? " from " + accountLabel(t.settledFrom) : "") + ".",
                                 ),
                             );
                         }
@@ -3900,7 +3952,7 @@
                         el("button", { type: "button", class: "bigbtn danger" }, "Delete"),
                         el("button", { type: "button", class: "bigbtn sale" }, "Save"),
                     ];
-                    const canMarkPaid = t.type === "sale" && t.payment === "receivable" && !t.collectedAt;
+                    const canMarkPaid = (t.type === "sale" && t.payment === "receivable" && !t.collectedAt) || (t.type === "expense" && t.payment === "payable" && !t.settledAt);
                     if (canMarkPaid) {
                         btnKids.push(el("button", { type: "button", class: "bigbtn transfer", style: "flex-basis:100%" }, "Mark as paid"));
                     }
@@ -3971,47 +4023,78 @@
                     }
                     if (markPaidBtn) {
                         markPaidBtn.addEventListener("click", () => {
-                            // Inline collector: pick Cash / GCash / Bank, then write transfer + mark sale collected
                             if (qs("#collect-picker", modal)) return;
+                            const isPayableSettle = t.type === "expense" && t.payment === "payable";
                             const picker = el("div", { id: "collect-picker", style: "margin-top:12px;padding-top:12px;border-top:1px dotted var(--border)" });
-                            picker.appendChild(el("div", { class: "flabel" }, "Collect into"));
+                            picker.appendChild(el("div", { class: "flabel" }, isPayableSettle ? "Pay from" : "Collect into"));
                             const row = el("div", { class: "chiprow" });
-                            ["cash", "gcash", "bank"].forEach((to) => {
-                                const chip = el("button", { type: "button", class: "chip pay" }, accountLabel(to));
+                            ["cash", "gcash", "bank"].forEach((acct) => {
+                                const chip = el("button", { type: "button", class: "chip pay" }, accountLabel(acct));
                                 chip.addEventListener("click", async () => {
                                     const amount = Number(t.amount) || 0;
                                     if (amount <= 0) {
-                                        toast("Invalid sale amount");
+                                        toast("Invalid amount");
                                         return;
                                     }
                                     const cid = await getActiveCompanyId();
-                                    const transfer = {
-                                        type: "transfer",
-                                        companyId: cid,
-                                        category: "Transfer",
-                                        item: "Collect Sale #" + id + " → " + accountLabel(to),
-                                        qty: null,
-                                        unitPrice: null,
-                                        amount,
-                                        payment: null,
-                                        fromAccount: "receivable",
-                                        toAccount: to,
-                                        date: new Date().toISOString(),
-                                        note: "Mark as paid · Sale #" + id,
-                                        createdAt: new Date().toISOString(),
-                                        relatedSaleId: id,
-                                        source: "receivable-collect",
-                                    };
-                                    const transferId = await dbAdd("transactions", transfer);
-                                    const updatedSale = Object.assign({}, t, {
-                                        collectedAt: new Date().toISOString(),
-                                        collectedTo: to,
-                                        collectionTransferId: transferId,
-                                    });
-                                    await dbPut("transactions", updatedSale);
-                                    overlay.remove();
-                                    toast("Marked paid · Receivable → " + accountLabel(to));
-                                    softRender();
+                                    if (isPayableSettle) {
+                                        // Cash/GCash/Bank → Payable (special balance rule reduces AP)
+                                        const transfer = {
+                                            type: "transfer",
+                                            companyId: cid,
+                                            category: "Transfer",
+                                            item: "Settle expense #" + id + " from " + accountLabel(acct),
+                                            qty: null,
+                                            unitPrice: null,
+                                            amount,
+                                            payment: null,
+                                            fromAccount: acct,
+                                            toAccount: "payable",
+                                            date: new Date().toISOString(),
+                                            note: "Mark as paid · Expense #" + id,
+                                            createdAt: new Date().toISOString(),
+                                            relatedExpenseId: id,
+                                            source: "payable-settle",
+                                        };
+                                        const transferId = await dbAdd("transactions", transfer);
+                                        const updated = Object.assign({}, t, {
+                                            settledAt: new Date().toISOString(),
+                                            settledFrom: acct,
+                                            settlementTransferId: transferId,
+                                        });
+                                        await dbPut("transactions", updated);
+                                        overlay.remove();
+                                        toast("Marked paid · " + accountLabel(acct) + " → Payable");
+                                        softRender();
+                                    } else {
+                                        const transfer = {
+                                            type: "transfer",
+                                            companyId: cid,
+                                            category: "Transfer",
+                                            item: "Collect Sale #" + id + " → " + accountLabel(acct),
+                                            qty: null,
+                                            unitPrice: null,
+                                            amount,
+                                            payment: null,
+                                            fromAccount: "receivable",
+                                            toAccount: acct,
+                                            date: new Date().toISOString(),
+                                            note: "Mark as paid · Sale #" + id,
+                                            createdAt: new Date().toISOString(),
+                                            relatedSaleId: id,
+                                            source: "receivable-collect",
+                                        };
+                                        const transferId = await dbAdd("transactions", transfer);
+                                        const updatedSale = Object.assign({}, t, {
+                                            collectedAt: new Date().toISOString(),
+                                            collectedTo: acct,
+                                            collectionTransferId: transferId,
+                                        });
+                                        await dbPut("transactions", updatedSale);
+                                        overlay.remove();
+                                        toast("Marked paid · Receivable → " + accountLabel(acct));
+                                        softRender();
+                                    }
                                 });
                                 row.appendChild(chip);
                             });
@@ -4020,7 +4103,9 @@
                                 el(
                                     "div",
                                     { class: "help-text", style: "margin-top:6px" },
-                                    "Moves the sale amount off Receivable into the account you pick. Inventory was already recorded when the sale was saved.",
+                                    isPayableSettle
+                                        ? "Pays the expense from the account you pick and reduces Accounts Payable."
+                                        : "Moves the sale amount off Receivable into the account you pick. Inventory was already recorded when the sale was saved.",
                                 ),
                             );
                             modal.appendChild(picker);
@@ -4142,6 +4227,7 @@
                     let gcash = company ? Number(company.startingGcash) || 0 : 0;
                     let bank = company ? Number(company.startingBank) || 0 : 0;
                     let receivable = company ? Number(company.startingReceivable) || 0 : 0;
+                    let payable = company ? Number(company.startingPayable) || 0 : 0;
 
                     const buckets = trendBucketDefs(range, txs.length ? txs[0].date : null);
                     let i = 0;
@@ -4164,20 +4250,23 @@
                                 if (t.payment === "cash") cash -= amt;
                                 else if (t.payment === "gcash") gcash -= amt;
                                 else if (t.payment === "bank") bank -= amt;
+                                else if (t.payment === "payable") payable += amt;
                             } else if (t.type === "transfer") {
                                 transfers += amt;
                                 if (t.fromAccount === "cash") cash -= amt;
                                 else if (t.fromAccount === "gcash") gcash -= amt;
                                 else if (t.fromAccount === "bank") bank -= amt;
                                 else if (t.fromAccount === "receivable") receivable -= amt;
+                                else if (t.fromAccount === "payable") payable -= amt;
                                 if (t.toAccount === "cash") cash += amt;
                                 else if (t.toAccount === "gcash") gcash += amt;
                                 else if (t.toAccount === "bank") bank += amt;
                                 else if (t.toAccount === "receivable") receivable += amt;
+                                else if (t.toAccount === "payable") payable -= amt; // settle AP
                             }
                             i++;
                         }
-                        out.push({ label: b.label, cash, gcash, bank, receivable, sales, expenses, transfers, net: sales - expenses });
+                        out.push({ label: b.label, cash, gcash, bank, receivable, payable, sales, expenses, transfers, net: sales - expenses });
                     }
                     return out;
                 }
@@ -4542,7 +4631,7 @@
                     wrap.appendChild(catSection);
 
                     // payment method breakdown
-                    const payTotals = { cash: 0, gcash: 0, bank: 0, receivable: 0, other: 0 };
+                    const payTotals = { cash: 0, gcash: 0, bank: 0, receivable: 0, payable: 0, other: 0 };
                     txs.filter((t) => t.type === "sale").forEach((t) => {
                         const key = payTotals.hasOwnProperty(t.payment) ? t.payment : "other";
                         payTotals[key] = (payTotals[key] || 0) + t.amount;
@@ -4697,7 +4786,9 @@
 
                     const planned = await companyPlanned();
                     const unpaidPlanned = planned.filter((p) => !p.paid);
-                    const liabilities = unpaidPlanned.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+                    const plannedLiab = unpaidPlanned.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+                    const apBalance = Number(bal.payable) || 0;
+                    const liabilities = plannedLiab + apBalance;
                     const equity = totalAssets - liabilities;
 
                     const bs = el("div", { class: "card stmt-card" });
@@ -4718,12 +4809,13 @@
                     }
                     bs.appendChild(stmtRow("Total assets", totalAssets, { grand: true }));
                     bs.appendChild(stmtRow("Liabilities", 0, { section: true }));
+                    bs.appendChild(stmtRow("Accounts payable", apBalance, { indent: true }));
                     if (unpaidPlanned.length) {
                         unpaidPlanned.forEach((p) => {
                             bs.appendChild(stmtRow((p.name || "Obligation") + (p.type ? " [" + p.type + "]" : ""), Number(p.amount) || 0, { indent: true }));
                         });
-                    } else {
-                        bs.appendChild(stmtRow("No unpaid planned obligations recorded", 0, { indent: true, blank: true }));
+                    } else if (!apBalance) {
+                        bs.appendChild(stmtRow("No other unpaid planned obligations recorded", 0, { indent: true, blank: true }));
                     }
                     bs.appendChild(stmtRow("Total liabilities", liabilities, { total: true }));
                     bs.appendChild(stmtRow("Equity (assets − liabilities)", equity, { grand: true, signed: true }));
@@ -4731,7 +4823,7 @@
                         el(
                             "div",
                             { class: "stmt-note" },
-                            "Liabilities here are unpaid items from Forecast → Planned expenses (e.g. SpayLater). Formal loans not logged there won’t appear. Equity is a plug for management use.",
+                            "Liabilities include Accounts Payable (credit expenses) plus unpaid items from Forecast → Planned expenses (e.g. SpayLater). Equity is a plug for management use.",
                         ),
                     );
                     section.appendChild(bs);
@@ -4741,10 +4833,16 @@
                     // Gross credit sales booked in the period (whether or not later collected)
                     const creditSalesPeriod = sumBy(periodTxs, (t) => t.type === "sale" && t.payment === "receivable");
                     const expCashLike = sumBy(periodTxs, (t) => t.type === "expense" && (t.payment === "cash" || t.payment === "gcash" || t.payment === "bank"));
+                    const creditExpensesPeriod = sumBy(periodTxs, (t) => t.type === "expense" && t.payment === "payable");
                     // Collections: transfers receivable → cash/gcash/bank
                     const collections = sumBy(
                         periodTxs,
                         (t) => t.type === "transfer" && t.fromAccount === "receivable" && (t.toAccount === "cash" || t.toAccount === "gcash" || t.toAccount === "bank"),
+                    );
+                    // AP settlements: cash/gcash/bank → payable
+                    const apSettlements = sumBy(
+                        periodTxs,
+                        (t) => t.type === "transfer" && t.toAccount === "payable" && (t.fromAccount === "cash" || t.fromAccount === "gcash" || t.fromAccount === "bank"),
                     );
                     // Other AR movements in period (rare: transfer into receivable, or expense paid via receivable)
                     const arOtherIn = sumBy(periodTxs, (t) => t.type === "transfer" && t.toAccount === "receivable");
@@ -4764,7 +4862,7 @@
                     const investExp = sumBy(periodTxs, (t) => t.type === "expense" && /invest|equipment|printer|capital/i.test((t.category || "") + " " + (t.item || "")));
 
                     const opsIn = salesCashLike + collections;
-                    const opsOut = expCashLike;
+                    const opsOut = expCashLike + apSettlements;
                     const opsNet = opsIn - opsOut;
                     const finNet = ownerIn - ownerOut + businessFundsIn - businessFundsOut;
                     const invNet = -investExp;
@@ -5415,6 +5513,7 @@
                     lines.push("GCash: " + fmtPeso(ctx.bal.gcash));
                     lines.push("Bank: " + fmtPeso(ctx.bal.bank));
                     lines.push("Receivable (outstanding): " + fmtPeso(ctx.bal.receivable));
+                    lines.push("Payable (outstanding): " + fmtPeso(ctx.bal.payable || 0));
                     lines.push("Liquid (cash+GCash+bank): " + fmtPeso(ctx.liquid));
                     lines.push("");
                     lines.push("--- Assets & valuation ---");
@@ -5688,6 +5787,7 @@
                         el("div", { class: "summary-grid" }, [
                             summaryCard("Liquid cash", liquid, "sales"),
                             summaryCard("Receivable", bal.receivable || 0, (bal.receivable || 0) > 0 ? "expenses" : "sales"),
+                            summaryCard("Payable", bal.payable || 0, (bal.payable || 0) > 0 ? "expenses" : "sales"),
                             summaryCard("Fixed assets", assetValue, "sales"),
                             summaryCard("Est. valuation", valuation, "sales"),
                         ]),
@@ -6419,6 +6519,7 @@
                     const startingGcash = company ? company.startingGcash : 0;
                     const startingBank = company ? company.startingBank : 0;
                     const startingReceivable = company ? company.startingReceivable || 0 : 0;
+                    const startingPayable = company ? company.startingPayable || 0 : 0;
                     const cats = company ? company.categories : { sale: DEFAULT_SALE_CATEGORIES.slice(), expense: DEFAULT_EXPENSE_CATEGORIES.slice() };
 
                     // Companies card — switch between businesses/branches, each with its own isolated cash flow
@@ -6545,11 +6646,26 @@
                             return inp;
                         })(),
                     ]);
+                    const payCol = el("div", { class: "fcol" }, [
+                        el("label", { class: "flabel" }, "Payable"),
+                        (function () {
+                            const inp = el("input", { type: "number", class: "finput", value: startingPayable, min: "0", step: "0.01" });
+                            inp.addEventListener("change", async () => {
+                                await updateActiveCompany({ startingPayable: parseFloat(inp.value) || 0 });
+                                toast("Starting payable saved");
+                                render();
+                            });
+                            return inp;
+                        })(),
+                    ]);
                     row.appendChild(cashCol);
                     row.appendChild(gcashCol);
                     row.appendChild(bankCol);
                     row.appendChild(recvCol);
+                    const row2 = el("div", { class: "frow", style: "margin-top:8px" });
+                    row2.appendChild(payCol);
                     bizCard.appendChild(row);
+                    bizCard.appendChild(row2);
                     wrap.appendChild(bizCard);
 
                     // Categories
@@ -7111,6 +7227,7 @@
                                 startingGcash: legacySettings.startingGcash || 0,
                                 startingBank: legacySettings.startingBank || 0,
                                 startingReceivable: legacySettings.startingReceivable || 0,
+                                startingPayable: legacySettings.startingPayable || 0,
                                 createdAt: new Date().toISOString(),
                             };
                             const cid = await dbAdd("companies", company);
