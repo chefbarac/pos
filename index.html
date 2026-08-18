@@ -3892,11 +3892,7 @@
                             );
                         } else if (t.type === "expense" && t.payment === "payable" && !t.settledAt) {
                             modal.appendChild(
-                                el(
-                                    "div",
-                                    { class: "help-text", style: "margin-top:8px" },
-                                    "This expense is on accounts payable. Use “Mark as paid” below when you settle it from Cash, GCash, or Bank.",
-                                ),
+                                el("div", { class: "help-text", style: "margin-top:8px" }, "This expense is on accounts payable. Use “Mark as paid” below when you settle it from Cash, GCash, or Bank."),
                             );
                         } else if (t.type === "expense" && t.settledAt) {
                             modal.appendChild(
@@ -3952,7 +3948,9 @@
                         el("button", { type: "button", class: "bigbtn danger" }, "Delete"),
                         el("button", { type: "button", class: "bigbtn sale" }, "Save"),
                     ];
-                    const canMarkPaid = (t.type === "sale" && t.payment === "receivable" && !t.collectedAt) || (t.type === "expense" && t.payment === "payable" && !t.settledAt);
+                    const canMarkPaid =
+                        (t.type === "sale" && t.payment === "receivable" && !t.collectedAt) ||
+                        (t.type === "expense" && t.payment === "payable" && !t.settledAt);
                     if (canMarkPaid) {
                         btnKids.push(el("button", { type: "button", class: "bigbtn transfer", style: "flex-basis:100%" }, "Mark as paid"));
                     }
@@ -4701,44 +4699,58 @@
                     return el("div", { class: cls }, [el("span", {}, label), el("span", { class: amtCls }, show)]);
                 }
 
-                /**
-                 * Income Statement (P&L), Balance Sheet, Cash Flow — management view from POS data.
-                 * COGS uses Costing weighted avg margin when available; otherwise expenses only.
-                 */
+                function reportPeriodBounds(range) {
+                    const now = new Date();
+                    let from, to;
+                    if (range === "today") {
+                        from = startOfDay(now);
+                        to = endOfDay(now);
+                    } else if (range === "week") {
+                        from = startOfWeek(now);
+                        to = endOfDay(now);
+                    } else if (range === "month") {
+                        from = startOfMonth(now);
+                        to = endOfDay(now);
+                    } else if (range === "all") {
+                        from = null;
+                        to = endOfDay(now);
+                    } else if (range === "custom" && App.reportCustom && App.reportCustom.from) {
+                        from = startOfDay(new Date(App.reportCustom.from));
+                        to = App.reportCustom.to ? endOfDay(new Date(App.reportCustom.to)) : endOfDay(now);
+                    } else {
+                        from = startOfDay(now);
+                        to = endOfDay(now);
+                    }
+                    return { from, to };
+                }
+
                 async function renderFinancialStatements(periodTxs, allTxs, bal, range) {
                     const section = el("div", { class: "section" });
                     section.appendChild(el("div", { class: "section-title" }, "FINANCIAL STATEMENTS"));
                     section.appendChild(
-                        el("div", { class: "help-text" }, "Management statements from your POS books. Not a formal audit — good for decisions and AI discussion. Period follows the chips above."),
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Management statements from your POS books. Inventory purchases are assets (not opex); COGS reflects materials consumed. Period follows the chips above.",
+                        ),
                     );
 
                     const periodLabel = reportPeriodLabel(range);
+                    const periodBounds = reportPeriodBounds(range);
+                    const periodFrom = periodBounds.from;
+                    const periodTo = periodBounds.to;
+
                     const revenue = sumBy(periodTxs, (t) => t.type === "sale");
-                    const opex = sumBy(periodTxs, (t) => t.type === "expense");
 
-                    // Expense breakdown by category for P&L detail
-                    const expByCat = {};
-                    periodTxs
-                        .filter((t) => t.type === "expense")
-                        .forEach((t) => {
-                            txLines(t).forEach((ln) => {
-                                const cat = ln.category || t.category || "Other";
-                                expByCat[cat] = (expByCat[cat] || 0) + (Number(ln.amount) || 0);
-                            });
-                        });
-                    const expCats = Object.entries(expByCat).sort((a, b) => b[1] - a[1]);
-
-                    // Costing: margin → estimated COGS; material stock × unit cost → inventory asset
-                    let avgMargin = null;
-                    let estimatedCogs = null;
-                    let grossProfit = null;
-                    let costingSnap = { ok: false, materials: [], products: [], metrics: {} };
-                    let inventoryValue = 0; // materials on hand at cost
-                    let inventoryDetail = []; // top material lines by value
+                    // ---- Costing snapshot (inventory at cost, stock moves for COGS) ----
+                    let costingSnap = { ok: false, materials: [], products: [], moves: [], metrics: {} };
+                    let inventoryValue = 0;
+                    let inventoryDetail = [];
                     let inventoryBelowReorder = 0;
                     let potentialFGRevenue = null;
                     let potentialFGCost = null;
                     let potentialFGProfit = null;
+                    let avgMargin = null;
                     try {
                         costingSnap = await loadCostingInventorySnapshot();
                         if (costingSnap.ok) {
@@ -4749,8 +4761,6 @@
                             if (costingSnap.metrics) {
                                 if (costingSnap.metrics.avgMargin != null && isFinite(costingSnap.metrics.avgMargin)) {
                                     avgMargin = costingSnap.metrics.avgMargin;
-                                    estimatedCogs = revenue * (1 - avgMargin / 100);
-                                    grossProfit = revenue - estimatedCogs;
                                 }
                                 potentialFGRevenue = costingSnap.metrics.totalRevenue;
                                 potentialFGCost = costingSnap.metrics.totalCost;
@@ -4759,44 +4769,125 @@
                         }
                     } catch (e) {}
 
-                    // Other income memo (forecast sources — not always booked as POS txs)
-                    let otherIncomeMemo = 0;
-                    try {
-                        const oi = await companyOtherIncome();
-                        otherIncomeMemo = (oi || []).filter((o) => !o.received).reduce((s, o) => s + (Number(o.amount) || 0), 0);
-                    } catch (e) {}
+                    const matNames = materialNameSetFromSnap(costingSnap);
 
-                    const netIncome = avgMargin != null ? grossProfit - opex : revenue - opex;
+                    // Split period expenses: inventory purchases vs true operating expenses
+                    const split = splitExpensesInventoryVsOpex(periodTxs, matNames);
+                    const inventoryPurchases = split.invTotal;
+                    const opex = split.opexTotal;
+                    const expCats = split.opexCats; // only genuine opex on P&L
+                    const invPurchaseCats = split.invCats;
+
+                    // All-time split (for equity retained earnings estimate)
+                    const splitAll = splitExpensesInventoryVsOpex(allTxs, matNames);
+
+                    // ---- COGS ----
+                    // Preferred: actual material consumption from Costing stock-outs in period
+                    let cogs = null;
+                    let cogsSource = "none";
+                    let cogsEstimated = false;
+                    let openingInventory = null;
+                    let endingInventory = inventoryValue;
+                    let rollforwardCogs = null;
+
+                    if (costingSnap.ok && costingSnap.moves && costingSnap.moves.length) {
+                        const actual = computePeriodCogsFromMoves(costingSnap.moves, costingSnap.materials, periodFrom, periodTo);
+                        if (actual.hasData) {
+                            cogs = actual.cogs;
+                            cogsSource = "stock-outs";
+                            cogsEstimated = false;
+                        }
+                        // Opening inventory at start of period (for rollforward check)
+                        if (periodFrom) {
+                            // Need raw materials with startingQty — reconstruct from snapshot materials + moves
+                            openingInventory = inventoryValueAt(
+                                (costingSnap.materials || []).map((m) => ({
+                                    id: m.id,
+                                    startingQty: m.startingQty,
+                                    costPerUnit: m.costPerUnit,
+                                })),
+                                costingSnap.moves,
+                                new Date(periodFrom.getTime() - 1),
+                            );
+                        }
+                        if (openingInventory != null && endingInventory != null) {
+                            rollforwardCogs = openingInventory + inventoryPurchases - endingInventory;
+                        }
+                    }
+
+                    // Formula fallback when no stock-out moves but we have purchase + inventory data
+                    if (cogs == null && openingInventory != null && endingInventory != null && (inventoryPurchases > 0 || endingInventory > 0)) {
+                        cogs = Math.max(0, openingInventory + inventoryPurchases - endingInventory);
+                        cogsSource = "rollforward";
+                        cogsEstimated = false;
+                    }
+
+                    // Margin estimate only when no inventory costing path available
+                    if (cogs == null && avgMargin != null && revenue > 0) {
+                        cogs = revenue * (1 - avgMargin / 100);
+                        cogsSource = "margin-estimate";
+                        cogsEstimated = true;
+                    }
+                    if (cogs == null) cogs = 0;
+
+                    const grossProfit = revenue - cogs;
+                    const netIncome = grossProfit - opex;
 
                     // ---- Income Statement ----
                     const pl = el("div", { class: "card stmt-card" });
                     pl.appendChild(el("div", { class: "stmt-title" }, "Income Statement (P&L)"));
-                    pl.appendChild(el("div", { class: "stmt-period" }, periodLabel + " · Revenue − costs"));
+                    pl.appendChild(el("div", { class: "stmt-period" }, periodLabel + " · Revenue − COGS − operating expenses"));
                     pl.appendChild(stmtRow("Revenue", 0, { section: true }));
                     pl.appendChild(stmtRow("Sales / services", revenue, { indent: true }));
                     pl.appendChild(stmtRow("Total revenue", revenue, { total: true }));
-                    if (avgMargin != null) {
-                        pl.appendChild(stmtRow("Cost of goods / services", 0, { section: true }));
-                        pl.appendChild(stmtRow("Estimated COGS (" + fmtPct(avgMargin) + " margin)", estimatedCogs, { indent: true }));
-                        pl.appendChild(stmtRow("Gross profit", grossProfit, { total: true, signed: true }));
+
+                    pl.appendChild(stmtRow("Cost of goods / services", 0, { section: true }));
+                    if (cogsSource === "stock-outs") {
+                        pl.appendChild(stmtRow("COGS (materials consumed — Costing stock-outs)", cogs, { indent: true }));
+                    } else if (cogsSource === "rollforward") {
+                        pl.appendChild(stmtRow("COGS (opening + purchases − ending inventory)", cogs, { indent: true }));
+                    } else if (cogsSource === "margin-estimate") {
+                        pl.appendChild(stmtRow("Estimated COGS @" + fmtPct(avgMargin) + " margin (fallback)", cogs, { indent: true }));
+                    } else {
+                        pl.appendChild(stmtRow("COGS (no consumption data yet)", cogs, { indent: true }));
                     }
+                    pl.appendChild(stmtRow("Gross profit", grossProfit, { total: true, signed: true }));
+
                     pl.appendChild(stmtRow("Operating expenses", 0, { section: true }));
                     if (expCats.length) {
                         expCats.forEach(([cat, amt]) => pl.appendChild(stmtRow(cat, amt, { indent: true })));
                     } else {
-                        pl.appendChild(stmtRow("No expenses in period", 0, { indent: true, blank: true }));
+                        pl.appendChild(stmtRow("No operating expenses in period", 0, { indent: true, blank: true }));
                     }
                     pl.appendChild(stmtRow("Total operating expenses", opex, { total: true }));
-                    pl.appendChild(stmtRow(avgMargin != null ? "Net income (est.)" : "Net (sales − expenses)", netIncome, { grand: true, signed: true }));
-                    pl.appendChild(
-                        el(
-                            "div",
-                            { class: "stmt-note" },
-                            avgMargin != null
-                                ? "COGS is estimated from Costing weighted avg margin applied to period sales (not item-level actual cost). Owner drawings and internal transfers are not operating expenses."
-                                : "Open Costing with priced products to estimate COGS and gross profit. Until then, Net is sales minus recorded expenses only.",
-                        ),
-                    );
+                    pl.appendChild(stmtRow(cogsEstimated ? "Net income (est.)" : "Net income", netIncome, { grand: true, signed: true }));
+
+                    if (inventoryPurchases > 0) {
+                        pl.appendChild(
+                            el(
+                                "div",
+                                { class: "stmt-note" },
+                                "Inventory purchases this period (" +
+                                    fmtPeso(inventoryPurchases) +
+                                    ") are capitalized on the Balance Sheet, not listed as operating expenses. " +
+                                    invPurchaseCats
+                                        .slice(0, 6)
+                                        .map(([c, a]) => c + " " + fmtPeso(a))
+                                        .join(" · ") +
+                                    (invPurchaseCats.length > 6 ? " …" : "") +
+                                    ".",
+                            ),
+                        );
+                    }
+                    if (cogsEstimated) {
+                        pl.appendChild(
+                            el(
+                                "div",
+                                { class: "stmt-note" },
+                                "COGS is estimated from Costing average margin because material stock-outs for this period were not found. Open Costing / apply POS sales to inventory for actual COGS.",
+                            ),
+                        );
+                    }
                     section.appendChild(pl);
 
                     // ---- Balance Sheet ----
@@ -4806,12 +4897,19 @@
                     const currentAssets = liquid + (bal.receivable || 0) + inventoryValue;
                     const totalAssets = currentAssets + fixedAssets;
 
+                    // Liabilities: actual AP only (not unpaid Forecast planned items)
                     const planned = await companyPlanned();
                     const unpaidPlanned = planned.filter((p) => !p.paid);
-                    const plannedLiab = unpaidPlanned.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+                    const plannedMemo = unpaidPlanned.reduce((s, p) => s + (Number(p.amount) || 0), 0);
                     const apBalance = Number(bal.payable) || 0;
-                    const liabilities = plannedLiab + apBalance;
+                    const liabilities = apBalance;
+                    // Equity components
+                    const ownerContrib = sumBy(allTxs, (t) => t.type === "transfer" && t.fromAccount === "owner");
+                    const ownerDraw = sumBy(allTxs, (t) => t.type === "transfer" && t.toAccount === "owner");
+                    const netOwnerCapital = ownerContrib - ownerDraw;
+                    // Identity: Assets = Liabilities + Equity  →  Equity = Assets − Liabilities
                     const equity = totalAssets - liabilities;
+                    const retainedEarnings = equity - netOwnerCapital;
 
                     const bs = el("div", { class: "card stmt-card" });
                     bs.appendChild(el("div", { class: "stmt-title" }, "Balance Sheet"));
@@ -4821,7 +4919,11 @@
                     bs.appendChild(stmtRow("GCash", bal.gcash || 0, { indent: true }));
                     bs.appendChild(stmtRow("Bank", bal.bank || 0, { indent: true }));
                     bs.appendChild(stmtRow("Accounts receivable", bal.receivable || 0, { indent: true }));
-                    bs.appendChild(stmtRow(costingSnap.ok ? "Inventory (materials at cost)" : "Inventory (Costing not linked)", inventoryValue, { indent: true }));
+                    bs.appendChild(
+                        stmtRow(costingSnap.ok ? "Inventory (materials at cost)" : "Inventory (Costing not linked)", inventoryValue, {
+                            indent: true,
+                        }),
+                    );
                     bs.appendChild(stmtRow("Current assets", currentAssets, { total: true }));
                     bs.appendChild(stmtRow("Fixed assets (equipment, etc.)", fixedAssets, { indent: true }));
                     if (assets.length) {
@@ -4831,43 +4933,91 @@
                         });
                     }
                     bs.appendChild(stmtRow("Total assets", totalAssets, { grand: true }));
+
                     bs.appendChild(stmtRow("Liabilities", 0, { section: true }));
                     bs.appendChild(stmtRow("Accounts payable", apBalance, { indent: true }));
-                    if (unpaidPlanned.length) {
-                        unpaidPlanned.forEach((p) => {
-                            bs.appendChild(stmtRow((p.name || "Obligation") + (p.type ? " [" + p.type + "]" : ""), Number(p.amount) || 0, { indent: true }));
-                        });
-                    } else if (!apBalance) {
-                        bs.appendChild(stmtRow("No other unpaid planned obligations recorded", 0, { indent: true, blank: true }));
-                    }
                     bs.appendChild(stmtRow("Total liabilities", liabilities, { total: true }));
-                    bs.appendChild(stmtRow("Equity (assets − liabilities)", equity, { grand: true, signed: true }));
+
+                    bs.appendChild(stmtRow("Equity", 0, { section: true }));
+                    bs.appendChild(stmtRow("Owner contributions", ownerContrib, { indent: true }));
+                    bs.appendChild(stmtRow("Owner drawings", -ownerDraw, { indent: true, signed: true }));
+                    bs.appendChild(stmtRow("Net owner capital", netOwnerCapital, { indent: true, signed: true }));
+                    bs.appendChild(stmtRow("Retained earnings (balancing)", retainedEarnings, { indent: true, signed: true }));
+                    bs.appendChild(stmtRow("Total equity", equity, { total: true, signed: true }));
+                    bs.appendChild(stmtRow("Total liabilities + equity", liabilities + equity, { grand: true }));
+
+                    const identityGap = Math.round((totalAssets - (liabilities + equity)) * 100) / 100;
+                    if (Math.abs(identityGap) > 0.05) {
+                        bs.appendChild(
+                            el(
+                                "div",
+                                { class: "stmt-note", style: "color:var(--rust)" },
+                                "⚠ Accounting equation check failed: Assets − (Liabilities + Equity) = " + fmtPeso(identityGap) + ". Review balances and classifications.",
+                            ),
+                        );
+                    } else {
+                        bs.appendChild(el("div", { class: "stmt-note" }, "Assets = Liabilities + Equity ✓"));
+                    }
+                    if (plannedMemo > 0) {
+                        bs.appendChild(
+                            el(
+                                "div",
+                                { class: "stmt-note" },
+                                "Memo — unpaid planned obligations in Forecast (not booked as AP): " +
+                                    fmtPeso(plannedMemo) +
+                                    ". Record a payable expense or settle when they become actual liabilities.",
+                            ),
+                        );
+                    }
                     bs.appendChild(
                         el(
                             "div",
                             { class: "stmt-note" },
-                            "Inventory is materials on hand × unit cost from the Costing app (same domain). Liabilities include Accounts Payable plus unpaid Forecast planned expenses. Equity is assets − liabilities (management plug).",
+                            "Inventory is materials on hand × unit cost from Costing (not retail). Equity = Assets − Liabilities; retained earnings is the residual after net owner capital.",
                         ),
                     );
                     section.appendChild(bs);
 
                     // ---- Cash Flow ----
                     const salesCashLike = sumBy(periodTxs, (t) => t.type === "sale" && (t.payment === "cash" || t.payment === "gcash" || t.payment === "bank"));
-                    // Gross credit sales booked in the period (whether or not later collected)
                     const creditSalesPeriod = sumBy(periodTxs, (t) => t.type === "sale" && t.payment === "receivable");
-                    const expCashLike = sumBy(periodTxs, (t) => t.type === "expense" && (t.payment === "cash" || t.payment === "gcash" || t.payment === "bank"));
-                    const creditExpensesPeriod = sumBy(periodTxs, (t) => t.type === "expense" && t.payment === "payable");
-                    // Collections: transfers receivable → cash/gcash/bank
                     const collections = sumBy(
                         periodTxs,
                         (t) => t.type === "transfer" && t.fromAccount === "receivable" && (t.toAccount === "cash" || t.toAccount === "gcash" || t.toAccount === "bank"),
                     );
-                    // AP settlements: cash/gcash/bank → payable
                     const apSettlements = sumBy(
                         periodTxs,
                         (t) => t.type === "transfer" && t.toAccount === "payable" && (t.fromAccount === "cash" || t.fromAccount === "gcash" || t.fromAccount === "bank"),
                     );
-                    // Other AR movements in period (rare: transfer into receivable, or expense paid via receivable)
+
+                    // Cash paid for inventory vs opex (payment method on expense)
+                    let invPurchasesCash = 0,
+                        invPurchasesCredit = 0,
+                        opexCash = 0,
+                        opexCredit = 0;
+                    periodTxs
+                        .filter((t) => t.type === "expense")
+                        .forEach((t) => {
+                            const lines = txLines(t);
+                            let invAmt = 0,
+                                opexAmt = 0;
+                            lines.forEach((ln) => {
+                                const cat = ln.category || t.category || "Other";
+                                const item = ln.item || t.item || "";
+                                const amt = Number(ln.amount) || 0;
+                                if (isInventoryPurchaseLine(cat, item, matNames)) invAmt += amt;
+                                else opexAmt += amt;
+                            });
+                            const pay = t.payment;
+                            if (pay === "payable") {
+                                invPurchasesCredit += invAmt;
+                                opexCredit += opexAmt;
+                            } else if (pay === "cash" || pay === "gcash" || pay === "bank") {
+                                invPurchasesCash += invAmt;
+                                opexCash += opexAmt;
+                            }
+                        });
+
                     const arOtherIn = sumBy(periodTxs, (t) => t.type === "transfer" && t.toAccount === "receivable");
                     const arOtherOut = sumBy(
                         periodTxs,
@@ -4876,30 +5026,38 @@
                             (t.type === "transfer" && t.fromAccount === "receivable" && t.toAccount !== "cash" && t.toAccount !== "gcash" && t.toAccount !== "bank"),
                     );
 
-                    // Owner / Business Funds / financing style transfers
                     const ownerIn = sumBy(periodTxs, (t) => t.type === "transfer" && t.fromAccount === "owner");
                     const ownerOut = sumBy(periodTxs, (t) => t.type === "transfer" && t.toAccount === "owner");
                     const businessFundsIn = sumBy(periodTxs, (t) => t.type === "transfer" && t.fromAccount === "businessFunds");
                     const businessFundsOut = sumBy(periodTxs, (t) => t.type === "transfer" && t.toAccount === "businessFunds");
-                    // Investing-ish: expenses tagged investment or planned investment payments
-                    const investExp = sumBy(periodTxs, (t) => t.type === "expense" && /invest|equipment|printer|capital/i.test((t.category || "") + " " + (t.item || "")));
+                    const investExp = sumBy(periodTxs, (t) => {
+                        if (t.type !== "expense") return false;
+                        // only true opex investment-like, not inventory stocks
+                        const cat = (t.category || "") + " " + (t.item || "");
+                        if (isInventoryPurchaseLine(t.category, t.item, matNames)) return false;
+                        return /invest|equipment|printer|capital/i.test(cat);
+                    });
 
                     const opsIn = salesCashLike + collections;
-                    const opsOut = expCashLike + apSettlements;
+                    // Cash inventory purchases + cash opex + AP settlements (when paying prior credit buys/expenses)
+                    const opsOut = opexCash + invPurchasesCash + apSettlements;
                     const opsNet = opsIn - opsOut;
                     const finNet = ownerIn - ownerOut + businessFundsIn - businessFundsOut;
                     const invNet = -investExp;
                     const netCashChange = opsNet + invNet + finNet;
 
-                    // AR rollforward so BS receivable and period activity reconcile
-                    // Ending AR (balance sheet) = opening + credit sales − collections ± other
-                    // Opening = ending − period net AR change (works for any report range)
                     const endingAR = Number(bal.receivable) || 0;
                     const periodArIncrease = creditSalesPeriod + arOtherIn - collections - arOtherOut;
                     const openingAR = endingAR - periodArIncrease;
-                    // Still-open credit sales (sale rows not marked collected) — informational; ledger AR is source of truth
                     const openCreditSales = sumBy(allTxs, (t) => t.type === "sale" && t.payment === "receivable" && !t.collectedAt);
                     const arGap = Math.round((endingAR - openCreditSales) * 100) / 100;
+
+                    const creditExpensesPeriod = opexCredit + invPurchasesCredit;
+                    const endingAP = apBalance;
+                    const periodApIncrease = creditExpensesPeriod - apSettlements;
+                    const openingAP = endingAP - periodApIncrease;
+                    const openPayableExpenses = sumBy(allTxs, (t) => t.type === "expense" && t.payment === "payable" && !t.settledAt);
+                    const apGap = Math.round((endingAP - openPayableExpenses) * 100) / 100;
 
                     const cf = el("div", { class: "card stmt-card" });
                     cf.appendChild(el("div", { class: "stmt-title" }, "Cash Flow Statement"));
@@ -4907,9 +5065,11 @@
                     cf.appendChild(stmtRow("Operating activities", 0, { section: true }));
                     cf.appendChild(stmtRow("Cash sales (cash / GCash / bank)", salesCashLike, { indent: true }));
                     cf.appendChild(stmtRow("Receivable collections", collections, { indent: true }));
-                    cf.appendChild(stmtRow("Cash operating expenses", -expCashLike, { indent: true, signed: true }));
+                    cf.appendChild(stmtRow("Cash paid for inventory", -invPurchasesCash, { indent: true, signed: true }));
+                    cf.appendChild(stmtRow("Cash operating expenses", -opexCash, { indent: true, signed: true }));
                     if (apSettlements > 0) cf.appendChild(stmtRow("Accounts payable settlements", -apSettlements, { indent: true, signed: true }));
-                    if (creditExpensesPeriod > 0) cf.appendChild(stmtRow("(memo) Credit expenses booked — no cash yet", creditExpensesPeriod, { indent: true }));
+                    if (invPurchasesCredit > 0) cf.appendChild(stmtRow("(memo) Inventory bought on credit — no cash yet", invPurchasesCredit, { indent: true }));
+                    if (opexCredit > 0) cf.appendChild(stmtRow("(memo) Operating expenses on credit — no cash yet", opexCredit, { indent: true }));
                     cf.appendChild(stmtRow("Net cash from operations", opsNet, { total: true, signed: true }));
                     cf.appendChild(stmtRow("Investing activities", 0, { section: true }));
                     cf.appendChild(stmtRow("Equipment / investment-like expenses", -investExp, { indent: true, signed: true }));
@@ -4921,198 +5081,241 @@
                     cf.appendChild(stmtRow("To Business Funds", -businessFundsOut, { indent: true, signed: true }));
                     cf.appendChild(stmtRow("Net cash from financing", finNet, { total: true, signed: true }));
                     cf.appendChild(stmtRow("Net change in liquid cash", netCashChange, { grand: true, signed: true }));
+                    cf.appendChild(
+                        el(
+                            "div",
+                            { class: "stmt-note" },
+                            "Transfers among Cash / GCash / Bank are not revenue or expense. Inventory on credit increases Inventory + AP with no cash movement until settled.",
+                        ),
+                    );
                     section.appendChild(cf);
 
-                    // ---- Accounts receivable reconciliation (ties BS ↔ period activity) ----
+                    // ---- AR reconciliation ----
                     const arCard = el("div", { class: "card stmt-card" });
                     arCard.appendChild(el("div", { class: "stmt-title" }, "Accounts receivable reconciliation"));
-                    arCard.appendChild(el("div", { class: "stmt-period" }, "Why BS receivable can differ from “credit sales this period” — those are different measures"));
+                    arCard.appendChild(el("div", { class: "stmt-period" }, "Opening + credit sales − collections = ending AR"));
                     arCard.appendChild(stmtRow("Opening AR (start of period)", openingAR, { indent: true }));
                     arCard.appendChild(stmtRow("+ Credit sales booked this period", creditSalesPeriod, { indent: true }));
                     if (arOtherIn > 0) arCard.appendChild(stmtRow("+ Other transfers into AR", arOtherIn, { indent: true }));
                     arCard.appendChild(stmtRow("− Collections this period", collections, { indent: true }));
                     if (arOtherOut > 0) arCard.appendChild(stmtRow("− Other AR reductions", arOtherOut, { indent: true }));
                     arCard.appendChild(stmtRow("Ending AR (Balance Sheet)", endingAR, { grand: true }));
-                    arCard.appendChild(
-                        el(
-                            "div",
-                            { class: "stmt-note" },
-                            "Credit sales this period (" +
-                                fmtPeso(creditSalesPeriod) +
-                                ") is activity, not the unpaid balance. " +
-                                "Ending AR on the Balance Sheet is what customers still owe after collections. " +
-                                (Math.abs(periodArIncrease) > 0.005 ? "Net AR change this period: " + fmtPeso(periodArIncrease) + "." : "No net AR change this period."),
-                        ),
-                    );
+                    const arCheck = Math.round((openingAR + creditSalesPeriod + arOtherIn - collections - arOtherOut - endingAR) * 100) / 100;
+                    if (Math.abs(arCheck) > 0.05) {
+                        arCard.appendChild(el("div", { class: "stmt-note", style: "color:var(--rust)" }, "⚠ AR rollforward residual: " + fmtPeso(arCheck)));
+                    } else {
+                        arCard.appendChild(el("div", { class: "stmt-note" }, "AR rollforward ties ✓"));
+                    }
                     if (Math.abs(arGap) > 0.05) {
                         arCard.appendChild(
                             el(
                                 "div",
                                 { class: "stmt-note" },
-                                "Note: sum of open receivable sales (not marked collected) is " +
+                                "Open receivable sales (not marked collected): " +
                                     fmtPeso(openCreditSales) +
                                     " vs ledger AR " +
                                     fmtPeso(endingAR) +
                                     " (Δ " +
                                     fmtPeso(arGap) +
-                                    "). Often starting receivable, a collection without Mark as paid, or Mark as paid without a transfer. Ledger AR on the Balance Sheet is the figure to use.",
+                                    "). Ledger AR on the Balance Sheet is the figure to use.",
                             ),
                         );
                     }
                     section.appendChild(arCard);
 
-                    // ---- Accounts payable reconciliation ----
-                    const endingAP = apBalance;
-                    const periodApIncrease = creditExpensesPeriod - apSettlements;
-                    const openingAP = endingAP - periodApIncrease;
-                    const openPayableExpenses = sumBy(allTxs, (t) => t.type === "expense" && t.payment === "payable" && !t.settledAt);
-                    const apGap = Math.round((endingAP - openPayableExpenses) * 100) / 100;
-
+                    // ---- AP reconciliation ----
                     const apCard = el("div", { class: "card stmt-card" });
                     apCard.appendChild(el("div", { class: "stmt-title" }, "Accounts payable reconciliation"));
-                    apCard.appendChild(el("div", { class: "stmt-period" }, "Credit expenses vs settlements — ties to Balance Sheet payable"));
+                    apCard.appendChild(el("div", { class: "stmt-period" }, "Opening + credit purchases/expenses − settlements = ending AP"));
                     apCard.appendChild(stmtRow("Opening AP (start of period)", openingAP, { indent: true }));
-                    apCard.appendChild(stmtRow("+ Credit expenses booked this period", creditExpensesPeriod, { indent: true }));
+                    if (invPurchasesCredit > 0) apCard.appendChild(stmtRow("+ Credit inventory purchases", invPurchasesCredit, { indent: true }));
+                    if (opexCredit > 0) apCard.appendChild(stmtRow("+ Credit operating expenses", opexCredit, { indent: true }));
+                    if (creditExpensesPeriod === 0) apCard.appendChild(stmtRow("+ Credit purchases/expenses", 0, { indent: true }));
                     apCard.appendChild(stmtRow("− Settlements this period", apSettlements, { indent: true }));
                     apCard.appendChild(stmtRow("Ending AP (Balance Sheet)", endingAP, { grand: true }));
-                    apCard.appendChild(
-                        el(
-                            "div",
-                            { class: "stmt-note" },
-                            "Credit expenses this period (" +
-                                fmtPeso(creditExpensesPeriod) +
-                                ") increase what you owe. Settlements reduce AP when you Mark as paid from Cash / GCash / Bank. " +
-                                (Math.abs(periodApIncrease) > 0.005 ? "Net AP change this period: " + fmtPeso(periodApIncrease) + "." : "No net AP change this period."),
-                        ),
-                    );
+                    const apCheck = Math.round((openingAP + creditExpensesPeriod - apSettlements - endingAP) * 100) / 100;
+                    if (Math.abs(apCheck) > 0.05) {
+                        apCard.appendChild(el("div", { class: "stmt-note", style: "color:var(--rust)" }, "⚠ AP rollforward residual: " + fmtPeso(apCheck)));
+                    } else {
+                        apCard.appendChild(el("div", { class: "stmt-note" }, "AP rollforward ties ✓"));
+                    }
                     if (Math.abs(apGap) > 0.05) {
                         apCard.appendChild(
                             el(
                                 "div",
                                 { class: "stmt-note" },
-                                "Note: sum of open payable expenses (not marked settled) is " +
+                                "Open payable expenses (not settled): " +
                                     fmtPeso(openPayableExpenses) +
                                     " vs ledger AP " +
                                     fmtPeso(endingAP) +
                                     " (Δ " +
                                     fmtPeso(apGap) +
-                                    "). Starting payable or a settle without Mark as paid can explain gaps. Ledger AP on the Balance Sheet is the figure to use.",
+                                    ").",
                             ),
                         );
                     }
                     section.appendChild(apCard);
 
-                    // ---- Inventory (Costing) memo ----
+                    // ---- Inventory report + rollforward ----
                     const invCard = el("div", { class: "card stmt-card" });
-                    invCard.appendChild(el("div", { class: "stmt-title" }, "Inventory (from Costing)"));
+                    invCard.appendChild(el("div", { class: "stmt-title" }, "Inventory"));
                     invCard.appendChild(
                         el(
                             "div",
                             { class: "stmt-period" },
-                            costingSnap.ok ? "Materials on hand × unit cost · same origin as Costing app" : "Costing DB not available on this domain — open both apps on the same origin",
+                            costingSnap.ok
+                                ? "At cost for the Balance Sheet · potential sales value is informational only"
+                                : "Costing DB not available — open both apps on the same origin",
                         ),
                     );
                     if (costingSnap.ok) {
-                        invCard.appendChild(stmtRow("Inventory at cost (Balance Sheet)", inventoryValue, { total: true }));
+                        invCard.appendChild(stmtRow("At cost (Balance Sheet)", inventoryValue, { total: true }));
                         invCard.appendChild(stmtRow("Materials tracked", 0, { indent: true, text: String((costingSnap.materials || []).length) }));
                         if (inventoryBelowReorder > 0) {
-                            invCard.appendChild(stmtRow("At or below reorder level", 0, { indent: true, text: String(inventoryBelowReorder) }));
+                            invCard.appendChild(stmtRow("Below reorder", 0, { indent: true, text: String(inventoryBelowReorder) }));
                         }
                         if (potentialFGRevenue != null && isFinite(potentialFGRevenue)) {
-                            invCard.appendChild(stmtRow("Potential revenue (stock × sell prices)", potentialFGRevenue, { indent: true }));
-                            invCard.appendChild(stmtRow("Potential cost (recipe / cost items)", potentialFGCost || 0, { indent: true }));
-                            invCard.appendChild(stmtRow("Potential profit at current stock", potentialFGProfit || 0, { indent: true, signed: true }));
+                            invCard.appendChild(stmtRow("Potential sales value", potentialFGRevenue, { indent: true }));
+                            invCard.appendChild(stmtRow("Potential gross profit", potentialFGProfit || 0, { indent: true, signed: true }));
                         }
                         if (avgMargin != null) {
-                            invCard.appendChild(stmtRow("Costing weighted avg margin", avgMargin, { indent: true, pct: true }));
+                            invCard.appendChild(stmtRow("Weighted average margin", avgMargin, { indent: true, pct: true }));
+                        }
+                        if (openingInventory != null) {
+                            invCard.appendChild(stmtRow("Inventory rollforward (" + periodLabel + ")", 0, { section: true }));
+                            invCard.appendChild(stmtRow("Opening inventory", openingInventory, { indent: true }));
+                            invCard.appendChild(stmtRow("+ Purchases (POS inventory expenses)", inventoryPurchases, { indent: true }));
+                            invCard.appendChild(stmtRow("− COGS (" + (cogsSource === "margin-estimate" ? "estimated" : cogsSource) + ")", cogs, { indent: true }));
+                            invCard.appendChild(stmtRow("Ending inventory (Balance Sheet)", endingInventory, { grand: true }));
+                            const invCheck = Math.round((openingInventory + inventoryPurchases - cogs - endingInventory) * 100) / 100;
+                            if (cogsSource !== "margin-estimate" && Math.abs(invCheck) > 0.5) {
+                                invCard.appendChild(
+                                    el(
+                                        "div",
+                                        { class: "stmt-note", style: "color:var(--rust)" },
+                                        "⚠ Inventory rollforward residual: " +
+                                            fmtPeso(invCheck) +
+                                            ". POS purchase categories, Costing stock-outs, and unit costs may not fully align (timing, optional recipe lines, or costs updated after moves).",
+                                    ),
+                                );
+                            } else if (cogsSource !== "margin-estimate") {
+                                invCard.appendChild(el("div", { class: "stmt-note" }, "Inventory rollforward approximately ties ✓"));
+                            }
                         }
                         inventoryDetail.slice(0, 6).forEach((ln) => {
-                            invCard.appendChild(stmtRow("· " + ln.name + (ln.unit ? " (" + fmtNumish(ln.stock) + " " + ln.unit + ")" : ""), ln.value, { indent: true }));
+                            invCard.appendChild(
+                                stmtRow("· " + ln.name + (ln.unit ? " (" + fmtNumish(ln.stock) + " " + ln.unit + ")" : ""), ln.value, { indent: true }),
+                            );
                         });
                         if (inventoryDetail.length > 6) {
-                            invCard.appendChild(el("div", { class: "stmt-note" }, "+" + (inventoryDetail.length - 6) + " more materials in Costing inventory"));
+                            invCard.appendChild(el("div", { class: "stmt-note" }, "+" + (inventoryDetail.length - 6) + " more materials"));
                         }
                         invCard.appendChild(
                             el(
                                 "div",
                                 { class: "stmt-note" },
-                                "Inventory value uses material stock × cost/unit from Costing. Potential revenue/profit is sellable finished units from recipes vs current stock (same as Costing Products summary) — not double-counted on the Balance Sheet.",
+                                "Potential sales value and profit are not assets, revenue, or equity — informational only from Costing product prices × sellable units.",
                             ),
                         );
                     } else {
-                        invCard.appendChild(el("div", { class: "stmt-note" }, costingSnap.message || "Link Costing on the same domain to value inventory on the Balance Sheet."));
+                        invCard.appendChild(el("div", { class: "stmt-note" }, costingSnap.message || "Link Costing on the same domain to value inventory."));
+                        if (inventoryPurchases > 0) {
+                            invCard.appendChild(
+                                el(
+                                    "div",
+                                    { class: "stmt-note" },
+                                    "POS still classified " + fmtPeso(inventoryPurchases) + " as inventory purchases this period (excluded from opex).",
+                                ),
+                            );
+                        }
                     }
                     section.appendChild(invCard);
 
-                    // Copy-friendly block for AI
+                    // ---- Copy for AI ----
                     const copyCard = el("div", { class: "card stmt-card" });
                     copyCard.appendChild(el("div", { class: "stmt-title" }, "Copy statements for AI"));
-                    const text = [
+                    const textOut = [
                         "=== Financial statements (" + periodLabel + ") ===",
                         "",
                         "INCOME STATEMENT",
                         "Revenue (sales): " + fmtPeso(revenue),
-                        avgMargin != null ? "Est. COGS @" + fmtPct(avgMargin) + " margin: " + fmtPeso(estimatedCogs) : "COGS: (not estimated — no Costing margin)",
-                        avgMargin != null ? "Gross profit: " + fmtPeso(grossProfit) : null,
-                        "Operating expenses: " + fmtPeso(opex),
+                        (cogsEstimated ? "Estimated COGS: " : "COGS: ") + fmtPeso(cogs) + " [" + cogsSource + "]",
+                        "Gross profit: " + fmtPeso(grossProfit),
+                        "Operating expenses (excludes inventory purchases): " + fmtPeso(opex),
                         expCats.map(([c, a]) => "  - " + c + ": " + fmtPeso(a)).join("\n"),
-                        "Net income (est.): " + fmtPeso(netIncome),
+                        "Inventory purchases capitalized (not in opex): " + fmtPeso(inventoryPurchases),
+                        invPurchaseCats.map(([c, a]) => "  - " + c + ": " + fmtPeso(a)).join("\n"),
+                        "Net income: " + fmtPeso(netIncome),
                         "",
                         "BALANCE SHEET (as of now)",
                         "Cash: " + fmtPeso(bal.cash),
                         "GCash: " + fmtPeso(bal.gcash),
                         "Bank: " + fmtPeso(bal.bank),
-                        "Accounts receivable (ending): " + fmtPeso(endingAR),
-                        "Inventory (materials at cost): " + fmtPeso(inventoryValue) + (costingSnap.ok ? "" : " (Costing not linked)"),
+                        "Accounts receivable: " + fmtPeso(endingAR),
+                        "Inventory (at cost): " + fmtPeso(inventoryValue),
                         "Current assets: " + fmtPeso(currentAssets),
                         "Fixed assets: " + fmtPeso(fixedAssets),
                         "Total assets: " + fmtPeso(totalAssets),
                         "Accounts payable: " + fmtPeso(endingAP),
-                        "Other liabilities (unpaid planned): " + fmtPeso(plannedLiab),
                         "Total liabilities: " + fmtPeso(liabilities),
-                        "Equity (plug): " + fmtPeso(equity),
+                        "Owner contributions: " + fmtPeso(ownerContrib),
+                        "Owner drawings: " + fmtPeso(ownerDraw),
+                        "Net owner capital: " + fmtPeso(netOwnerCapital),
+                        "Retained earnings (balancing): " + fmtPeso(retainedEarnings),
+                        "Total equity: " + fmtPeso(equity),
+                        "Assets = Liabilities + Equity: " + (Math.abs(identityGap) <= 0.05 ? "YES" : "NO Δ" + fmtPeso(identityGap)),
+                        plannedMemo > 0 ? "Memo unpaid planned (not AP): " + fmtPeso(plannedMemo) : null,
                         "",
-                        "AR RECONCILIATION (" + periodLabel + ")",
-                        "Opening AR: " + fmtPeso(openingAR),
-                        "+ Credit sales booked this period: " + fmtPeso(creditSalesPeriod),
-                        "− Collections this period: " + fmtPeso(collections),
-                        "= Ending AR (matches Balance Sheet): " + fmtPeso(endingAR),
-                        "Note: credit sales this period is period activity, NOT the unpaid balance.",
+                        "AR RECONCILIATION",
+                        "Opening: " + fmtPeso(openingAR) + " + credit sales " + fmtPeso(creditSalesPeriod) + " − collections " + fmtPeso(collections) + " = ending " + fmtPeso(endingAR),
                         "",
-                        "AP RECONCILIATION (" + periodLabel + ")",
-                        "Opening AP: " + fmtPeso(openingAP),
-                        "+ Credit expenses this period: " + fmtPeso(creditExpensesPeriod),
-                        "− Settlements this period: " + fmtPeso(apSettlements),
-                        "= Ending AP (matches Balance Sheet): " + fmtPeso(endingAP),
+                        "AP RECONCILIATION",
+                        "Opening: " +
+                            fmtPeso(openingAP) +
+                            " + credit inv " +
+                            fmtPeso(invPurchasesCredit) +
+                            " + credit opex " +
+                            fmtPeso(opexCredit) +
+                            " − settlements " +
+                            fmtPeso(apSettlements) +
+                            " = ending " +
+                            fmtPeso(endingAP),
                         "",
                         costingSnap.ok
-                            ? "INVENTORY (Costing)\n" +
-                              "At cost: " +
+                            ? "INVENTORY\nAt cost: " +
                               fmtPeso(inventoryValue) +
                               "\nMaterials: " +
                               (costingSnap.materials || []).length +
                               (inventoryBelowReorder ? "\nBelow reorder: " + inventoryBelowReorder : "") +
                               (potentialFGRevenue != null
-                                  ? "\nPotential FG revenue: " +
+                                  ? "\nPotential sales value: " +
                                     fmtPeso(potentialFGRevenue) +
-                                    "\nPotential FG cost: " +
-                                    fmtPeso(potentialFGCost || 0) +
-                                    "\nPotential FG profit: " +
+                                    "\nPotential gross profit: " +
                                     fmtPeso(potentialFGProfit || 0)
                                   : "") +
-                              (avgMargin != null ? "\nWeighted avg margin: " + fmtPct(avgMargin) : "")
-                            : "INVENTORY: Costing not available on this origin",
+                              (avgMargin != null ? "\nWeighted avg margin: " + fmtPct(avgMargin) : "") +
+                              (openingInventory != null
+                                  ? "\nRollforward: open " +
+                                    fmtPeso(openingInventory) +
+                                    " + purchases " +
+                                    fmtPeso(inventoryPurchases) +
+                                    " − COGS " +
+                                    fmtPeso(cogs) +
+                                    " = end " +
+                                    fmtPeso(endingInventory)
+                                  : "")
+                            : "INVENTORY: Costing not available",
                         "",
-                        "CASH FLOW (" + periodLabel + ")",
-                        "Net from operations: " + fmtPeso(opsNet),
-                        "  (includes AP settlements: " + fmtPeso(apSettlements) + ")",
-                        "Net from investing: " + fmtPeso(invNet),
-                        "Owner contributions: " + fmtPeso(ownerIn),
-                        "Owner drawings: " + fmtPeso(ownerOut),
-                        "From Business Funds: " + fmtPeso(businessFundsIn),
-                        "To Business Funds: " + fmtPeso(businessFundsOut),
-                        "Net from financing: " + fmtPeso(finNet),
-                        "Net change in liquid cash: " + fmtPeso(netCashChange),
+                        "CASH FLOW",
+                        "Cash sales: " + fmtPeso(salesCashLike),
+                        "Collections: " + fmtPeso(collections),
+                        "Cash paid for inventory: " + fmtPeso(invPurchasesCash),
+                        "Cash opex: " + fmtPeso(opexCash),
+                        "AP settlements: " + fmtPeso(apSettlements),
+                        "Net operations: " + fmtPeso(opsNet),
+                        "Owner in: " + fmtPeso(ownerIn) + " / drawings: " + fmtPeso(ownerOut),
+                        "Net financing: " + fmtPeso(finNet),
+                        "Net change liquid: " + fmtPeso(netCashChange),
                     ]
                         .filter((line) => line != null && line !== "")
                         .join("\n");
@@ -5121,7 +5324,7 @@
                         style: "min-height:120px;font-family:var(--mono);font-size:11.5px;line-height:1.4;resize:vertical",
                         readonly: "readonly",
                     });
-                    ta.value = text;
+                    ta.value = textOut;
                     copyCard.appendChild(ta);
                     const copyBtn = el("button", { type: "button", class: "bigbtn sale small2" }, "Copy statements");
                     copyBtn.addEventListener("click", async () => {
@@ -5138,6 +5341,7 @@
 
                     return section;
                 }
+
                 function summaryCard(label, amount, cls) {
                     return el("div", { class: "summary-card" }, [el("div", { class: "sc-label" }, label), el("div", { class: "sc-value " + cls }, fmtPeso(amount))]);
                 }
@@ -5339,8 +5543,131 @@
                     return v.toLocaleString("en-PH", { maximumFractionDigits: 2 });
                 }
 
+                /**
+                 * Classify a POS expense line as an inventory purchase (asset) vs true operating expense.
+                 * Inventory: restock/stocks/materials for future use or resale.
+                 * Opex: tips, utilities, rent, fees, transport, etc.
+                 * Prefer Costing material name matches when available.
+                 */
+                function isInventoryPurchaseLine(category, item, materialNameSet) {
+                    const cat = (category || "").toLowerCase().trim();
+                    const it = (item || "").toLowerCase().trim();
+                    const blob = cat + " " + it;
+                    // Explicit operating costs — never inventory
+                    if (/\b(rider|tip|utilit|electric|wifi|internet|rent|salary|labor|wage|transport|delivery|fee|interest|software|subscription|misc)\b/.test(blob)) {
+                        return false;
+                    }
+                    // Strong inventory signals in category
+                    if (/\b(restock|stocks?|inventory|inventories|printing\s*stocks?|supplies?\s*stocks?)\b/.test(cat)) return true;
+                    if (/\b(bond\s*paper|photo\s*paper|sticker|laminat|ink|toner|film|pouch)\b/.test(cat)) return true;
+                    // Default shop category used for materials restock in this app
+                    if (cat === "supplies & materials" || cat === "supplies and materials" || cat === "restock") return true;
+                    // Match Costing material names (item or category)
+                    if (materialNameSet && materialNameSet.size) {
+                        if (it && materialNameSet.has(it)) return true;
+                        if (cat && materialNameSet.has(cat)) return true;
+                        for (const mn of materialNameSet) {
+                            if (!mn) continue;
+                            if (it && (it === mn || it.includes(mn) || mn.includes(it))) return true;
+                        }
+                    }
+                    return false;
+                }
+
+                function materialNameSetFromSnap(snap) {
+                    const s = new Set();
+                    (snap && snap.materials ? snap.materials : []).forEach((m) => {
+                        const n = (m.name || "").toLowerCase().trim();
+                        if (n) s.add(n);
+                    });
+                    return s;
+                }
+
+                /** Split expense transactions into inventory purchases vs operating expenses (by line). */
+                function splitExpensesInventoryVsOpex(txs, materialNameSet) {
+                    let invTotal = 0,
+                        opexTotal = 0;
+                    const invByCat = {};
+                    const opexByCat = {};
+                    const invTxIds = new Set();
+                    (txs || []).filter((t) => t.type === "expense").forEach((t) => {
+                        const lines = txLines(t);
+                        lines.forEach((ln) => {
+                            const cat = ln.category || t.category || "Other";
+                            const item = ln.item || t.item || "";
+                            const amt = Number(ln.amount) || 0;
+                            if (isInventoryPurchaseLine(cat, item, materialNameSet)) {
+                                invTotal += amt;
+                                invByCat[cat] = (invByCat[cat] || 0) + amt;
+                                if (t.id != null) invTxIds.add(t.id);
+                            } else {
+                                opexTotal += amt;
+                                opexByCat[cat] = (opexByCat[cat] || 0) + amt;
+                            }
+                        });
+                    });
+                    return {
+                        invTotal,
+                        opexTotal,
+                        invByCat,
+                        opexByCat,
+                        invTxIds,
+                        invCats: Object.entries(invByCat).sort((a, b) => b[1] - a[1]),
+                        opexCats: Object.entries(opexByCat).sort((a, b) => b[1] - a[1]),
+                    };
+                }
+
+                /** COGS from Costing stock-outs in [from,to] × material costPerUnit. */
+                function computePeriodCogsFromMoves(moves, materials, from, to) {
+                    const costById = {};
+                    (materials || []).forEach((m) => {
+                        costById[m.id] = Number(m.costPerUnit) || 0;
+                    });
+                    let cogs = 0;
+                    let outQty = 0;
+                    let moveCount = 0;
+                    const fromT = from ? from.getTime() : 0;
+                    const toT = to ? to.getTime() : Number.POSITIVE_INFINITY;
+                    (moves || []).forEach((m) => {
+                        if (m.type !== "out") return;
+                        const d = Number(m.date) || Number(m.createdAt) || 0;
+                        if (d < fromT || d > toT) return;
+                        const q = Number(m.qty) || 0;
+                        if (q <= 0) return;
+                        cogs += q * (costById[m.materialId] || 0);
+                        outQty += q;
+                        moveCount++;
+                    });
+                    return { cogs, outQty, moveCount, hasData: moveCount > 0 };
+                }
+
+                /**
+                 * Inventory value at a point in time: startingQty + moves up to asOf, × costPerUnit.
+                 * Uses current costPerUnit (same as Costing snapshot — not a full historical cost layer).
+                 */
+                function inventoryValueAt(materialsRaw, moves, asOfDate) {
+                    const asOf = asOfDate ? asOfDate.getTime() : Date.now();
+                    let total = 0;
+                    (materialsRaw || []).forEach((mat) => {
+                        let qty = Number(mat.startingQty) || 0;
+                        const sorted = (moves || [])
+                            .filter((m) => m.materialId === mat.id && (Number(m.date) || Number(m.createdAt) || 0) <= asOf)
+                            .slice()
+                            .sort((a, b) => (a.date || 0) - (b.date || 0) || (a.id || 0) - (b.id || 0));
+                        sorted.forEach((m) => {
+                            const q = Number(m.qty) || 0;
+                            if (m.type === "in") qty += q;
+                            else if (m.type === "out") qty -= q;
+                            else if (m.type === "adjust") qty = q;
+                        });
+                        const unit = Number(mat.costPerUnit) || Number(mat.unitCost) || 0;
+                        total += Math.max(0, qty) * unit;
+                    });
+                    return total;
+                }
+
                 async function loadCostingInventorySnapshot() {
-                    const result = { materials: [], products: [], ok: false, message: "" };
+                    const result = { materials: [], products: [], moves: [], ok: false, message: "" };
                     try {
                         const cdb = await openCostingDB();
                         if (!cdb.objectStoreNames.contains("materials")) {
@@ -5353,6 +5680,7 @@
                         if (cdb.objectStoreNames.contains("stockMoves")) {
                             moves = await costingReq(cdb.transaction("stockMoves", "readonly").objectStore("stockMoves").getAll());
                         }
+                        result.moves = moves || [];
                         result.materials = (materials || []).map((m) => {
                             const stock = costingMaterialCurrentQty(m, moves);
                             return {
