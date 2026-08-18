@@ -4949,38 +4949,56 @@
                     const currentAssets = liquid + (bal.receivable || 0) + inventoryValue;
                     const totalAssets = currentAssets + fixedAssets;
 
-                    // Liabilities: actual AP only (not unpaid Forecast planned items)
+                    // Liabilities & equity — AP reconstructed from transaction dates (not entry time)
                     const planned = await companyPlanned();
                     const unpaidPlanned = planned.filter((p) => !p.paid);
                     const plannedMemo = unpaidPlanned.reduce((s, p) => s + (Number(p.amount) || 0), 0);
-                    const apBalance = Number(bal.payable) || 0;
-                    const liabilities = apBalance;
-
-                    // Equity from actual equity transactions — NOT Assets − Liabilities plug
                     const company = await getActiveCompany();
-                    // POS liquid/AR/AP starting balances when POS books began
+
                     const seedCashCapital =
                         (Number(company && company.startingCash) || 0) +
                         (Number(company && company.startingGcash) || 0) +
                         (Number(company && company.startingBank) || 0) +
-                        (Number(company && company.startingReceivable) || 0) -
-                        (Number(company && company.startingPayable) || 0);
-                    // Opening inventory when Costing began = physical stock already owned (pairs with opening equity)
-                    const openingInventoryEquity = systemOpeningInventory;
-                    // Combined opening capital: cash-side seed + inventory already owned before Costing tracking
-                    const seedCapital = seedCashCapital + openingInventoryEquity;
+                        (Number(company && company.startingReceivable) || 0);
+                    const settingsStartingPayable = Number(company && company.startingPayable) || 0;
 
+                    // Reconstruct AP from dated expenses (payment=payable) and settlements (transfer → payable)
+                    const endingAPRecon = reconstructPayableBalance(allTxs, company, null);
+                    const apAtCostingStart =
+                        costingStartAt != null ? reconstructPayableBalance(allTxs, company, costingStartAt) : settingsStartingPayable;
+                    const periodFromMs = periodFrom ? periodFrom.getTime() : null;
+                    const periodToMs = periodTo ? periodTo.getTime() : null;
+                    const openingAP =
+                        periodFromMs != null ? reconstructPayableBalance(allTxs, company, periodFromMs) : settingsStartingPayable;
+                    const creditsInPeriod = sumPayableCreditsInWindow(allTxs, periodFromMs, periodToMs);
+                    const settlementsInPeriod = sumPayableSettlementsInWindow(allTxs, periodFromMs, periodToMs);
+
+                    // Ending AP: ledger running balance should match reconstruction from transaction dates
+                    const apBalance = Number(bal.payable) || 0;
+                    const apReconGap = Math.round((endingAPRecon - apBalance) * 100) / 100;
+                    const liabilities = apBalance; // outstanding AP only (not Forecast planned memos)
+
+                    // Opening equity at system start: net assets that existed then
+                    // Assets side: cash-side seed + intentional opening inventory
+                    // Liability side: AP already outstanding at costing start (from dated credit purchases)
+                    const openingInventoryEquity = systemOpeningInventory;
+                    const openingEquityAtStart = seedCashCapital + openingInventoryEquity - apAtCostingStart;
+
+                    // Owner / merged business funds — count once from transfers (do not invent a second ₱11k)
                     const ownerContrib = sumBy(allTxs, (t) => t.type === "transfer" && t.fromAccount === "owner");
                     const ownerDraw = sumBy(allTxs, (t) => t.type === "transfer" && t.toAccount === "owner");
-                    const netOwnerCapital = ownerContrib - ownerDraw;
+                    const businessFundsContrib = sumBy(allTxs, (t) => t.type === "transfer" && t.fromAccount === "businessFunds");
+                    const businessFundsDraw = sumBy(allTxs, (t) => t.type === "transfer" && t.toAccount === "businessFunds");
+                    // Capital contributions for equity: owner + permanent business-fund merges into the shop
+                    const capitalContributions = ownerContrib + businessFundsContrib;
+                    const capitalDrawings = ownerDraw + businessFundsDraw;
 
-                    // Accumulated NI: prefer activity after Costing start when known; else all-time
-                    // Inventory purchases remain capitalized (excluded from opex via splitAll)
+                    // Accumulated NI after costing/accounting start when known
                     const txsForNi =
                         costingStartAt != null
                             ? allTxs.filter((t) => {
-                                  const tt = new Date(t.date).getTime();
-                                  return isFinite(tt) && tt >= costingStartAt;
+                                  const tt = txTimeMs(t);
+                                  return tt >= costingStartAt;
                               })
                             : allTxs;
                     const revenueAll = sumBy(txsForNi, (t) => t.type === "sale");
@@ -5006,10 +5024,12 @@
                     const opexAll = splitNi.opexTotal;
                     const accumulatedNetIncome = revenueAll - cogsAll - opexAll;
 
-                    // Calculated equity — no balancing plug for unexplained residual
-                    const calculatedEquity = seedCapital + ownerContrib + accumulatedNetIncome - ownerDraw;
+                    // Equity from actual components — never Assets−Liabilities as "retained earnings"
+                    const calculatedEquity = openingEquityAtStart + capitalContributions + accumulatedNetIncome - capitalDrawings;
                     const equityUnexplained = Math.round((totalAssets - liabilities - calculatedEquity) * 100) / 100;
                     const equity = calculatedEquity;
+                    const seedCapital = openingEquityAtStart; // for labels/copy that still reference seedCapital
+                    const seedCashCapitalDisplay = seedCashCapital;
 
                     const bs = el("div", { class: "card stmt-card" });
                     bs.appendChild(el("div", { class: "stmt-title" }, "Balance Sheet"));
@@ -5040,21 +5060,33 @@
 
                     bs.appendChild(stmtRow("Equity", 0, { section: true }));
                     if (Math.abs(seedCashCapital) > 0.005) {
-                        bs.appendChild(stmtRow("Opening cash/AR/AP capital (POS starting balances)", seedCashCapital, { indent: true, signed: true }));
+                        bs.appendChild(stmtRow("Opening cash & AR (POS starting balances)", seedCashCapital, { indent: true, signed: true }));
                     }
                     if (Math.abs(openingInventoryEquity) > 0.005) {
                         bs.appendChild(
-                            stmtRow("Opening inventory capital (stocks on hand when Costing started)", openingInventoryEquity, {
+                            stmtRow("Opening inventory (on hand when Costing started)", openingInventoryEquity, {
                                 indent: true,
                                 signed: true,
                             }),
                         );
                     }
-                    if (Math.abs(seedCapital) > 0.005) {
-                        bs.appendChild(stmtRow("Total opening capital", seedCapital, { indent: true, signed: true }));
+                    if (Math.abs(apAtCostingStart) > 0.005) {
+                        bs.appendChild(
+                            stmtRow("− AP already outstanding at Costing/accounting start", -apAtCostingStart, {
+                                indent: true,
+                                signed: true,
+                            }),
+                        );
                     }
+                    bs.appendChild(stmtRow("Opening equity (net assets at start)", openingEquityAtStart, { indent: true, signed: true }));
                     bs.appendChild(stmtRow("Owner contributions", ownerContrib, { indent: true }));
+                    if (Math.abs(businessFundsContrib) > 0.005) {
+                        bs.appendChild(stmtRow("Business funds contributed", businessFundsContrib, { indent: true }));
+                    }
                     bs.appendChild(stmtRow("Owner drawings", -ownerDraw, { indent: true, signed: true }));
+                    if (Math.abs(businessFundsDraw) > 0.005) {
+                        bs.appendChild(stmtRow("Business funds withdrawn", -businessFundsDraw, { indent: true, signed: true }));
+                    }
                     bs.appendChild(
                         stmtRow(
                             costingStartAt != null ? "Accumulated net income (since Costing start)" : "Accumulated net income (all-time)",
@@ -5063,6 +5095,17 @@
                         ),
                     );
                     bs.appendChild(stmtRow("Total equity (calculated)", calculatedEquity, { total: true, signed: true }));
+                    if (ownerContrib > 0) {
+                        bs.appendChild(
+                            el(
+                                "div",
+                                { class: "stmt-note" },
+                                "Owner contributions (" +
+                                    fmtPeso(ownerContrib) +
+                                    ") are capital only — not sales or operating income. If this includes the ~₱11k merged from another business, it is counted once here.",
+                            ),
+                        );
+                    }
                     if (Math.abs(equityUnexplained) > 0.05) {
                         bs.appendChild(stmtRow("Unexplained equity difference", equityUnexplained, { indent: true, signed: true }));
                         bs.appendChild(
@@ -5109,17 +5152,32 @@
                             ),
                         );
                     }
+                    if (Math.abs(apReconGap) > 0.05) {
+                        bs.appendChild(
+                            el(
+                                "div",
+                                { class: "stmt-note", style: "color:var(--rust)" },
+                                "⚠ Ledger AP " +
+                                    fmtPeso(apBalance) +
+                                    " vs reconstructed from transaction dates " +
+                                    fmtPeso(endingAPRecon) +
+                                    " (Δ " +
+                                    fmtPeso(apReconGap) +
+                                    "). Statements use ledger AP; check payable expenses and settlements use payment/transfer accounts correctly.",
+                            ),
+                        );
+                    }
                     bs.appendChild(
                         el(
                             "div",
                             { class: "stmt-note" },
-                            "Opening inventory capital is the Costing startingQty × cost when inventory tracking began — physical stock already owned, not current-period income. " +
-                                "Equity = opening capital (cash-side + opening inventory) + owner contributions + accumulated NI − drawings. " +
-                                "Accumulated NI uses sales/COGS/opex" +
-                                (costingStartAt != null ? " since Costing start (" + new Date(costingStartAt).toLocaleDateString("en-PH") + ")" : "") +
-                                "; COGS source: " +
+                            "Opening equity = opening cash/AR + opening inventory − AP outstanding at Costing start (from each payable expense’s transaction date, not entry date). " +
+                                "SPayLater purchases credit AP on purchase date; payments settle AP on payment date (not double-expensed). " +
+                                "Accumulated NI: sales/COGS/opex" +
+                                (costingStartAt != null ? " since " + new Date(costingStartAt).toLocaleDateString("en-PH") : "") +
+                                " (COGS: " +
                                 cogsAllSource +
-                                ". Pre-costing POS stock purchases stay in history but are not re-capitalized into inventory.",
+                                "). No balancing retained-earnings plug.",
                         ),
                     );
                     section.appendChild(bs);
@@ -5186,7 +5244,7 @@
 
                     const opsIn = salesCashLike + collections;
                     // Cash inventory purchases + cash opex + AP settlements (when paying prior credit buys/expenses)
-                    const opsOut = opexCash + invPurchasesCash + apSettlements;
+                    const opsOut = opexCash + invPurchasesCash + settlementsInPeriod;
                     const opsNet = opsIn - opsOut;
                     const finNet = ownerIn - ownerOut + businessFundsIn - businessFundsOut;
                     const invNet = -investExp;
@@ -5198,10 +5256,11 @@
                     const openCreditSales = sumBy(allTxs, (t) => t.type === "sale" && t.payment === "receivable" && !t.collectedAt);
                     const arGap = Math.round((endingAR - openCreditSales) * 100) / 100;
 
-                    const creditExpensesPeriod = opexCredit + invPurchasesCredit;
+                    // Period AP activity uses reconstructed credits/settlements by transaction_date
+                    const creditExpensesPeriod = creditsInPeriod; // all payable expenses in window (inv + opex)
                     const endingAP = apBalance;
-                    const periodApIncrease = creditExpensesPeriod - apSettlements;
-                    const openingAP = endingAP - periodApIncrease;
+                    const periodApIncrease = creditsInPeriod - settlementsInPeriod;
+                    // Prefer settlementsInPeriod (by date) over apSettlements from periodTxs filter (same if period filter matches dates)
                     const openPayableExpenses = sumBy(allTxs, (t) => t.type === "expense" && t.payment === "payable" && !t.settledAt);
                     const apGap = Math.round((endingAP - openPayableExpenses) * 100) / 100;
 
@@ -5213,7 +5272,7 @@
                     cf.appendChild(stmtRow("Receivable collections", collections, { indent: true }));
                     cf.appendChild(stmtRow("Cash paid for inventory", -invPurchasesCash, { indent: true, signed: true }));
                     cf.appendChild(stmtRow("Cash operating expenses", -opexCash, { indent: true, signed: true }));
-                    if (apSettlements > 0) cf.appendChild(stmtRow("Accounts payable settlements", -apSettlements, { indent: true, signed: true }));
+                    if (settlementsInPeriod > 0) cf.appendChild(stmtRow("Accounts payable settlements", -settlementsInPeriod, { indent: true, signed: true }));
                     if (invPurchasesCredit > 0) cf.appendChild(stmtRow("(memo) Inventory bought on credit — no cash yet", invPurchasesCredit, { indent: true }));
                     if (opexCredit > 0) cf.appendChild(stmtRow("(memo) Operating expenses on credit — no cash yet", opexCredit, { indent: true }));
                     cf.appendChild(stmtRow("Net cash from operations", opsNet, { total: true, signed: true }));
@@ -5272,14 +5331,30 @@
                     // ---- AP reconciliation ----
                     const apCard = el("div", { class: "card stmt-card" });
                     apCard.appendChild(el("div", { class: "stmt-title" }, "Accounts payable reconciliation"));
-                    apCard.appendChild(el("div", { class: "stmt-period" }, "Opening + credit purchases/expenses − settlements = ending AP"));
+                    apCard.appendChild(
+                        el(
+                            "div",
+                            { class: "stmt-period" },
+                            "Reconstructed from each transaction’s date (not entry date). SPayLater purchase → +AP; payment → −AP.",
+                        ),
+                    );
                     apCard.appendChild(stmtRow("Opening AP (start of period)", openingAP, { indent: true }));
-                    if (invPurchasesCredit > 0) apCard.appendChild(stmtRow("+ Credit inventory purchases", invPurchasesCredit, { indent: true }));
-                    if (opexCredit > 0) apCard.appendChild(stmtRow("+ Credit operating expenses", opexCredit, { indent: true }));
-                    if (creditExpensesPeriod === 0) apCard.appendChild(stmtRow("+ Credit purchases/expenses", 0, { indent: true }));
-                    apCard.appendChild(stmtRow("− Settlements this period", apSettlements, { indent: true }));
-                    apCard.appendChild(stmtRow("Ending AP (Balance Sheet)", endingAP, { grand: true }));
-                    const apCheck = Math.round((openingAP + creditExpensesPeriod - apSettlements - endingAP) * 100) / 100;
+                    if (Math.abs(apAtCostingStart) > 0.005 && costingStartAt != null) {
+                        apCard.appendChild(
+                            stmtRow("Memo: AP outstanding at Costing start", apAtCostingStart, { indent: true }),
+                        );
+                    }
+                    apCard.appendChild(stmtRow("+ Credit purchases/expenses in period", creditsInPeriod, { indent: true }));
+                    if (invPurchasesCredit > 0) {
+                        apCard.appendChild(stmtRow("  of which inventory on credit (period filter)", invPurchasesCredit, { indent: true }));
+                    }
+                    if (opexCredit > 0) {
+                        apCard.appendChild(stmtRow("  of which operating on credit (period filter)", opexCredit, { indent: true }));
+                    }
+                    apCard.appendChild(stmtRow("− Settlements in period (by payment date)", settlementsInPeriod, { indent: true }));
+                    apCard.appendChild(stmtRow("Ending AP (Balance Sheet ledger)", endingAP, { grand: true }));
+                    apCard.appendChild(stmtRow("Ending AP (reconstructed from dates)", endingAPRecon, { indent: true }));
+                    const apCheck = Math.round((openingAP + creditsInPeriod - settlementsInPeriod - endingAP) * 100) / 100;
                     if (Math.abs(apCheck) > 0.05) {
                         apCard.appendChild(el("div", { class: "stmt-note", style: "color:var(--rust)" }, "⚠ AP rollforward residual: " + fmtPeso(apCheck)));
                     } else {
@@ -5468,6 +5543,50 @@
                     }
                     section.appendChild(invCard);
 
+                    // ---- Accounting timeline (debug) ----
+                    const timeline = buildAccountingTimeline(allTxs, costingStartAt, systemOpeningInventory);
+                    const tlCard = el("div", { class: "card stmt-card" });
+                    tlCard.appendChild(el("div", { class: "stmt-title" }, "Accounting timeline"));
+                    tlCard.appendChild(
+                        el(
+                            "div",
+                            { class: "stmt-period" },
+                            "Capital, SPayLater/AP purchases & settlements, and Costing start — sorted by transaction date",
+                        ),
+                    );
+                    if (!timeline.length) {
+                        tlCard.appendChild(el("div", { class: "stmt-note" }, "No capital or AP events found yet."));
+                    } else {
+                        const maxShow = 40;
+                        timeline.slice(0, maxShow).forEach((ev) => {
+                            const when = ev.t ? new Date(ev.t).toLocaleString("en-PH") : "—";
+                            tlCard.appendChild(
+                                el("div", { class: "stmt-row indent" }, [
+                                    el("span", {}, when + " · " + ev.label),
+                                    el("span", { class: "stmt-amt" }, ev.detail || ""),
+                                ]),
+                            );
+                        });
+                        if (timeline.length > maxShow) {
+                            tlCard.appendChild(el("div", { class: "stmt-note" }, "+" + (timeline.length - maxShow) + " more events"));
+                        }
+                    }
+                    tlCard.appendChild(
+                        el(
+                            "div",
+                            { class: "stmt-note" },
+                            "Current: Inventory " +
+                                fmtPeso(endingInventory) +
+                                " · AP " +
+                                fmtPeso(endingAP) +
+                                " · Owner contributions " +
+                                fmtPeso(ownerContrib) +
+                                (Math.abs(businessFundsContrib) > 0.005 ? " · Business funds in " + fmtPeso(businessFundsContrib) : "") +
+                                ". Ending AP = unpaid credit purchases by transaction date; entry date is ignored.",
+                        ),
+                    );
+                    section.appendChild(tlCard);
+
                     // ---- Copy for AI ----
                     const copyCard = el("div", { class: "card stmt-card" });
                     copyCard.appendChild(el("div", { class: "stmt-title" }, "Copy statements for AI"));
@@ -5495,16 +5614,20 @@
                         "Total assets: " + fmtPeso(totalAssets),
                         "Accounts payable: " + fmtPeso(endingAP),
                         "Total liabilities: " + fmtPeso(liabilities),
-                        "Opening cash/AR/AP capital: " + fmtPeso(seedCashCapital),
-                        "Opening inventory capital (Costing start): " + fmtPeso(openingInventoryEquity),
-                        "Total opening capital: " + fmtPeso(seedCapital),
-                        "Owner contributions: " + fmtPeso(ownerContrib),
+                        "Opening cash & AR: " + fmtPeso(seedCashCapital),
+                        "Opening inventory (Costing start): " + fmtPeso(openingInventoryEquity),
+                        "AP at Costing start (txn dates): " + fmtPeso(apAtCostingStart),
+                        "Opening equity (net): " + fmtPeso(openingEquityAtStart),
+                        "Owner contributions: " + fmtPeso(ownerContrib) + " (capital once — not revenue)",
+                        Math.abs(businessFundsContrib) > 0.005 ? "Business funds contributed: " + fmtPeso(businessFundsContrib) : null,
                         "Owner drawings: " + fmtPeso(ownerDraw),
                         "Accumulated net income: " + fmtPeso(accumulatedNetIncome) + " [COGS " + cogsAllSource + (costingStartAt != null ? "; since Costing start" : "") + "]",
                         "Total equity (calculated): " + fmtPeso(calculatedEquity),
                         "Unexplained equity difference: " + fmtPeso(equityUnexplained),
                         "Assets vs L+E: " + (Math.abs(identityGap) <= 0.05 ? "TIES" : "GAP " + fmtPeso(identityGap)),
                         costingStartAt != null ? "Costing start: " + new Date(costingStartAt).toISOString() : "Costing start: unknown",
+                        "AP reconstructed (all dates): " + fmtPeso(endingAPRecon) + " | ledger: " + fmtPeso(apBalance),
+                        "AP period: open " + fmtPeso(openingAP) + " + credits " + fmtPeso(creditsInPeriod) + " − settlements " + fmtPeso(settlementsInPeriod) + " → end " + fmtPeso(endingAP),
                         plannedMemo > 0 ? "Memo unpaid planned (not AP): " + fmtPeso(plannedMemo) : null,
                         "",
                         "AR RECONCILIATION",
@@ -5935,6 +6058,126 @@
                         }
                     });
                     return { ins, outs, adjustValue, inCount, outCount, adjustCount };
+                }
+
+                /** Transaction effective time — always the business date, not entry time. */
+                function txTimeMs(t) {
+                    const ms = new Date(t.date).getTime();
+                    return isFinite(ms) ? ms : 0;
+                }
+
+                /**
+                 * Reconstruct Accounts Payable as of a moment from startingPayable + dated transactions.
+                 * asOfExclusive: if set, only include txs with date < asOfExclusive (opening balance at that instant).
+                 * if null, include all txs → current/ending AP from history.
+                 * Settlements = transfers with toAccount === "payable" (cash/GCash/bank → payable).
+                 */
+                function reconstructPayableBalance(txs, company, asOfExclusive) {
+                    let ap = Number(company && company.startingPayable) || 0;
+                    (txs || []).forEach((t) => {
+                        const tt = txTimeMs(t);
+                        if (asOfExclusive != null && tt >= asOfExclusive) return;
+                        const amt = Number(t.amount) || 0;
+                        if (amt <= 0) return;
+                        if (t.type === "expense" && t.payment === "payable") {
+                            ap += amt;
+                        } else if (t.type === "transfer" && t.toAccount === "payable") {
+                            // Pay AP: cash leaves, liability decreases
+                            ap -= amt;
+                        } else if (t.type === "transfer" && t.fromAccount === "payable") {
+                            // Rare: increase liability / reverse
+                            ap += amt;
+                        }
+                    });
+                    return ap;
+                }
+
+                function sumPayableCreditsInWindow(txs, fromMs, toMs) {
+                    let n = 0;
+                    (txs || []).forEach((t) => {
+                        if (t.type !== "expense" || t.payment !== "payable") return;
+                        const tt = txTimeMs(t);
+                        if (fromMs != null && tt < fromMs) return;
+                        if (toMs != null && tt > toMs) return;
+                        n += Number(t.amount) || 0;
+                    });
+                    return n;
+                }
+
+                function sumPayableSettlementsInWindow(txs, fromMs, toMs) {
+                    let n = 0;
+                    (txs || []).forEach((t) => {
+                        if (t.type !== "transfer" || t.toAccount !== "payable") return;
+                        const tt = txTimeMs(t);
+                        if (fromMs != null && tt < fromMs) return;
+                        if (toMs != null && tt > toMs) return;
+                        n += Number(t.amount) || 0;
+                    });
+                    return n;
+                }
+
+                /** Build sorted diagnostic timeline of capital, AP, inventory, costing start. */
+                function buildAccountingTimeline(allTxs, costingStartAt, systemOpeningInventory) {
+                    const events = [];
+                    (allTxs || []).forEach((t) => {
+                        const tt = txTimeMs(t);
+                        const amt = Number(t.amount) || 0;
+                        if (t.type === "transfer" && t.fromAccount === "owner") {
+                            events.push({
+                                t: tt,
+                                kind: "capital",
+                                label: "Owner contribution" + (t.item ? " — " + t.item : ""),
+                                detail: "+ capital " + amt,
+                                amount: amt,
+                            });
+                        } else if (t.type === "transfer" && t.toAccount === "owner") {
+                            events.push({
+                                t: tt,
+                                kind: "capital",
+                                label: "Owner drawing" + (t.item ? " — " + t.item : ""),
+                                detail: "− capital " + amt,
+                                amount: -amt,
+                            });
+                        } else if (t.type === "transfer" && t.fromAccount === "businessFunds") {
+                            events.push({
+                                t: tt,
+                                kind: "capital",
+                                label: "From Business Funds" + (t.item ? " — " + t.item : ""),
+                                detail: "+ business funds " + amt,
+                                amount: amt,
+                            });
+                        } else if (t.type === "expense" && t.payment === "payable") {
+                            const invish = /stock|restock|inventory|spay|spaylater|paper|ink|film|laminat/i.test(
+                                (t.category || "") + " " + (t.item || "") + " " + (t.note || ""),
+                            );
+                            events.push({
+                                t: tt,
+                                kind: "ap-credit",
+                                label: (invish ? "Credit purchase (AP)" : "Credit expense (AP)") + (t.item ? " — " + t.item : ""),
+                                detail: "+AP " + amt + (t.category ? " · " + t.category : ""),
+                                amount: amt,
+                            });
+                        } else if (t.type === "transfer" && t.toAccount === "payable") {
+                            events.push({
+                                t: tt,
+                                kind: "ap-settle",
+                                label: "AP settlement from " + (t.fromAccount || "?") + (t.item ? " — " + t.item : ""),
+                                detail: "−AP " + amt + " · −" + (t.fromAccount || "cash"),
+                                amount: -amt,
+                            });
+                        }
+                    });
+                    if (costingStartAt != null) {
+                        events.push({
+                            t: costingStartAt,
+                            kind: "costing-start",
+                            label: "Costing system started",
+                            detail: "Opening inventory (intentional) " + systemOpeningInventory,
+                            amount: systemOpeningInventory,
+                        });
+                    }
+                    events.sort((a, b) => a.t - b.t || String(a.kind).localeCompare(b.kind));
+                    return events;
                 }
 
                 /**
