@@ -3892,7 +3892,11 @@
                             );
                         } else if (t.type === "expense" && t.payment === "payable" && !t.settledAt) {
                             modal.appendChild(
-                                el("div", { class: "help-text", style: "margin-top:8px" }, "This expense is on accounts payable. Use “Mark as paid” below when you settle it from Cash, GCash, or Bank."),
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:8px" },
+                                    "This expense is on accounts payable. Use “Mark as paid” below when you settle it from Cash, GCash, or Bank.",
+                                ),
                             );
                         } else if (t.type === "expense" && t.settledAt) {
                             modal.appendChild(
@@ -3948,9 +3952,7 @@
                         el("button", { type: "button", class: "bigbtn danger" }, "Delete"),
                         el("button", { type: "button", class: "bigbtn sale" }, "Save"),
                     ];
-                    const canMarkPaid =
-                        (t.type === "sale" && t.payment === "receivable" && !t.collectedAt) ||
-                        (t.type === "expense" && t.payment === "payable" && !t.settledAt);
+                    const canMarkPaid = (t.type === "sale" && t.payment === "receivable" && !t.collectedAt) || (t.type === "expense" && t.payment === "payable" && !t.settledAt);
                     if (canMarkPaid) {
                         btnKids.push(el("button", { type: "button", class: "bigbtn transfer", style: "flex-basis:100%" }, "Mark as paid"));
                     }
@@ -4788,41 +4790,33 @@
                     let cogsEstimated = false;
                     let openingInventory = null;
                     let endingInventory = inventoryValue;
-                    let rollforwardCogs = null;
+                    let invFlow = { ins: 0, outs: 0, adjustValue: 0, inCount: 0, outCount: 0, adjustCount: 0 };
 
-                    if (costingSnap.ok && costingSnap.moves && costingSnap.moves.length) {
-                        const actual = computePeriodCogsFromMoves(costingSnap.moves, costingSnap.materials, periodFrom, periodTo);
+                    const matRowsForVal = (costingSnap.materials || []).map((m) => ({
+                        id: m.id,
+                        startingQty: m.startingQty,
+                        costPerUnit: m.costPerUnit,
+                    }));
+
+                    if (costingSnap.ok) {
+                        // Opening: before period start, or material startingQty only when reporting all-time
+                        if (periodFrom) {
+                            openingInventory = inventoryValueAt(matRowsForVal, costingSnap.moves || [], new Date(periodFrom.getTime() - 1));
+                        } else {
+                            // All-time: opening = starting quantities × cost (before any stock moves)
+                            openingInventory = inventoryValueAt(matRowsForVal, [], new Date(0));
+                        }
+                        invFlow = computePeriodInventoryFlow(costingSnap.moves || [], costingSnap.materials || [], periodFrom, periodTo);
+                        const actual = computePeriodCogsFromMoves(costingSnap.moves || [], costingSnap.materials || [], periodFrom, periodTo);
                         if (actual.hasData) {
                             cogs = actual.cogs;
                             cogsSource = "stock-outs";
                             cogsEstimated = false;
                         }
-                        // Opening inventory at start of period (for rollforward check)
-                        if (periodFrom) {
-                            // Need raw materials with startingQty — reconstruct from snapshot materials + moves
-                            openingInventory = inventoryValueAt(
-                                (costingSnap.materials || []).map((m) => ({
-                                    id: m.id,
-                                    startingQty: m.startingQty,
-                                    costPerUnit: m.costPerUnit,
-                                })),
-                                costingSnap.moves,
-                                new Date(periodFrom.getTime() - 1),
-                            );
-                        }
-                        if (openingInventory != null && endingInventory != null) {
-                            rollforwardCogs = openingInventory + inventoryPurchases - endingInventory;
-                        }
                     }
 
-                    // Formula fallback when no stock-out moves but we have purchase + inventory data
-                    if (cogs == null && openingInventory != null && endingInventory != null && (inventoryPurchases > 0 || endingInventory > 0)) {
-                        cogs = Math.max(0, openingInventory + inventoryPurchases - endingInventory);
-                        cogsSource = "rollforward";
-                        cogsEstimated = false;
-                    }
-
-                    // Margin estimate only when no inventory costing path available
+                    // Do NOT derive COGS from POS purchases − ending inventory (hides gaps).
+                    // Margin estimate only when no stock-out consumption data exists.
                     if (cogs == null && avgMargin != null && revenue > 0) {
                         cogs = revenue * (1 - avgMargin / 100);
                         cogsSource = "margin-estimate";
@@ -4832,6 +4826,15 @@
 
                     const grossProfit = revenue - cogs;
                     const netIncome = grossProfit - opex;
+
+                    // Inventory roll-forward (diagnostics — ending inventory stays Costing truth)
+                    // Calculated end from Costing moves: open + Costing ins − Costing outs
+                    const calcEndingFromCosting = openingInventory != null ? openingInventory + invFlow.ins - invFlow.outs : null;
+                    // Bridge to POS purchases (often diverges when stock-ins aren't logged in Costing)
+                    const calcEndingFromPosPurchases = openingInventory != null ? openingInventory + inventoryPurchases - cogs : null;
+                    const invDiffCosting = calcEndingFromCosting != null ? Math.round((calcEndingFromCosting - endingInventory) * 100) / 100 : null;
+                    const invDiffPosBridge = calcEndingFromPosPurchases != null ? Math.round((calcEndingFromPosPurchases - endingInventory) * 100) / 100 : null;
+                    const invPurchaseVsCostingIns = Math.round((inventoryPurchases - invFlow.ins) * 100) / 100;
 
                     // ---- Income Statement ----
                     const pl = el("div", { class: "card stmt-card" });
@@ -4903,13 +4906,43 @@
                     const plannedMemo = unpaidPlanned.reduce((s, p) => s + (Number(p.amount) || 0), 0);
                     const apBalance = Number(bal.payable) || 0;
                     const liabilities = apBalance;
-                    // Equity components
+
+                    // Equity from actual equity transactions — NOT Assets − Liabilities plug
+                    const company = await getActiveCompany();
+                    const seedCapital =
+                        (Number(company && company.startingCash) || 0) +
+                        (Number(company && company.startingGcash) || 0) +
+                        (Number(company && company.startingBank) || 0) +
+                        (Number(company && company.startingReceivable) || 0) -
+                        (Number(company && company.startingPayable) || 0);
                     const ownerContrib = sumBy(allTxs, (t) => t.type === "transfer" && t.fromAccount === "owner");
                     const ownerDraw = sumBy(allTxs, (t) => t.type === "transfer" && t.toAccount === "owner");
                     const netOwnerCapital = ownerContrib - ownerDraw;
-                    // Identity: Assets = Liabilities + Equity  →  Equity = Assets − Liabilities
-                    const equity = totalAssets - liabilities;
-                    const retainedEarnings = equity - netOwnerCapital;
+
+                    // All-time P&L for accumulated net income (inventory purchases capitalized, not opex)
+                    const revenueAll = sumBy(allTxs, (t) => t.type === "sale");
+                    let cogsAll = 0;
+                    let cogsAllSource = "none";
+                    if (costingSnap.ok) {
+                        const allOut = computePeriodCogsFromMoves(costingSnap.moves || [], costingSnap.materials || [], null, periodTo || new Date());
+                        if (allOut.hasData) {
+                            cogsAll = allOut.cogs;
+                            cogsAllSource = "stock-outs";
+                        }
+                    }
+                    if (cogsAllSource === "none" && avgMargin != null && revenueAll > 0) {
+                        cogsAll = revenueAll * (1 - avgMargin / 100);
+                        cogsAllSource = "margin-estimate";
+                    }
+                    const opexAll = splitAll.opexTotal;
+                    const accumulatedNetIncome = revenueAll - cogsAll - opexAll;
+
+                    // Calculated equity from books (no balancing plug)
+                    const calculatedEquity = seedCapital + ownerContrib + accumulatedNetIncome - ownerDraw;
+                    // Residual that would be needed to force Assets = Liabilities + Equity
+                    const equityUnexplained = Math.round((totalAssets - liabilities - calculatedEquity) * 100) / 100;
+                    // Report "Total equity" as calculated only — do not invent RE to absorb the gap
+                    const equity = calculatedEquity;
 
                     const bs = el("div", { class: "card stmt-card" });
                     bs.appendChild(el("div", { class: "stmt-title" }, "Balance Sheet"));
@@ -4939,24 +4972,47 @@
                     bs.appendChild(stmtRow("Total liabilities", liabilities, { total: true }));
 
                     bs.appendChild(stmtRow("Equity", 0, { section: true }));
+                    if (Math.abs(seedCapital) > 0.005) {
+                        bs.appendChild(stmtRow("Opening / seed capital (starting balances)", seedCapital, { indent: true, signed: true }));
+                    }
                     bs.appendChild(stmtRow("Owner contributions", ownerContrib, { indent: true }));
                     bs.appendChild(stmtRow("Owner drawings", -ownerDraw, { indent: true, signed: true }));
-                    bs.appendChild(stmtRow("Net owner capital", netOwnerCapital, { indent: true, signed: true }));
-                    bs.appendChild(stmtRow("Retained earnings (balancing)", retainedEarnings, { indent: true, signed: true }));
-                    bs.appendChild(stmtRow("Total equity", equity, { total: true, signed: true }));
-                    bs.appendChild(stmtRow("Total liabilities + equity", liabilities + equity, { grand: true }));
-
-                    const identityGap = Math.round((totalAssets - (liabilities + equity)) * 100) / 100;
+                    bs.appendChild(stmtRow("Accumulated net income (all-time)", accumulatedNetIncome, { indent: true, signed: true }));
+                    bs.appendChild(stmtRow("Total equity (calculated)", calculatedEquity, { total: true, signed: true }));
+                    if (Math.abs(equityUnexplained) > 0.05) {
+                        bs.appendChild(stmtRow("Unexplained equity difference", equityUnexplained, { indent: true, signed: true }));
+                        bs.appendChild(
+                            el(
+                                "div",
+                                { class: "stmt-note", style: "color:var(--rust)" },
+                                "⚠ Equity reconciliation difference: " +
+                                    fmtPeso(equityUnexplained) +
+                                    ". Assets − Liabilities (" +
+                                    fmtPeso(totalAssets - liabilities) +
+                                    ") does not equal calculated equity (" +
+                                    fmtPeso(calculatedEquity) +
+                                    "). Common causes: fixed assets recorded without a matching cash/equity entry, Costing inventory not tied to POS purchases, or starting balances vs history. This amount is NOT booked as retained earnings.",
+                            ),
+                        );
+                    }
+                    bs.appendChild(stmtRow("Total liabilities + calculated equity", liabilities + calculatedEquity, { grand: true }));
+                    const identityGap = Math.round((totalAssets - (liabilities + calculatedEquity)) * 100) / 100;
                     if (Math.abs(identityGap) > 0.05) {
                         bs.appendChild(
                             el(
                                 "div",
                                 { class: "stmt-note", style: "color:var(--rust)" },
-                                "⚠ Accounting equation check failed: Assets − (Liabilities + Equity) = " + fmtPeso(identityGap) + ". Review balances and classifications.",
+                                "⚠ Assets (" +
+                                    fmtPeso(totalAssets) +
+                                    ") ≠ Liabilities + calculated equity (" +
+                                    fmtPeso(liabilities + calculatedEquity) +
+                                    "). Gap " +
+                                    fmtPeso(identityGap) +
+                                    " — shown above, not forced into a balancing account.",
                             ),
                         );
                     } else {
-                        bs.appendChild(el("div", { class: "stmt-note" }, "Assets = Liabilities + Equity ✓"));
+                        bs.appendChild(el("div", { class: "stmt-note" }, "Assets = Liabilities + calculated equity ✓"));
                     }
                     if (plannedMemo > 0) {
                         bs.appendChild(
@@ -4973,7 +5029,9 @@
                         el(
                             "div",
                             { class: "stmt-note" },
-                            "Inventory is materials on hand × unit cost from Costing (not retail). Equity = Assets − Liabilities; retained earnings is the residual after net owner capital.",
+                            "Inventory is materials on hand × unit cost from Costing (not retail). Equity is seed capital + owner contributions + accumulated net income − drawings. Accumulated NI uses all-time sales, COGS (" +
+                                cogsAllSource +
+                                "), and operating expenses (inventory purchases excluded).",
                         ),
                     );
                     section.appendChild(bs);
@@ -5144,13 +5202,7 @@
                             el(
                                 "div",
                                 { class: "stmt-note" },
-                                "Open payable expenses (not settled): " +
-                                    fmtPeso(openPayableExpenses) +
-                                    " vs ledger AP " +
-                                    fmtPeso(endingAP) +
-                                    " (Δ " +
-                                    fmtPeso(apGap) +
-                                    ").",
+                                "Open payable expenses (not settled): " + fmtPeso(openPayableExpenses) + " vs ledger AP " + fmtPeso(endingAP) + " (Δ " + fmtPeso(apGap) + ").",
                             ),
                         );
                     }
@@ -5163,9 +5215,7 @@
                         el(
                             "div",
                             { class: "stmt-period" },
-                            costingSnap.ok
-                                ? "At cost for the Balance Sheet · potential sales value is informational only"
-                                : "Costing DB not available — open both apps on the same origin",
+                            costingSnap.ok ? "At cost for the Balance Sheet · potential sales value is informational only" : "Costing DB not available — open both apps on the same origin",
                         ),
                     );
                     if (costingSnap.ok) {
@@ -5181,52 +5231,82 @@
                         if (avgMargin != null) {
                             invCard.appendChild(stmtRow("Weighted average margin", avgMargin, { indent: true, pct: true }));
                         }
-                        if (openingInventory != null) {
-                            invCard.appendChild(stmtRow("Inventory rollforward (" + periodLabel + ")", 0, { section: true }));
-                            invCard.appendChild(stmtRow("Opening inventory", openingInventory, { indent: true }));
-                            invCard.appendChild(stmtRow("+ Purchases (POS inventory expenses)", inventoryPurchases, { indent: true }));
-                            invCard.appendChild(stmtRow("− COGS (" + (cogsSource === "margin-estimate" ? "estimated" : cogsSource) + ")", cogs, { indent: true }));
-                            invCard.appendChild(stmtRow("Ending inventory (Balance Sheet)", endingInventory, { grand: true }));
-                            const invCheck = Math.round((openingInventory + inventoryPurchases - cogs - endingInventory) * 100) / 100;
-                            if (cogsSource !== "margin-estimate" && Math.abs(invCheck) > 0.5) {
-                                invCard.appendChild(
-                                    el(
-                                        "div",
-                                        { class: "stmt-note", style: "color:var(--rust)" },
-                                        "⚠ Inventory rollforward residual: " +
-                                            fmtPeso(invCheck) +
-                                            ". POS purchase categories, Costing stock-outs, and unit costs may not fully align (timing, optional recipe lines, or costs updated after moves).",
-                                    ),
-                                );
-                            } else if (cogsSource !== "margin-estimate") {
-                                invCard.appendChild(el("div", { class: "stmt-note" }, "Inventory rollforward approximately ties ✓"));
-                            }
+                        // Always show roll-forward diagnostics when Costing is linked
+                        invCard.appendChild(stmtRow("Inventory rollforward (" + periodLabel + ")", 0, { section: true }));
+                        invCard.appendChild(stmtRow("Opening inventory", openingInventory != null ? openingInventory : 0, { indent: true }));
+                        invCard.appendChild(stmtRow("+ Costing stock-ins (at cost)", invFlow.ins, { indent: true }));
+                        invCard.appendChild(stmtRow("− Costing stock-outs / COGS (at cost)", invFlow.outs, { indent: true }));
+                        if (invFlow.adjustCount > 0) {
+                            invCard.appendChild(
+                                stmtRow("Adjustments recorded (" + invFlow.adjustCount + " move" + (invFlow.adjustCount === 1 ? "" : "s") + ")", 0, { indent: true, text: "see Costing" }),
+                            );
+                        }
+                        if (calcEndingFromCosting != null) {
+                            invCard.appendChild(stmtRow("= Calculated ending (Costing moves)", calcEndingFromCosting, { indent: true }));
+                        }
+                        invCard.appendChild(stmtRow("Actual ending inventory (Balance Sheet)", endingInventory, { grand: true }));
+                        if (invDiffCosting != null && Math.abs(invDiffCosting) > 0.5) {
+                            invCard.appendChild(
+                                el(
+                                    "div",
+                                    { class: "stmt-note", style: "color:var(--rust)" },
+                                    "⚠ Inventory reconciliation difference (Costing moves): " +
+                                        fmtPeso(invDiffCosting) +
+                                        ". Calculated " +
+                                        fmtPeso(calcEndingFromCosting) +
+                                        " vs actual " +
+                                        fmtPeso(endingInventory) +
+                                        ". Check unit-cost changes, adjust moves, or moves outside the period window.",
+                                ),
+                            );
+                        } else if (invDiffCosting != null) {
+                            invCard.appendChild(el("div", { class: "stmt-note" }, "Costing move rollforward ties to ending inventory ✓"));
+                        }
+
+                        invCard.appendChild(stmtRow("POS purchase bridge", 0, { section: true }));
+                        invCard.appendChild(stmtRow("POS inventory purchases (capitalized)", inventoryPurchases, { indent: true }));
+                        invCard.appendChild(stmtRow("Costing stock-ins (same period)", invFlow.ins, { indent: true }));
+                        invCard.appendChild(stmtRow("Purchases − Costing stock-ins", invPurchaseVsCostingIns, { indent: true, signed: true }));
+                        invCard.appendChild(stmtRow("COGS used on P&L (" + (cogsEstimated ? "estimated" : cogsSource) + ")", cogs, { indent: true }));
+                        if (calcEndingFromPosPurchases != null) {
+                            invCard.appendChild(stmtRow("Implied end if open + POS purchases − COGS", calcEndingFromPosPurchases, { indent: true }));
+                        }
+                        if (invDiffPosBridge != null && Math.abs(invDiffPosBridge) > 0.5) {
+                            invCard.appendChild(
+                                el(
+                                    "div",
+                                    { class: "stmt-note", style: "color:var(--rust)" },
+                                    "⚠ Inventory reconciliation difference (POS purchases vs Costing stock): " +
+                                        fmtPeso(invDiffPosBridge) +
+                                        ". Open " +
+                                        fmtPeso(openingInventory != null ? openingInventory : 0) +
+                                        " + purchases " +
+                                        fmtPeso(inventoryPurchases) +
+                                        " − COGS " +
+                                        fmtPeso(cogs) +
+                                        " = " +
+                                        fmtPeso(calcEndingFromPosPurchases) +
+                                        ", but ending inventory is " +
+                                        fmtPeso(endingInventory) +
+                                        ". Unexplained " +
+                                        fmtPeso(invDiffPosBridge) +
+                                        ". Usually POS restock expenses were not entered as stock-ins in Costing, or quantities/costs differ.",
+                                ),
+                            );
                         }
                         inventoryDetail.slice(0, 6).forEach((ln) => {
-                            invCard.appendChild(
-                                stmtRow("· " + ln.name + (ln.unit ? " (" + fmtNumish(ln.stock) + " " + ln.unit + ")" : ""), ln.value, { indent: true }),
-                            );
+                            invCard.appendChild(stmtRow("· " + ln.name + (ln.unit ? " (" + fmtNumish(ln.stock) + " " + ln.unit + ")" : ""), ln.value, { indent: true }));
                         });
                         if (inventoryDetail.length > 6) {
                             invCard.appendChild(el("div", { class: "stmt-note" }, "+" + (inventoryDetail.length - 6) + " more materials"));
                         }
                         invCard.appendChild(
-                            el(
-                                "div",
-                                { class: "stmt-note" },
-                                "Potential sales value and profit are not assets, revenue, or equity — informational only from Costing product prices × sellable units.",
-                            ),
+                            el("div", { class: "stmt-note" }, "Potential sales value and profit are not assets, revenue, or equity — informational only from Costing product prices × sellable units."),
                         );
                     } else {
                         invCard.appendChild(el("div", { class: "stmt-note" }, costingSnap.message || "Link Costing on the same domain to value inventory."));
                         if (inventoryPurchases > 0) {
-                            invCard.appendChild(
-                                el(
-                                    "div",
-                                    { class: "stmt-note" },
-                                    "POS still classified " + fmtPeso(inventoryPurchases) + " as inventory purchases this period (excluded from opex).",
-                                ),
-                            );
+                            invCard.appendChild(el("div", { class: "stmt-note" }, "POS still classified " + fmtPeso(inventoryPurchases) + " as inventory purchases this period (excluded from opex)."));
                         }
                     }
                     section.appendChild(invCard);
@@ -5258,12 +5338,13 @@
                         "Total assets: " + fmtPeso(totalAssets),
                         "Accounts payable: " + fmtPeso(endingAP),
                         "Total liabilities: " + fmtPeso(liabilities),
+                        "Opening/seed capital: " + fmtPeso(seedCapital),
                         "Owner contributions: " + fmtPeso(ownerContrib),
                         "Owner drawings: " + fmtPeso(ownerDraw),
-                        "Net owner capital: " + fmtPeso(netOwnerCapital),
-                        "Retained earnings (balancing): " + fmtPeso(retainedEarnings),
-                        "Total equity: " + fmtPeso(equity),
-                        "Assets = Liabilities + Equity: " + (Math.abs(identityGap) <= 0.05 ? "YES" : "NO Δ" + fmtPeso(identityGap)),
+                        "Accumulated net income (all-time): " + fmtPeso(accumulatedNetIncome) + " [COGS " + cogsAllSource + "]",
+                        "Total equity (calculated): " + fmtPeso(calculatedEquity),
+                        "Unexplained equity difference: " + fmtPeso(equityUnexplained),
+                        "Assets vs L+E: " + (Math.abs(identityGap) <= 0.05 ? "TIES" : "GAP " + fmtPeso(identityGap)),
                         plannedMemo > 0 ? "Memo unpaid planned (not AP): " + fmtPeso(plannedMemo) : null,
                         "",
                         "AR RECONCILIATION",
@@ -5287,23 +5368,27 @@
                               "\nMaterials: " +
                               (costingSnap.materials || []).length +
                               (inventoryBelowReorder ? "\nBelow reorder: " + inventoryBelowReorder : "") +
-                              (potentialFGRevenue != null
-                                  ? "\nPotential sales value: " +
-                                    fmtPeso(potentialFGRevenue) +
-                                    "\nPotential gross profit: " +
-                                    fmtPeso(potentialFGProfit || 0)
-                                  : "") +
+                              (potentialFGRevenue != null ? "\nPotential sales value: " + fmtPeso(potentialFGRevenue) + "\nPotential gross profit: " + fmtPeso(potentialFGProfit || 0) : "") +
                               (avgMargin != null ? "\nWeighted avg margin: " + fmtPct(avgMargin) : "") +
-                              (openingInventory != null
-                                  ? "\nRollforward: open " +
-                                    fmtPeso(openingInventory) +
-                                    " + purchases " +
-                                    fmtPeso(inventoryPurchases) +
-                                    " − COGS " +
-                                    fmtPeso(cogs) +
-                                    " = end " +
-                                    fmtPeso(endingInventory)
-                                  : "")
+                              "\nCosting rollforward: open " +
+                              fmtPeso(openingInventory != null ? openingInventory : 0) +
+                              " + stock-ins " +
+                              fmtPeso(invFlow.ins) +
+                              " − stock-outs " +
+                              fmtPeso(invFlow.outs) +
+                              " → calc end " +
+                              fmtPeso(calcEndingFromCosting != null ? calcEndingFromCosting : 0) +
+                              " | actual end " +
+                              fmtPeso(endingInventory) +
+                              (invDiffCosting != null && Math.abs(invDiffCosting) > 0.5 ? "\n⚠ Inventory Δ (Costing): " + fmtPeso(invDiffCosting) : "") +
+                              "\nPOS purchases " +
+                              fmtPeso(inventoryPurchases) +
+                              " vs Costing ins " +
+                              fmtPeso(invFlow.ins) +
+                              " (Δ " +
+                              fmtPeso(invPurchaseVsCostingIns) +
+                              ")" +
+                              (invDiffPosBridge != null && Math.abs(invDiffPosBridge) > 0.5 ? "\n⚠ Inventory Δ (POS bridge): " + fmtPeso(invDiffPosBridge) : "")
                             : "INVENTORY: Costing not available",
                         "",
                         "CASH FLOW",
@@ -5590,22 +5675,24 @@
                     const invByCat = {};
                     const opexByCat = {};
                     const invTxIds = new Set();
-                    (txs || []).filter((t) => t.type === "expense").forEach((t) => {
-                        const lines = txLines(t);
-                        lines.forEach((ln) => {
-                            const cat = ln.category || t.category || "Other";
-                            const item = ln.item || t.item || "";
-                            const amt = Number(ln.amount) || 0;
-                            if (isInventoryPurchaseLine(cat, item, materialNameSet)) {
-                                invTotal += amt;
-                                invByCat[cat] = (invByCat[cat] || 0) + amt;
-                                if (t.id != null) invTxIds.add(t.id);
-                            } else {
-                                opexTotal += amt;
-                                opexByCat[cat] = (opexByCat[cat] || 0) + amt;
-                            }
+                    (txs || [])
+                        .filter((t) => t.type === "expense")
+                        .forEach((t) => {
+                            const lines = txLines(t);
+                            lines.forEach((ln) => {
+                                const cat = ln.category || t.category || "Other";
+                                const item = ln.item || t.item || "";
+                                const amt = Number(ln.amount) || 0;
+                                if (isInventoryPurchaseLine(cat, item, materialNameSet)) {
+                                    invTotal += amt;
+                                    invByCat[cat] = (invByCat[cat] || 0) + amt;
+                                    if (t.id != null) invTxIds.add(t.id);
+                                } else {
+                                    opexTotal += amt;
+                                    opexByCat[cat] = (opexByCat[cat] || 0) + amt;
+                                }
+                            });
                         });
-                    });
                     return {
                         invTotal,
                         opexTotal,
@@ -5639,6 +5726,49 @@
                         moveCount++;
                     });
                     return { cogs, outQty, moveCount, hasData: moveCount > 0 };
+                }
+
+                /**
+                 * Period inventory flow from Costing moves at current unit costs.
+                 * ins = stock-ins, outs = stock-outs (consumption/COGS), adjustCount = absolute adjusts.
+                 * Does not invent values to force a tie with POS purchases.
+                 */
+                function computePeriodInventoryFlow(moves, materials, from, to) {
+                    const costById = {};
+                    (materials || []).forEach((m) => {
+                        costById[m.id] = Number(m.costPerUnit) || 0;
+                    });
+                    let ins = 0,
+                        outs = 0,
+                        adjustValue = 0;
+                    let inCount = 0,
+                        outCount = 0,
+                        adjustCount = 0;
+                    const fromT = from ? from.getTime() : 0;
+                    const toT = to ? to.getTime() : Number.POSITIVE_INFINITY;
+                    (moves || []).forEach((m) => {
+                        const d = Number(m.date) || Number(m.createdAt) || 0;
+                        if (d < fromT || d > toT) return;
+                        const q = Number(m.qty) || 0;
+                        const cost = costById[m.materialId] || 0;
+                        if (m.type === "in") {
+                            if (q > 0) {
+                                ins += q * cost;
+                                inCount++;
+                            }
+                        } else if (m.type === "out") {
+                            if (q > 0) {
+                                outs += q * cost;
+                                outCount++;
+                            }
+                        } else if (m.type === "adjust") {
+                            // Adjust sets absolute qty; value impact is not a simple +/- of m.qty alone.
+                            // Track count so diagnostics can surface that adjusts exist.
+                            adjustCount++;
+                            adjustValue += q * cost; // informational: level × cost after adjust
+                        }
+                    });
+                    return { ins, outs, adjustValue, inCount, outCount, adjustCount };
                 }
 
                 /**
