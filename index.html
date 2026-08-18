@@ -7005,7 +7005,7 @@
                     const moves = options.moves || [];
                     const products = options.products || [];
                     const coverageDays = options.coverageDays != null ? Number(options.coverageDays) : 30;
-                    const safetyStockFactor = options.safetyStockFactor != null ? Number(options.safetyStockFactor) : 0.15;
+                    const safetyStockFactor = options.safetyStockFactor != null ? Number(options.safetyStockFactor) : 0;
                     const now = Date.now();
                     const fromMs = now - lb * 24 * 60 * 60 * 1000;
 
@@ -7301,7 +7301,7 @@
                                 fmtPeso(ctx.expectedArCollections),
                         );
                     if (ctx.projectedInventorySpend) lines.push("Est. inventory replenishment spend: " + fmtPeso(ctx.projectedInventorySpend));
-                    if (ctx.existingAP != null) lines.push("Existing AP (liability, not double-counted as planned): " + fmtPeso(ctx.existingAP));
+                    if (ctx.existingAP != null) lines.push("Existing AP: " + fmtPeso(ctx.existingAP) + " — liability only; excluded from forecast cash outflow until payment is expected in the horizon.");
                     if (ctx.avgMarginPct != null) {
                         lines.push("Gross margin: " + fmtPct(ctx.avgMarginPct) + (ctx.cogsRatePct != null ? " · COGS rate: " + fmtPct(ctx.cogsRatePct) : ""));
                         lines.push("Projected gross profit (revenue × margin): " + fmtPeso(ctx.projectedGrossProfit || 0));
@@ -7845,7 +7845,7 @@
                                 " (not assumed collected in-horizon). " +
                                 "Existing AP " +
                                 fmtPeso(existingAP) +
-                                " is already a liability; only planned payment rows reduce cash here. " +
+                                " is a liability only — excluded from cash outflow until a payment is expected in the horizon (planned expenses). " +
                                 (avgMarginPct != null
                                     ? "GP uses Costing gross margin " + fmtPct(avgMarginPct) + " (COGS rate " + fmtPct(cogsRatePct) + ")."
                                     : "⚠ No Costing margin — GP/COGS not projected."),
@@ -8475,7 +8475,9 @@
                         el(
                             "div",
                             { class: "help-text" },
-                            "Formula: dailyUse = consumption/lookback; targetStock = dailyUse×coverageDays + safetyStock; suggestedOrder = ceil(max(0, target−stock)). Safety factor default 0 (no silent buffer). Est. spend = sum(suggestedQty×unitCost). Does not change inventory records.",
+                            "Per material: dailyUse = lookback consumption ÷ lookback days; coverage target = configured days; target stock = dailyUse × coverage" +
+                                (App.forecastSafetyStockFactor ? " + safetyStock (dailyUse × coverage × factor)" : " (no safety stock)") +
+                                "; suggested order = ceil(max(0, target − stock)). Est. spend = Σ(suggested qty × unit cost). Read-only — does not change inventory.",
                         ),
                     );
                     if (!costingSnap.ok) {
@@ -8517,15 +8519,15 @@
                                         el(
                                             "div",
                                             { class: "txrow-sub" },
-                                            "Stock " +
+                                            "Current stock: " +
                                                 r.stock +
                                                 " " +
                                                 (r.unit || "") +
-                                                " · consumption " +
-                                                (Math.round(r.historicalConsumption * 100) / 100) +
-                                                " / " +
+                                                " · " +
                                                 r.lookbackDays +
-                                                "d · dailyUse " +
+                                                "d consumption: " +
+                                                (Math.round(r.historicalConsumption * 100) / 100) +
+                                                " · Daily use: " +
                                                 (r.dailyUse != null ? r.dailyUse.toFixed(2) : "—") +
                                                 (r.daysLeft != null ? " · ~" + r.daysLeft + " days left" : "") +
                                                 (r.reorderAt != null ? " · reorder @" + r.reorderAt : ""),
@@ -8533,27 +8535,36 @@
                                         el(
                                             "div",
                                             { class: "txrow-sub" },
-                                            "Coverage " +
+                                            "Coverage target: " +
                                                 r.coverageDays +
-                                                "d · safetyStock " +
-                                                (r.safetyStock != null ? r.safetyStock.toFixed(2) : "0") +
-                                                " (factor " +
-                                                (App.forecastSafetyStockFactor != null ? App.forecastSafetyStockFactor : 0) +
-                                                ") · target " +
+                                                " days" +
+                                                (r.safetyStock > 0
+                                                    ? " · Safety stock: " + r.safetyStock.toFixed(2)
+                                                    : " · Safety stock: none") +
+                                                " · Target stock: " +
                                                 (r.targetStock != null ? Math.ceil(r.targetStock) : "—") +
-                                                " · suggest +" +
-                                                r.suggestedQty +
-                                                (r.unitCost != null && r.unitCost > 0
-                                                    ? " · est. cost " + fmtPeso(r.suggestedQty * r.unitCost) + " @" + fmtPeso(r.unitCost) + "/" + (r.unit || "u")
-                                                    : " · ⚠ purchase cost unavailable"),
+                                                " · Suggested order: +" +
+                                                r.suggestedQty,
+                                        ),
+                                        el(
+                                            "div",
+                                            { class: "txrow-sub" },
+                                            r.unitCost != null && r.unitCost > 0
+                                                ? "Unit cost: " +
+                                                  fmtPeso(r.unitCost) +
+                                                  " / " +
+                                                  (r.unit || "u") +
+                                                  " · Estimated purchase: " +
+                                                  fmtPeso(r.suggestedQty * r.unitCost)
+                                                : "⚠ Purchase cost unavailable for this material",
                                         ),
                                         el(
                                             "div",
                                             { class: "txrow-sub" },
                                             "Method: " +
                                                 (r.method || "—") +
-                                                " · " +
-                                                (r.formula || "") +
+                                                " · Confidence: " +
+                                                (r.confidence || "—") +
                                                 (r.source ? " · Source: " + r.source : ""),
                                         ),
                                         bomTxt ? el("div", { class: "txrow-sub" }, bomTxt) : el("span", {}),
@@ -8562,12 +8573,36 @@
                                 ]),
                             );
                         });
+                        if (projectedInventorySpend > 0 || replenish.some((r) => r.suggestedQty > 0)) {
+                            const missingCost = replenish.filter((r) => r.suggestedQty > 0 && !(r.unitCost > 0));
+                            sugCard.appendChild(
+                                el(
+                                    "div",
+                                    { class: "totalsrow grand", style: "margin-top:8px" },
+                                    [
+                                        el("span", {}, "Est. inventory replenishment spend (sum of lines)"),
+                                        el("span", { class: "val" }, fmtPeso(projectedInventorySpend)),
+                                    ],
+                                ),
+                            );
+                            if (missingCost.length) {
+                                sugCard.appendChild(
+                                    el(
+                                        "div",
+                                        { class: "help-text", style: "color:var(--rust)" },
+                                        "⚠ " +
+                                            missingCost.length +
+                                            " recommendation(s) lack unit cost — total spend understates those lines.",
+                                    ),
+                                );
+                            }
+                        }
                         if (replenishSkipped.length) {
                             sugCard.appendChild(
                                 el(
                                     "div",
                                     { class: "help-text", style: "color:var(--rust);margin-top:8px" },
-                                    "⚠ Insufficient material consumption data (no order invented):",
+                                    "⚠ Insufficient inventory consumption data for reliable replenishment forecast:",
                                 ),
                             );
                             replenishSkipped.forEach((s) => {
