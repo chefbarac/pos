@@ -5887,7 +5887,12 @@
                  */
                 function aggregateSalesMetrics(txs, opts) {
                     opts = opts || {};
-                    const sales = (txs || []).filter((t) => t.type === "sale");
+                    // Default: exclude sales flagged excludeFromForecast (same as Forecast demand baseline).
+                    // Pass includeExcluded: true only if you need full books totals.
+                    const includeExcluded = !!opts.includeExcluded;
+                    const allSales = (txs || []).filter((t) => t.type === "sale");
+                    const excludedSales = includeExcluded ? [] : allSales.filter(isExcludedFromForecast);
+                    const sales = includeExcluded ? allSales : allSales.filter((t) => !isExcludedFromForecast(t));
                     const expenses = (txs || []).filter((t) => t.type === "expense");
                     let revenue = 0;
                     const amounts = [];
@@ -5934,6 +5939,8 @@
                     const medTxn = medianOf(amounts);
                     const operatingDays = dayKeys.size || 0;
 
+                    const excludedCount = excludedSales.length;
+                    const excludedRevenue = excludedSales.reduce((s, t) => s + (Number(t.amount) || 0), 0);
                     return {
                         revenue,
                         txnCount,
@@ -5949,6 +5956,8 @@
                         byHourTx,
                         operatingDays,
                         amounts,
+                        excludedCount,
+                        excludedRevenue,
                     };
                 }
 
@@ -5959,6 +5968,8 @@
                     let opex = 0;
                     let inventoryValue = 0;
                     let costingOk = false;
+                    // Baseline metrics: sales with excludeFromForecast are omitted (realistic expectations).
+                    const baselineTxs = (periodTxs || []).filter((t) => t.type !== "sale" || !isExcludedFromForecast(t));
                     try {
                         const snap = await loadCostingInventorySnapshot();
                         costingOk = !!snap.ok;
@@ -5968,30 +5979,36 @@
                             if (snap.metrics && snap.metrics.avgMargin != null && isFinite(snap.metrics.avgMargin)) {
                                 avgMargin = snap.metrics.avgMargin;
                             }
-                            if (typeof computePeriodCogsFromMoves === "function" && periodFrom && periodTo) {
-                                const cogsRes = computePeriodCogsFromMoves(snap.moves || [], snap.materials || [], periodFrom, periodTo);
+                            // Prefer margin-based COGS on baseline revenue so excluded one-offs do not distort GP.
+                            // Stock-out COGS is period-wide and may include materials for excluded sales.
+                            const matNames = typeof materialNameSetFromSnap === "function" ? materialNameSetFromSnap(snap) : new Set();
+                            if (typeof splitExpensesInventoryVsOpex === "function") {
+                                const split = splitExpensesInventoryVsOpex(baselineTxs, matNames);
+                                opex = split.opexTotal;
+                            } else {
+                                opex = sumBy(baselineTxs, (t) => t.type === "expense");
+                            }
+                        } else {
+                            opex = sumBy(baselineTxs, (t) => t.type === "expense");
+                        }
+                    } catch (e) {
+                        opex = sumBy(baselineTxs, (t) => t.type === "expense");
+                    }
+                    const revenue = sumBy(baselineTxs, (t) => t.type === "sale");
+                    if (avgMargin != null && revenue > 0) {
+                        cogs = revenue * (1 - avgMargin / 100);
+                        cogsSource = "margin-estimate";
+                    } else if (typeof computePeriodCogsFromMoves === "function" && periodFrom && periodTo) {
+                        try {
+                            const snap2 = await loadCostingInventorySnapshot();
+                            if (snap2.ok) {
+                                const cogsRes = computePeriodCogsFromMoves(snap2.moves || [], snap2.materials || [], periodFrom, periodTo);
                                 if (cogsRes && cogsRes.hasData) {
                                     cogs = cogsRes.cogs;
                                     cogsSource = "stock-outs";
                                 }
                             }
-                            const matNames = typeof materialNameSetFromSnap === "function" ? materialNameSetFromSnap(snap) : new Set();
-                            if (typeof splitExpensesInventoryVsOpex === "function") {
-                                const split = splitExpensesInventoryVsOpex(periodTxs, matNames);
-                                opex = split.opexTotal;
-                            } else {
-                                opex = sumBy(periodTxs, (t) => t.type === "expense");
-                            }
-                        } else {
-                            opex = sumBy(periodTxs, (t) => t.type === "expense");
-                        }
-                    } catch (e) {
-                        opex = sumBy(periodTxs, (t) => t.type === "expense");
-                    }
-                    const revenue = sumBy(periodTxs, (t) => t.type === "sale");
-                    if (cogs == null && avgMargin != null && revenue > 0) {
-                        cogs = revenue * (1 - avgMargin / 100);
-                        cogsSource = "margin-estimate";
+                        } catch (e2) {}
                     }
                     if (cogs == null) cogs = 0;
                     return { cogs, cogsSource, avgMargin, opex, inventoryValue, costingOk, revenue };
@@ -6109,7 +6126,7 @@
                         el(
                             "div",
                             { class: "help-text" },
-                            "Decision dashboard from existing sales, expenses, inventory, and account balances. Does not change POS checkout. Transfers and owner moves are not counted as revenue.",
+                            "Decision dashboard from existing sales, expenses, inventory, and account balances. Does not change POS checkout. Transfers and owner moves are not revenue. Sales marked “excl. forecast” are omitted automatically so metrics stay realistic (same as Forecast).",
                         ),
                     );
 
@@ -6201,8 +6218,32 @@
                             summaryCard("Avg transaction", cur.avgTxn, "sales"),
                         ]),
                     );
-                    if (cur.medTxn != null) {
-                        wrap.appendChild(el("div", { class: "help-text" }, "Median transaction: " + fmtPeso(cur.medTxn) + " · Prior period revenue: " + fmtPeso(prev.revenue) + " · Source: POS sales only (excludes transfers)."));
+                    if (cur.medTxn != null || cur.excludedCount) {
+                        const bits = [];
+                        if (cur.medTxn != null) bits.push("Median transaction: " + fmtPeso(cur.medTxn));
+                        bits.push("Prior period revenue: " + fmtPeso(prev.revenue));
+                        bits.push("Source: POS sales only (excludes transfers)");
+                        if (cur.excludedCount) {
+                            bits.push(
+                                "Excluded from metrics (excl. forecast): " +
+                                    cur.excludedCount +
+                                    " sale(s) · " +
+                                    fmtPeso(cur.excludedRevenue),
+                            );
+                        }
+                        wrap.appendChild(el("div", { class: "help-text" }, bits.join(" · ") + "."));
+                    } else if (cur.excludedCount) {
+                        wrap.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "Excluded from metrics (excl. forecast): " +
+                                    cur.excludedCount +
+                                    " sale(s) · " +
+                                    fmtPeso(cur.excludedRevenue) +
+                                    " — same rule as Forecast demand baseline.",
+                            ),
+                        );
                     }
 
                     // ---- Transactions ----
