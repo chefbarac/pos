@@ -5890,7 +5890,7 @@
                             amount: 0,
                             frequency: "monthly",
                             expectedDate: "",
-                            notes: "Other income that can support shop investments (set amount when expected)",
+                            notes: "Optional external income — set amount and frequency when expected",
                             createdAt: new Date().toISOString(),
                         });
                     }
@@ -5960,14 +5960,46 @@
                     const sales = inRangeSales.filter((t) => !isExcludedFromForecast(t));
                     const total = sumBy(sales, () => true);
                     const excludedTotal = sumBy(excluded, () => true);
+                    const cashLike = sumBy(sales, (t) => t.payment === "cash" || t.payment === "gcash" || t.payment === "bank");
+                    const creditSales = sumBy(sales, (t) => t.payment === "receivable");
+                    // Daily revenue series for variability (calendar days)
+                    const byDay = {};
+                    sales.forEach((t) => {
+                        const k = String(t.date || "").slice(0, 10);
+                        if (!k) return;
+                        byDay[k] = (byDay[k] || 0) + (Number(t.amount) || 0);
+                    });
+                    const dayValues = [];
+                    for (let i = 0; i < lookbackDays; i++) {
+                        const d = new Date(from);
+                        d.setDate(from.getDate() + i);
+                        const key = d.toISOString().slice(0, 10);
+                        dayValues.push(byDay[key] || 0);
+                    }
+                    const mean = total / lookbackDays;
+                    let variance = 0;
+                    dayValues.forEach((v) => {
+                        variance += (v - mean) * (v - mean);
+                    });
+                    variance = lookbackDays > 1 ? variance / lookbackDays : 0;
+                    const stdDev = Math.sqrt(variance);
+                    const cv = mean > 0 ? stdDev / mean : null; // coefficient of variation
                     // Use calendar days so quiet days pull the average down realistically
                     return {
                         total,
-                        avgDaily: total / lookbackDays,
+                        avgDaily: mean,
+                        avgWeekly: mean * 7,
+                        avgMonthly: mean * 30,
                         count: sales.length,
                         lookbackDays,
                         excludedCount: excluded.length,
                         excludedTotal,
+                        cashLikeTotal: cashLike,
+                        creditSalesTotal: creditSales,
+                        cashSalesRatio: total > 0 ? cashLike / total : 1,
+                        stdDev,
+                        coefficientOfVariation: cv,
+                        activeDays: dayValues.filter((v) => v > 0).length,
                     };
                 }
 
@@ -6909,20 +6941,30 @@
                                 dailyUse += (ti.qty || 0) / 30;
                             }
                         });
-                        if (!dailyUse && isConsumable) dailyUse = Math.max(1, stock > 0 ? stock / 60 : 5); // fallback burn rate
-                        const daysLeft = dailyUse > 0 ? stock / dailyUse : stock > 0 ? 999 : 0;
-                        const need = stock <= reorder || daysLeft < 14;
-                        if (!need && stock > reorder) return;
+                        // No invented demand: if we cannot estimate daily use from sales match, only flag reorder-level breach
+                        const daysLeft = dailyUse > 0 ? stock / dailyUse : null;
+                        const belowReorder = reorder != null && stock <= reorder;
+                        const lowDays = daysLeft != null && daysLeft < 14;
+                        if (!belowReorder && !lowDays) return;
                         const targetDays = 30;
-                        const suggestedQty = Math.max(0, Math.ceil(dailyUse * targetDays - stock));
+                        let suggestedQty = 0;
+                        let insufficientHistory = false;
+                        if (dailyUse > 0) {
+                            suggestedQty = Math.max(0, Math.ceil(dailyUse * targetDays - stock));
+                        } else {
+                            // Only top-up to reorder point when demand history is missing
+                            suggestedQty = Math.max(0, Math.ceil((reorder || 0) - stock));
+                            insufficientHistory = true;
+                        }
                         suggestions.push({
                             name: m.name,
                             stock,
                             unit: m.unit || "pcs",
-                            daysLeft: daysLeft >= 999 ? null : Math.round(daysLeft),
-                            suggestedQty: suggestedQty || Math.max(reorder - stock, 0),
+                            daysLeft: daysLeft != null ? Math.round(daysLeft) : null,
+                            suggestedQty,
                             reorderAt: reorder,
-                            priority: stock <= 0 ? "critical" : daysLeft < 7 ? "high" : "medium",
+                            priority: stock <= 0 ? "critical" : daysLeft != null && daysLeft < 7 ? "high" : "medium",
+                            insufficientHistory,
                         });
                     });
                     // Also suggest from sales names when Costing has no materials
@@ -7051,9 +7093,19 @@
                     });
                     lines.push("");
                     lines.push("--- Projection (" + ctx.horizonDays + " days / target " + (ctx.targetDate || "n/a") + ") ---");
-                    lines.push("Projected POS revenue: " + fmtPeso(ctx.projectedRevenue));
+                    lines.push("Projected POS revenue: " + fmtPeso(ctx.projectedRevenue) + " (not all cash)");
+                    if (ctx.projectedCashSales != null) lines.push("Projected cash-like sales: " + fmtPeso(ctx.projectedCashSales));
+                    if (ctx.expectedArCollections != null)
+                        lines.push(
+                            "Expected AR collections (existing AR × " +
+                                Math.round((ctx.arCollectionRate || 0) * 100) +
+                                "% assumption): " +
+                                fmtPeso(ctx.expectedArCollections),
+                        );
+                    if (ctx.projectedInventorySpend) lines.push("Est. inventory replenishment spend: " + fmtPeso(ctx.projectedInventorySpend));
+                    if (ctx.existingAP != null) lines.push("Existing AP (liability, not double-counted as planned): " + fmtPeso(ctx.existingAP));
                     if (ctx.avgMarginPct != null) {
-                        lines.push("Costing avg margin applied: " + fmtPct(ctx.avgMarginPct));
+                        lines.push("Gross margin: " + fmtPct(ctx.avgMarginPct) + (ctx.cogsRatePct != null ? " · COGS rate: " + fmtPct(ctx.cogsRatePct) : ""));
                         lines.push("Projected gross profit (revenue × margin): " + fmtPeso(ctx.projectedGrossProfit || 0));
                         lines.push("Implied COGS in window: " + fmtPeso(ctx.projectedCogs || 0));
                     }
@@ -7064,6 +7116,11 @@
                     lines.push("Projected liquid cash on hand (rough): " + fmtPeso(ctx.projectedCash));
                     lines.push("  Method: liquid + POS sales + other income + receivable − recurring − planned unpaid");
                     lines.push("");
+                    if (ctx.forecastWarnings && ctx.forecastWarnings.length) {
+                        lines.push("--- Forecast confidence warnings ---");
+                        ctx.forecastWarnings.forEach((w) => lines.push("  ⚠ " + w.message));
+                        lines.push("");
+                    }
                     lines.push("--- Investment stress test (from Forecast simulator; persisted) ---");
                     if (ctx.investmentTest && ctx.investmentTest.amount > 0) {
                         const it = ctx.investmentTest;
@@ -7073,6 +7130,7 @@
                         lines.push("Cash after purchase (from liquid now): " + fmtPeso(it.cashAfter));
                         lines.push("Projected cash @ horizon AFTER purchase: " + fmtPeso(it.projectedAfter));
                         lines.push("Months of recurring costs covered by remaining liquid after buy: " + (it.monthsCovered != null ? Number(it.monthsCovered).toFixed(1) : "n/a"));
+                        if (it.risk) lines.push("Assessment: " + it.risk);
                         if (it.volTop) lines.push("Volume demand context: " + it.volTop);
                         if (it.horizonDays) lines.push("Horizon used: " + it.horizonDays + " days");
                         if (it.savedAt) lines.push("Simulator saved at: " + it.savedAt);
@@ -7116,7 +7174,7 @@
                         el(
                             "div",
                             { class: "help-text" },
-                            "Valuation, cash projection, investment checks, and restock ideas. Inventory signals pull from the Costing app when available. Sales projections use your actual POS history.",
+                            "Decision support only — not formal accounting. Actual balances come from POS/Costing; projections use configurable history and your assumptions. Forecasts never change source transactions.",
                         ),
                     );
 
@@ -7129,43 +7187,110 @@
                     const planned = await companyPlanned();
                     const assetValue = assets.reduce((s, a) => s + (Number(a.currentValue != null ? a.currentValue : a.cost) || 0), 0);
                     const currentAssets = liquid + (bal.receivable || 0);
-                    const valuation = currentAssets + assetValue;
 
-                    const lookbackDays = 30;
+                    if (App.forecastLookbackDays == null) App.forecastLookbackDays = 30;
+                    const lookbackDays = App.forecastLookbackDays || 30;
                     const salesStats = await computeAvgDailySales(lookbackDays);
                     const sold = await topSoldItems(lookbackDays, 8);
-                    // salesStats.excludedCount / excludedTotal available for UI note
                     const topByAmount = sold.byAmount || [];
                     const topByQty = sold.byQty || [];
-                    const topItems = topByAmount; // backward-compatible alias for replenishment matching
+                    const topItems = topByAmount;
                     const horizonDays = daysInHorizon(App.forecastHorizonDays, App.forecastTargetDate);
                     const monthlyRecurring = recurring.reduce((s, r) => s + monthlyFromFrequency(r.amount, r.frequency), 0);
+                    const recurringConfigured = recurring.some((r) => (Number(r.amount) || 0) > 0);
                     const otherIncomeList = await companyOtherIncome();
                     const projectedRevenue = salesStats.avgDaily * horizonDays;
                     const costingSnap = await loadCostingInventorySnapshot();
                     const costingMetrics = costingSnap.metrics || {};
+                    const invValueActual = costingSnap.ok
+                        ? (costingSnap.materials || []).reduce(
+                              (s, m) => s + Math.max(0, Number(m.stock) || 0) * (Number(m.costPerUnit) || 0),
+                              0,
+                          )
+                        : 0;
+                    const valuation = currentAssets + assetValue + invValueActual;
                     const avgMarginPct = costingMetrics.avgMargin != null && isFinite(costingMetrics.avgMargin) ? costingMetrics.avgMargin : null;
-                    // Projected gross profit from sales using Costing weighted avg margin (margin = profit/price)
+                    const marginIsEstimate = avgMarginPct == null;
+                    // Gross margin % → Gross profit; COGS rate = 100 − margin (never apply margin twice)
                     const projectedGrossProfit = avgMarginPct != null ? projectedRevenue * (avgMarginPct / 100) : null;
                     const projectedCogs = avgMarginPct != null ? projectedRevenue - projectedGrossProfit : null;
+                    const cogsRatePct = avgMarginPct != null ? 100 - avgMarginPct : null;
                     const projectedRecurring = (monthlyRecurring / 30) * horizonDays;
                     const now = startOfDay(new Date());
                     const horizonEnd = new Date(now);
                     horizonEnd.setDate(horizonEnd.getDate() + horizonDays);
                     const plannedUnpaid = planned.filter((p) => !p.paid);
+                    const plannedMissingDate = plannedUnpaid.filter((p) => !p.dueDate);
                     const plannedInWindow = plannedUnpaid
                         .filter((p) => {
-                            if (!p.dueDate) return true; // unknown due → count in window as caution
+                            if (!p.dueDate) return true; // unknown due → include as caution
                             const d = startOfDay(new Date(p.dueDate));
                             return d >= now && d <= horizonEnd;
                         })
                         .reduce((s, p) => s + (Number(p.amount) || 0), 0);
+                    // Existing AP is already a liability — do not add again as planned unless user scheduled extra payments
+                    const existingAP = Number(bal.payable) || 0;
                     const otherInc = otherIncomeInWindow(otherIncomeList, horizonDays, now, horizonEnd);
                     const otherIncomeInWindowAmt = otherInc.total;
-                    const projectedCash = liquid + projectedRevenue + otherIncomeInWindowAmt + (bal.receivable || 0) - projectedRecurring - plannedInWindow;
 
+                    // Cash projection: revenue ≠ cash. Use historical cash-like share; AR collections separate & partial.
+                    const cashSalesRatio = salesStats.cashSalesRatio != null ? salesStats.cashSalesRatio : 1;
+                    const projectedCashSales = projectedRevenue * cashSalesRatio;
+                    const projectedCreditSales = projectedRevenue - projectedCashSales;
+                    // Expected collections from *existing* AR only (conservative: assume half collected in horizon unless history empty)
+                    // Does not invent collection of new credit sales within the same short horizon
+                    const existingAR = Number(bal.receivable) || 0;
+                    const arCollectionRate = 0.5; // explicit assumption — labeled in UI
+                    const expectedArCollections = existingAR * arCollectionRate;
+                    // Inventory replenishment cash (optional) — sum suggested order × unit cost when available
                     const equipHints = equipmentHintsFromSales(topByQty, topByAmount);
                     const replenish = replenishmentSuggestions(costingSnap.materials || [], topByQty.length ? topByQty : topItems, salesStats.avgDaily);
+                    let projectedInventorySpend = 0;
+                    replenish.forEach((r) => {
+                        const mat = (costingSnap.materials || []).find((m) => m.name === r.name);
+                        const unitCost = mat && mat.costPerUnit != null ? Number(mat.costPerUnit) : 0;
+                        if (unitCost > 0 && r.suggestedQty > 0) projectedInventorySpend += r.suggestedQty * unitCost;
+                    });
+
+                    // Projected liquid cash at horizon (total across cash/gcash/bank — internal transfers net to zero)
+                    const projectedCash =
+                        liquid +
+                        projectedCashSales +
+                        expectedArCollections +
+                        otherIncomeInWindowAmt -
+                        projectedRecurring -
+                        plannedInWindow -
+                        projectedInventorySpend;
+
+                    // Forecast confidence / diagnostics (read-only)
+                    const forecastWarnings = [];
+                    if (salesStats.count < 5 || salesStats.activeDays < 3) {
+                        forecastWarnings.push({ code: "SHORT_SALES_HISTORY", message: "Sales history in the lookback is thin — average daily sales may be unreliable." });
+                    }
+                    if (salesStats.coefficientOfVariation != null && salesStats.coefficientOfVariation > 1) {
+                        forecastWarnings.push({ code: "HIGH_SALES_VARIABILITY", message: "Sales are highly variable day-to-day (CV > 1). Treat averages as rough guidance only." });
+                    }
+                    if (!recurringConfigured) {
+                        forecastWarnings.push({ code: "NO_RECURRING_COSTS", message: "No recurring costs recorded. Operating cash outflow may be understated." });
+                    }
+                    if (marginIsEstimate) {
+                        forecastWarnings.push({ code: "ESTIMATED_MARGIN", message: "No product margin from Costing — gross profit / COGS projection is unavailable or would require an assumed margin." });
+                    }
+                    if (plannedMissingDate.length) {
+                        forecastWarnings.push({
+                            code: "PLANNED_NO_DATE",
+                            message: plannedMissingDate.length + " planned expense(s) have no due date and are included in the horizon as a caution.",
+                        });
+                    }
+                    if (!costingSnap.ok) {
+                        forecastWarnings.push({ code: "NO_COSTING", message: "Inventory/Costing data not linked — inventory outlook and margin-based GP use limited inputs." });
+                    }
+                    if (replenish.some((r) => r.insufficientHistory)) {
+                        forecastWarnings.push({ code: "INSUFFICIENT_DEMAND_HISTORY", message: "Some reorder suggestions lack matched demand history; quantities only top up to reorder level." });
+                    }
+                    if (otherIncomeInWindowAmt > 0) {
+                        forecastWarnings.push({ code: "UNCERTAIN_OTHER_INCOME", message: "Projected cash includes expected other income — arrival timing is not guaranteed." });
+                    }
 
                     // Short demand note for AI / UI when revenue leader ≠ volume leader
                     let demandNote = "";
@@ -7184,9 +7309,25 @@
                         demandNote = "Top by volume and a major revenue line: “" + topByQty[0].name + "” (qty " + Math.round(topByQty[0].qty) + ").";
                     }
 
-                    // ---- Horizon controls ----
+                    // ---- Controls: lookback + horizon ----
                     const ctrlCard = el("div", { class: "card" });
-                    ctrlCard.appendChild(el("div", { class: "flabel" }, "Projection window"));
+                    ctrlCard.appendChild(el("div", { class: "flabel" }, "Sales lookback (history for averages)"));
+                    const lookRow = el("div", { class: "chiprow" });
+                    [
+                        [7, "7 days"],
+                        [14, "14 days"],
+                        [30, "30 days"],
+                        [60, "60 days"],
+                    ].forEach(([d, label]) => {
+                        const chip = el("button", { type: "button", class: "chip" + (lookbackDays === d ? " active" : "") }, label);
+                        chip.addEventListener("click", () => {
+                            App.forecastLookbackDays = d;
+                            softRender();
+                        });
+                        lookRow.appendChild(chip);
+                    });
+                    ctrlCard.appendChild(lookRow);
+                    ctrlCard.appendChild(el("div", { class: "flabel" }, "Projection horizon (future window)"));
                     const horizonRow = el("div", { class: "chiprow" });
                     [
                         [14, "14 days"],
@@ -7203,7 +7344,7 @@
                         horizonRow.appendChild(chip);
                     });
                     ctrlCard.appendChild(horizonRow);
-                    ctrlCard.appendChild(el("label", { class: "flabel" }, "Or cash on hand by date"));
+                    ctrlCard.appendChild(el("label", { class: "flabel" }, "Or project to a target date"));
                     const dateRow = el("div", { class: "addrow" });
                     const dateInp = el("input", {
                         type: "date",
@@ -7221,29 +7362,41 @@
                     dateRow.appendChild(dateInp);
                     dateRow.appendChild(applyDate);
                     ctrlCard.appendChild(dateRow);
-                    ctrlCard.appendChild(el("div", { class: "help-text" }, "Horizon: " + horizonDays + " day(s)" + (App.forecastTargetDate ? " → " + App.forecastTargetDate : "") + "."));
+                    ctrlCard.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Lookback " +
+                                lookbackDays +
+                                "d · Horizon " +
+                                horizonDays +
+                                "d" +
+                                (App.forecastTargetDate ? " → " + App.forecastTargetDate : "") +
+                                ". Averages use transaction dates in the lookback; projections apply them forward.",
+                        ),
+                    );
                     const refreshProj = el("button", { type: "button", class: "bigbtn ghost small2" }, "Refresh projections");
-                    refreshProj.title = "Recalculate valuation, cash projection, and AI brief after editing amounts below";
                     refreshProj.addEventListener("click", () => softRender());
                     ctrlCard.appendChild(refreshProj);
                     wrap.appendChild(ctrlCard);
 
-                    // ---- Valuation summary ----
-                    wrap.appendChild(el("div", { class: "section-title" }, "BUSINESS VALUATION"));
+                    // ---- ACTUAL position ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "CURRENT POSITION (ACTUAL)"));
                     wrap.appendChild(
                         el("div", { class: "summary-grid" }, [
                             summaryCard("Liquid cash", liquid, "sales"),
-                            summaryCard("Receivable", bal.receivable || 0, (bal.receivable || 0) > 0 ? "expenses" : "sales"),
-                            summaryCard("Payable", bal.payable || 0, (bal.payable || 0) > 0 ? "expenses" : "sales"),
+                            summaryCard("Accounts receivable", bal.receivable || 0, (bal.receivable || 0) > 0 ? "expenses" : "sales"),
+                            summaryCard("Accounts payable", bal.payable || 0, (bal.payable || 0) > 0 ? "expenses" : "sales"),
+                            summaryCard("Inventory at cost", invValueActual, "sales"),
                             summaryCard("Fixed assets", assetValue, "sales"),
-                            summaryCard("Est. valuation", valuation, "sales"),
+                            summaryCard("Working valuation", valuation, "sales"),
                         ]),
                     );
                     wrap.appendChild(
                         el(
                             "div",
                             { class: "help-text" },
-                            "Valuation ≈ cash + GCash + bank + receivable + long-term assets (at current value). Not a formal appraisal — a working number for decisions.",
+                            "Actual balances from POS accounts + Costing inventory + fixed assets. Valuation is decision support, not a formal appraisal. Inventory is stock at cost, not future cash.",
                         ),
                     );
 
@@ -7285,46 +7438,86 @@
                         );
                     }
 
-                    // ---- Projection ----
-                    wrap.appendChild(el("div", { class: "section-title" }, "CASH PROJECTION"));
+                    // ---- Historical performance ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "HISTORICAL PERFORMANCE"));
+                    wrap.appendChild(
+                        el("div", { class: "summary-grid" }, [
+                            summaryCard("Sales in lookback", salesStats.total, "sales"),
+                            summaryCard("Avg daily sales", salesStats.avgDaily, "sales"),
+                            summaryCardText("Sale count", String(salesStats.count), "sales"),
+                            summaryCardText("Cash vs credit", Math.round((salesStats.cashSalesRatio || 0) * 100) + "% cash-like", "sales"),
+                        ]),
+                    );
+                    if (demandNote) {
+                        wrap.appendChild(el("div", { class: "help-text" }, "Demand: " + demandNote));
+                    }
+                    wrap.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Volume (qty/jobs) and revenue are listed separately for capacity decisions. " +
+                                (salesStats.excludedCount
+                                    ? salesStats.excludedCount +
+                                      " sale(s) excluded from averages (" +
+                                      fmtPeso(salesStats.excludedTotal) +
+                                      ")."
+                                    : "Exclude one-off bulk/personal sales via History if they skew demand."),
+                        ),
+                    );
+
+                    // ---- Forecast (not actuals) ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "FORECAST (PROJECTION)"));
                     const projCards = [
-                        summaryCard("Avg daily sales", salesStats.avgDaily, "sales"),
                         summaryCard("Projected revenue", projectedRevenue, "sales"),
-                        summaryCard("Recurring in window", projectedRecurring, "expenses"),
-                        summaryCard("Projected cash", projectedCash, projectedCash >= 0 ? "sales" : "expenses"),
+                        summaryCard("Projected cash sales", projectedCashSales, "sales"),
+                        summaryCard("Expected AR collections*", expectedArCollections, "sales"),
+                        summaryCard("Recurring costs in window", projectedRecurring, "expenses"),
+                        summaryCard("Planned expenses in window", plannedInWindow, "expenses"),
+                        summaryCard("Est. inventory spend", projectedInventorySpend, "expenses"),
+                        summaryCard("Projected liquid cash", projectedCash, projectedCash >= 0 ? "sales" : "expenses"),
                     ];
                     if (avgMarginPct != null) {
-                        projCards.push(summaryCardText("Costing avg margin", fmtPct(avgMarginPct), "sales"));
+                        projCards.push(summaryCardText("Gross margin", fmtPct(avgMarginPct), "sales"));
+                        projCards.push(summaryCardText("COGS rate", fmtPct(cogsRatePct), "expenses"));
                         projCards.push(summaryCard("Projected gross profit", projectedGrossProfit, "sales"));
+                        projCards.push(summaryCard("Projected COGS", projectedCogs, "expenses"));
                     }
                     wrap.appendChild(el("div", { class: "summary-grid" }, projCards));
                     wrap.appendChild(
                         el(
                             "div",
                             { class: "help-text" },
-                            "Projected cash ≈ liquid + POS sales + other income (e.g. copra) + receivable − recurring − planned unpaid. " +
-                                (otherIncomeInWindowAmt > 0 ? "Includes " + fmtPeso(otherIncomeInWindowAmt) + " expected other income in this window. " : "") +
-                                (avgMarginPct != null ? "Gross profit uses Costing weighted avg margin (" + fmtPct(avgMarginPct) + ") × POS revenue only. " : "") +
-                                (salesStats.excludedCount
-                                    ? salesStats.excludedCount +
-                                      " sale(s) excluded from averages (" +
-                                      fmtPeso(salesStats.excludedTotal) +
-                                      ") — open History → Excl. forecast, or edit a sale and uncheck the box."
-                                    : "Tip: open a sale → check “Exclude from Forecast” for bulk/personal one-offs that skew demand."),
+                            "Projected liquid ≈ opening liquid + cash-like sales + expected collections of existing AR (" +
+                                Math.round(arCollectionRate * 100) +
+                                "% assumption) + other income − recurring − planned − estimated inventory replenishment. " +
+                                "Revenue is not the same as cash. New credit sales in the horizon are not assumed collected. " +
+                                "Existing AP (" +
+                                fmtPeso(existingAP) +
+                                ") is a liability already; only scheduled planned payments reduce cash again. " +
+                                (avgMarginPct != null
+                                    ? "GP uses Costing weighted gross margin (" + fmtPct(avgMarginPct) + "); COGS rate " + fmtPct(cogsRatePct) + "."
+                                    : "⚠ No Costing margin — GP/COGS not projected."),
                         ),
                     );
-                    if (demandNote) {
-                        wrap.appendChild(el("div", { class: "help-text" }, "Demand: " + demandNote));
+
+                    // Forecast warnings
+                    if (forecastWarnings.length) {
+                        const wCard = el("div", { class: "card" });
+                        wCard.appendChild(el("div", { class: "flabel" }, "Forecast confidence"));
+                        forecastWarnings.forEach((w) => {
+                            wCard.appendChild(el("div", { class: "help-text", style: "color:var(--rust)" }, "⚠ " + w.message));
+                        });
+                        wrap.appendChild(wCard);
                     }
 
-                    // ---- Other / external income (copra, etc.) ----
-                    wrap.appendChild(el("div", { class: "section-title" }, "OTHER INCOME (OUTSIDE POS)"));
+                    // ---- Other / external income ----
+                    wrap.appendChild(el("div", { class: "section-title" }, "OTHER / EXTERNAL INCOME"));
                     const incCard = el("div", { class: "card" });
                     incCard.appendChild(
                         el(
                             "div",
                             { class: "help-text" },
-                            "Money you expect from outside the shop (e.g. copra sale) that can support a printer or other investment. Counts toward projected cash and the AI brief.",
+                            "Optional non-POS cash inflows (other businesses, rentals, seasonal income, etc.). Included in projected cash only when configured. Timing is not guaranteed.",
                         ),
                     );
                     const incList = el("div", { class: "presetlist" });
@@ -7685,17 +7878,49 @@
                         const monthsCovered = monthlyRecurring > 0 ? cashAfter / monthlyRecurring : null;
                         const volTop = topByQty[0] ? topByQty[0].name + " (qty " + Math.round(topByQty[0].qty) + ")" : "n/a";
                         let verdict = "";
-                        if (price <= 0) verdict = "Enter a price.";
-                        else if (cashAfter < 0 && otherIncomeInWindowAmt + liquid < price)
-                            verdict = "Not enough liquid today even with expected other income in the window — need credit, SpayLater, larger external income, or wait.";
-                        else if (cashAfter < 0)
-                            verdict = "Short on liquid today, but expected other income (~" + fmtPeso(otherIncomeInWindowAmt) + ") in the horizon may cover the gap if it arrives on time.";
-                        else if (monthsCovered != null && monthsCovered < 1) verdict = "Possible, but remaining cash covers under 1 month of fixed costs — high stress if sales or other income slip.";
-                        else if (monthsCovered != null && monthsCovered < 2) verdict = "Tight. Prefer ~2+ months of fixed costs after the buy, or confirm other income timing.";
-                        else if (projectedAfter < monthlyRecurring) verdict = "Horizon projection looks thin after the purchase — confirm volume demand (" + volTop + ") justifies the machine.";
-                        else
+                        let risk = "Enter a price";
+                        if (price <= 0) {
+                            verdict = "Enter a purchase price to run the stress test.";
+                            risk = "—";
+                        } else if (cashAfter < 0 && otherIncomeInWindowAmt + liquid < price) {
+                            risk = "Insufficient buffer";
                             verdict =
-                                "Buffer looks workable on paper (incl. other income in projection). Demand by volume: " + volTop + ". Still allow for ink/maintenance and delayed external income.";
+                                "Liquid cash plus expected other income in the horizon does not cover this purchase. Consider credit, delay, or lower amount.";
+                        } else if (cashAfter < 0) {
+                            risk = "High risk";
+                            verdict =
+                                "Short on liquid today; relies on other income (~" +
+                                fmtPeso(otherIncomeInWindowAmt) +
+                                ") arriving on time. Existing AP " +
+                                fmtPeso(existingAP) +
+                                " still due.";
+                        } else if (!recurringConfigured) {
+                            risk = "Manageable*";
+                            verdict =
+                                "Appears fundable on recorded cash, but recurring costs are not configured — true buffer may be thinner. Volume signal: " +
+                                volTop +
+                                ".";
+                        } else if (monthsCovered != null && monthsCovered < 1) {
+                            risk = "High risk";
+                            verdict = "Remaining cash covers under 1 month of recorded fixed costs after purchase.";
+                        } else if (monthsCovered != null && monthsCovered < 2) {
+                            risk = "Tight";
+                            verdict = "Under ~2 months of fixed-cost cover after purchase. Confirm demand and obligations.";
+                        } else if (projectedAfter < monthlyRecurring) {
+                            risk = "Tight";
+                            verdict = "Horizon cash after purchase is below one month of recurring costs. Volume leader: " + volTop + ".";
+                        } else if (projectedAfter < liquid * 0.35) {
+                            risk = "Manageable";
+                            verdict = "Fundable with a reduced buffer. Factor AP " + fmtPeso(existingAP) + " and inventory needs.";
+                        } else {
+                            risk = "Comfortable";
+                            verdict =
+                                "Recorded data shows a workable buffer after this purchase (including optional other income). Still allow for maintenance, stock, and delayed collections. Volume: " +
+                                volTop +
+                                ".";
+                        }
+                        // attach risk label for UI
+                        // verdict remains detailed; risk is short label
                         return {
                             name,
                             amount: price,
@@ -7708,6 +7933,7 @@
                             projectedCashBefore: projectedCash,
                             horizonDays,
                             volTop,
+                            risk,
                             verdict,
                         };
                     }
@@ -7737,7 +7963,24 @@
                                 ]),
                             );
                         }
+                        if (sim.risk) {
+                            invResult.appendChild(
+                                el("div", { class: "totalsrow grand" }, [
+                                    el("span", {}, "Assessment"),
+                                    el("span", { class: "val" }, sim.risk),
+                                ]),
+                            );
+                        }
                         invResult.appendChild(el("div", { class: "help-text", style: "margin-top:8px" }, sim.verdict || ""));
+                        invResult.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "Considers liquid cash, projected horizon cash, recorded recurring costs, existing AP (" +
+                                    fmtPeso(existingAP) +
+                                    "), and optional other income. Not a guarantee.",
+                            ),
+                        );
                     }
 
                     async function runInvSim(opts) {
@@ -7840,6 +8083,8 @@
                                             { class: "txrow-sub" },
                                             (r.stock != null ? "Stock " + r.stock + " " + (r.unit || "") : "Sales-based") +
                                                 (r.daysLeft != null ? " · ~" + r.daysLeft + " days left" : "") +
+                                                (r.reorderAt != null ? " · reorder @" + r.reorderAt : "") +
+                                                (r.insufficientHistory ? " · ⚠ limited demand history" : "") +
                                                 (r.note ? " · " + r.note : ""),
                                         ),
                                     ]),
@@ -7916,10 +8161,19 @@
                             horizonDays,
                             targetDate: App.forecastTargetDate,
                             projectedRevenue,
+                            projectedCashSales,
+                            expectedArCollections,
+                            arCollectionRate,
                             projectedRecurring,
                             plannedInWindow,
+                            projectedInventorySpend,
                             projectedCash,
+                            existingAP,
+                            invValueActual,
                             avgMarginPct,
+                            cogsRatePct,
+                            forecastWarnings,
+                            lookbackDays,
                             simpleAvgMargin: costingMetrics.simpleAvgMargin,
                             productCount: costingMetrics.productCount,
                             costingPotentialRevenue: costingMetrics.totalRevenue,
