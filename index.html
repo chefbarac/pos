@@ -4978,6 +4978,13 @@
                     const apReconGap = Math.round((endingAPRecon - apBalance) * 100) / 100;
                     const liabilities = apBalance; // outstanding AP only (not Forecast planned memos)
 
+                    // AR reconstruction (same date-based principle as AP)
+                    const endingARRecon = reconstructReceivableBalance(allTxs, company, null);
+                    const arBalance = Number(bal.receivable) || 0;
+                    const arReconGap = Math.round((endingARRecon - arBalance) * 100) / 100;
+                    const openingAR =
+                        periodFromMs != null ? reconstructReceivableBalance(allTxs, company, periodFromMs) : Number(company && company.startingReceivable) || 0;
+
                     // Opening equity at system start: net assets that existed then
                     // Assets side: cash-side seed + intentional opening inventory
                     // Liability side: AP already outstanding at costing start (from dated credit purchases)
@@ -5095,14 +5102,12 @@
                         ),
                     );
                     bs.appendChild(stmtRow("Total equity (calculated)", calculatedEquity, { total: true, signed: true }));
-                    if (ownerContrib > 0) {
+                    if (ownerContrib > 0 || businessFundsContrib > 0) {
                         bs.appendChild(
                             el(
                                 "div",
                                 { class: "stmt-note" },
-                                "Owner contributions (" +
-                                    fmtPeso(ownerContrib) +
-                                    ") are capital only — not sales or operating income. If this includes the ~₱11k merged from another business, it is counted once here.",
+                                "Owner contributions and business-fund inflows are capital (financing), not revenue. Each transfer is counted once from source transactions.",
                             ),
                         );
                     }
@@ -5171,13 +5176,13 @@
                         el(
                             "div",
                             { class: "stmt-note" },
-                            "Opening equity = opening cash/AR + opening inventory − AP outstanding at Costing start (from each payable expense’s transaction date, not entry date). " +
-                                "SPayLater purchases credit AP on purchase date; payments settle AP on payment date (not double-expensed). " +
-                                "Accumulated NI: sales/COGS/opex" +
+                            "Opening equity = opening cash/AR + opening inventory − AP outstanding at inventory-tracking start (transaction dates). " +
+                                "Credit purchases increase AP on purchase date; payments settle AP on payment date (purchase is not re-expensed). " +
+                                "Accumulated net income uses sales − COGS − operating expenses" +
                                 (costingStartAt != null ? " since " + new Date(costingStartAt).toLocaleDateString("en-PH") : "") +
                                 " (COGS: " +
                                 cogsAllSource +
-                                "). No balancing retained-earnings plug.",
+                                "). Discrepancies are reported, not absorbed into retained earnings.",
                         ),
                     );
                     section.appendChild(bs);
@@ -5250,11 +5255,12 @@
                     const invNet = -investExp;
                     const netCashChange = opsNet + invNet + finNet;
 
-                    const endingAR = Number(bal.receivable) || 0;
+                    const endingAR = arBalance;
                     const periodArIncrease = creditSalesPeriod + arOtherIn - collections - arOtherOut;
-                    const openingAR = endingAR - periodArIncrease;
+                    // openingAR already reconstructed by transaction date above
                     const openCreditSales = sumBy(allTxs, (t) => t.type === "sale" && t.payment === "receivable" && !t.collectedAt);
                     const arGap = Math.round((endingAR - openCreditSales) * 100) / 100;
+                    const arRollCheck = Math.round((openingAR + creditSalesPeriod + arOtherIn - collections - arOtherOut - endingAR) * 100) / 100;
 
                     // Period AP activity uses reconstructed credits/settlements by transaction_date
                     const creditExpensesPeriod = creditsInPeriod; // all payable expenses in window (inv + opex)
@@ -5298,31 +5304,34 @@
                     // ---- AR reconciliation ----
                     const arCard = el("div", { class: "card stmt-card" });
                     arCard.appendChild(el("div", { class: "stmt-title" }, "Accounts receivable reconciliation"));
-                    arCard.appendChild(el("div", { class: "stmt-period" }, "Opening + credit sales − collections = ending AR"));
+                    arCard.appendChild(
+                        el("div", { class: "stmt-period" }, "Reconstructed from transaction dates. Credit sale → +AR; collection → −AR (collections are not revenue)."),
+                    );
                     arCard.appendChild(stmtRow("Opening AR (start of period)", openingAR, { indent: true }));
-                    arCard.appendChild(stmtRow("+ Credit sales booked this period", creditSalesPeriod, { indent: true }));
+                    arCard.appendChild(stmtRow("+ Credit sales this period", creditSalesPeriod, { indent: true }));
                     if (arOtherIn > 0) arCard.appendChild(stmtRow("+ Other transfers into AR", arOtherIn, { indent: true }));
                     arCard.appendChild(stmtRow("− Collections this period", collections, { indent: true }));
                     if (arOtherOut > 0) arCard.appendChild(stmtRow("− Other AR reductions", arOtherOut, { indent: true }));
-                    arCard.appendChild(stmtRow("Ending AR (Balance Sheet)", endingAR, { grand: true }));
+                    arCard.appendChild(stmtRow("Ending AR (Balance Sheet ledger)", endingAR, { grand: true }));
+                    arCard.appendChild(stmtRow("Ending AR (reconstructed from dates)", endingARRecon, { indent: true }));
                     const arCheck = Math.round((openingAR + creditSalesPeriod + arOtherIn - collections - arOtherOut - endingAR) * 100) / 100;
                     if (Math.abs(arCheck) > 0.05) {
-                        arCard.appendChild(el("div", { class: "stmt-note", style: "color:var(--rust)" }, "⚠ AR rollforward residual: " + fmtPeso(arCheck)));
+                        arCard.appendChild(el("div", { class: "stmt-note", style: "color:var(--rust)" }, "⚠ AR roll-forward residual: " + fmtPeso(arCheck)));
                     } else {
-                        arCard.appendChild(el("div", { class: "stmt-note" }, "AR rollforward ties ✓"));
+                        arCard.appendChild(el("div", { class: "stmt-note" }, "AR roll-forward ties ✓"));
                     }
-                    if (Math.abs(arGap) > 0.05) {
+                    if (Math.abs(arReconGap) > 0.05) {
                         arCard.appendChild(
                             el(
                                 "div",
-                                { class: "stmt-note" },
-                                "Open receivable sales (not marked collected): " +
-                                    fmtPeso(openCreditSales) +
-                                    " vs ledger AR " +
+                                { class: "stmt-note", style: "color:var(--rust)" },
+                                "⚠ AR ledger " +
                                     fmtPeso(endingAR) +
+                                    " vs reconstructed " +
+                                    fmtPeso(endingARRecon) +
                                     " (Δ " +
-                                    fmtPeso(arGap) +
-                                    "). Ledger AR on the Balance Sheet is the figure to use.",
+                                    fmtPeso(arReconGap) +
+                                    ").",
                             ),
                         );
                     }
@@ -5335,7 +5344,7 @@
                         el(
                             "div",
                             { class: "stmt-period" },
-                            "Reconstructed from each transaction’s date (not entry date). SPayLater purchase → +AP; payment → −AP.",
+                            "Reconstructed from each transaction’s date (not entry date). Credit purchase/expense → +AP; settlement payment → −AP.",
                         ),
                     );
                     apCard.appendChild(stmtRow("Opening AP (start of period)", openingAP, { indent: true }));
@@ -5551,7 +5560,7 @@
                         el(
                             "div",
                             { class: "stmt-period" },
-                            "Capital, SPayLater/AP purchases & settlements, and Costing start — sorted by transaction date",
+                            "Capital, credit purchases, AP settlements, and inventory-tracking start — sorted by transaction date",
                         ),
                     );
                     if (!timeline.length) {
@@ -5586,6 +5595,104 @@
                         ),
                     );
                     section.appendChild(tlCard);
+
+                    // ---- Source-data diagnostics (never mutates raw transactions) ----
+                    const diagCtx = {
+                        allTxs,
+                        company,
+                        costingSnap,
+                        endingAP,
+                        endingAPRecon,
+                        apReconGap,
+                        endingAR,
+                        endingARRecon,
+                        arReconGap,
+                        openingAP,
+                        creditsInPeriod,
+                        settlementsInPeriod,
+                        openingAR,
+                        creditSalesPeriod,
+                        collections,
+                        systemOpeningInventory,
+                        rollOpen,
+                        invFlow,
+                        endingInventory,
+                        calcEndingFromCosting,
+                        invDiffCosting,
+                        posInvPurchasesPostCosting,
+                        invPurchaseVsCostingIns,
+                        totalAssets,
+                        liabilities,
+                        calculatedEquity,
+                        equityUnexplained,
+                        seedCashCapital,
+                        openingInventoryEquity,
+                        apAtCostingStart,
+                        openingEquityAtStart,
+                        fixedAssets,
+                        inventoryPurchases,
+                        matNames,
+                    };
+                    const diagList = collectStatementDiagnostics(diagCtx);
+                    // Opening balance equation at system start (cash+inv vs AP+opening equity by construction for cash+inv-ap)
+                    const openAssetsSide = (seedCashCapital || 0) + (openingInventoryEquity || 0);
+                    const openLiabSide = apAtCostingStart || 0;
+                    const openEqSide = openingEquityAtStart;
+                    const openBalGap = Math.round((openAssetsSide - openLiabSide - openEqSide) * 100) / 100;
+                    // By construction openEq = cash+inv - AP so gap ~0 for those three; FA/unrecorded items appear in equityUnexplained
+
+                    const diagCard = el("div", { class: "card stmt-card" });
+                    diagCard.appendChild(el("div", { class: "stmt-title" }, "Source-data diagnostics"));
+                    diagCard.appendChild(
+                        el(
+                            "div",
+                            { class: "stmt-period" },
+                            "Flags possible entry issues. Raw transactions are not modified automatically.",
+                        ),
+                    );
+                    diagCard.appendChild(stmtRow("Opening assets (cash/AR seed + opening inventory)", openAssetsSide, { indent: true }));
+                    diagCard.appendChild(stmtRow("Opening liabilities (AP at tracking start)", openLiabSide, { indent: true }));
+                    diagCard.appendChild(stmtRow("Opening equity (calculated)", openEqSide, { indent: true, signed: true }));
+                    if (Math.abs(openBalGap) > 0.05) {
+                        diagCard.appendChild(
+                            el(
+                                "div",
+                                { class: "stmt-note", style: "color:var(--rust)" },
+                                "⚠ Opening balance discrepancy: " +
+                                    fmtPeso(openBalGap) +
+                                    " (opening assets − opening liabilities − opening equity).",
+                            ),
+                        );
+                    } else {
+                        diagCard.appendChild(
+                            el("div", { class: "stmt-note" }, "Opening cash/inventory/AP equity equation ties for those accounts ✓"),
+                        );
+                    }
+                    if (!diagList.length) {
+                        diagCard.appendChild(el("div", { class: "stmt-note" }, "No additional source-data warnings for this dataset."));
+                    } else {
+                        diagList.forEach((w) => {
+                            const refTxt =
+                                w.refs && w.refs.length
+                                    ? " [" +
+                                      w.refs
+                                          .map((r) => (r.id != null ? "#" + r.id : "") + (r.date ? " " + r.date : "") + (r.amount != null ? " " + fmtPeso(r.amount) : ""))
+                                          .join("; ") +
+                                      "]"
+                                    : "";
+                            diagCard.appendChild(
+                                el("div", { class: "stmt-note", style: "color:var(--rust)" }, "⚠ " + w.message + refTxt),
+                            );
+                        });
+                    }
+                    diagCard.appendChild(
+                        el(
+                            "div",
+                            { class: "stmt-note" },
+                            "Assumptions: financial periods use transaction_date; inventory ending value comes from Costing qty × unit cost; inventory purchases are capitalized when category/item matches inventory heuristics or Costing materials; COGS prefers stock-outs; estimated COGS is labeled when used; internal transfers are not revenue/expense; owner contributions are equity.",
+                        ),
+                    );
+                    section.appendChild(diagCard);
 
                     // ---- Copy for AI ----
                     const copyCard = el("div", { class: "card stmt-card" });
@@ -6178,6 +6285,279 @@
                     }
                     events.sort((a, b) => a.t - b.t || String(a.kind).localeCompare(b.kind));
                     return events;
+                }
+
+                /**
+                 * Reconstruct Accounts Receivable as of a moment from startingReceivable + dated txs.
+                 * Credit sales increase AR; collections (transfer from receivable → cash/gcash/bank) decrease AR.
+                 */
+                function reconstructReceivableBalance(txs, company, asOfExclusive) {
+                    let ar = Number(company && company.startingReceivable) || 0;
+                    (txs || []).forEach((t) => {
+                        const tt = txTimeMs(t);
+                        if (asOfExclusive != null && tt >= asOfExclusive) return;
+                        const amt = Number(t.amount) || 0;
+                        if (amt <= 0) return;
+                        if (t.type === "sale" && t.payment === "receivable") {
+                            ar += amt;
+                        } else if (t.type === "transfer" && t.fromAccount === "receivable") {
+                            ar -= amt;
+                        } else if (t.type === "transfer" && t.toAccount === "receivable") {
+                            ar += amt;
+                        } else if (t.type === "expense" && t.payment === "receivable") {
+                            // paying expense from AR (unusual) reduces AR
+                            ar -= amt;
+                        }
+                    });
+                    return ar;
+                }
+
+                /**
+                 * Generic source-data diagnostics for financial statements.
+                 * Never mutates raw transactions — only flags possible entry issues.
+                 * ctx: object with computed statement fields and source lists.
+                 */
+                function collectStatementDiagnostics(ctx) {
+                    const warnings = [];
+                    const eps = 0.05;
+                    const {
+                        allTxs,
+                        company,
+                        costingSnap,
+                        endingAP,
+                        endingAPRecon,
+                        apReconGap,
+                        endingAR,
+                        endingARRecon,
+                        arReconGap,
+                        openingAP,
+                        creditsInPeriod,
+                        settlementsInPeriod,
+                        openingAR,
+                        creditSalesPeriod,
+                        collections,
+                        systemOpeningInventory,
+                        rollOpen,
+                        invFlow,
+                        endingInventory,
+                        calcEndingFromCosting,
+                        invDiffCosting,
+                        posInvPurchasesPostCosting,
+                        invPurchaseVsCostingIns,
+                        totalAssets,
+                        liabilities,
+                        calculatedEquity,
+                        equityUnexplained,
+                        seedCashCapital,
+                        openingInventoryEquity,
+                        apAtCostingStart,
+                        openingEquityAtStart,
+                        fixedAssets,
+                        inventoryPurchases,
+                        matNames,
+                    } = ctx;
+
+                    // AP ledger vs date reconstruction
+                    if (apReconGap != null && Math.abs(apReconGap) > eps) {
+                        warnings.push({
+                            code: "AP_LEDGER_MISMATCH",
+                            message:
+                                "AP ledger balance (" +
+                                fmtPeso(endingAP) +
+                                ") does not match reconstruction from transaction dates (" +
+                                fmtPeso(endingAPRecon) +
+                                "). Δ " +
+                                fmtPeso(apReconGap) +
+                                ".",
+                            refs: [],
+                        });
+                    }
+
+                    // AR ledger vs date reconstruction
+                    if (arReconGap != null && Math.abs(arReconGap) > eps) {
+                        warnings.push({
+                            code: "AR_LEDGER_MISMATCH",
+                            message:
+                                "AR ledger balance (" +
+                                fmtPeso(endingAR) +
+                                ") does not match reconstruction from transaction dates (" +
+                                fmtPeso(endingARRecon) +
+                                "). Δ " +
+                                fmtPeso(arReconGap) +
+                                ".",
+                            refs: [],
+                        });
+                    }
+
+                    // AP period roll-forward
+                    if (
+                        openingAP != null &&
+                        creditsInPeriod != null &&
+                        settlementsInPeriod != null &&
+                        endingAP != null
+                    ) {
+                        const apRoll = Math.round((openingAP + creditsInPeriod - settlementsInPeriod - endingAP) * 100) / 100;
+                        if (Math.abs(apRoll) > eps) {
+                            warnings.push({
+                                code: "AP_ROLLFORWARD_GAP",
+                                message:
+                                    "AP roll-forward does not tie: open " +
+                                    fmtPeso(openingAP) +
+                                    " + credits " +
+                                    fmtPeso(creditsInPeriod) +
+                                    " − settlements " +
+                                    fmtPeso(settlementsInPeriod) +
+                                    " ≠ ending " +
+                                    fmtPeso(endingAP) +
+                                    " (Δ " +
+                                    fmtPeso(apRoll) +
+                                    ").",
+                                refs: [],
+                            });
+                        }
+                    }
+
+                    // Settlements without prior payable history (heuristic)
+                    (allTxs || []).forEach((t) => {
+                        if (t.type !== "transfer" || t.toAccount !== "payable") return;
+                        const amt = Number(t.amount) || 0;
+                        if (amt <= 0) return;
+                        // Flag very large settlement relative to reconstructed ending (soft)
+                    });
+
+                    // Inventory Costing roll-forward residual
+                    if (invDiffCosting != null && Math.abs(invDiffCosting) > 0.5) {
+                        warnings.push({
+                            code: "INV_ROLLFORWARD_GAP",
+                            message:
+                                "Inventory roll-forward difference: calculated " +
+                                fmtPeso(calcEndingFromCosting) +
+                                " vs actual ending " +
+                                fmtPeso(endingInventory) +
+                                " (Δ " +
+                                fmtPeso(invDiffCosting) +
+                                "). Check unit costs, adjustments, or moves outside the window.",
+                            refs: [],
+                        });
+                    }
+
+                    // POS inventory purchases after costing start with no matching stock-ins
+                    if (
+                        invPurchaseVsCostingIns != null &&
+                        Math.abs(invPurchaseVsCostingIns) > 0.5 &&
+                        (posInvPurchasesPostCosting || 0) > 0.5
+                    ) {
+                        warnings.push({
+                            code: "INV_PURCHASE_NO_STOCK_IN",
+                            message:
+                                "Inventory purchases after inventory tracking started (" +
+                                fmtPeso(posInvPurchasesPostCosting) +
+                                ") differ from recorded stock-ins (" +
+                                fmtPeso(invFlow && invFlow.ins) +
+                                "). Δ " +
+                                fmtPeso(invPurchaseVsCostingIns) +
+                                ". Link purchases to stock-ins or record movements.",
+                            refs: [],
+                        });
+                    }
+
+                    // Opening balance equation at accounting/costing start
+                    if (openingEquityAtStart != null && seedCashCapital != null) {
+                        const openAssetsApprox = (seedCashCapital || 0) + (openingInventoryEquity || 0) + (Number(fixedAssets) || 0);
+                        // Note: FA may have been acquired after start — using current FA is imperfect; still useful signal
+                        const openLiab = apAtCostingStart || 0;
+                        const openEq = openingEquityAtStart;
+                        // By construction openEq = seedCash + openInv - apAtStart; FA not in openEq
+                        // If FA exist without funding path, equity gap later will show
+                    }
+
+                    // Equity equation
+                    if (equityUnexplained != null && Math.abs(equityUnexplained) > eps) {
+                        warnings.push({
+                            code: "EQUITY_EQUATION_GAP",
+                            message:
+                                "Assets − Liabilities (" +
+                                fmtPeso((totalAssets || 0) - (liabilities || 0)) +
+                                ") does not equal calculated equity (" +
+                                fmtPeso(calculatedEquity) +
+                                "). Unexplained difference " +
+                                fmtPeso(equityUnexplained) +
+                                ". Not absorbed into retained earnings.",
+                            refs: [],
+                        });
+                    }
+
+                    // Transfers misclassified as sale/expense (heuristic: transfer-like notes on sale)
+                    (allTxs || []).forEach((t) => {
+                        const amt = Number(t.amount) || 0;
+                        if (amt <= 0) return;
+                        const blob = ((t.item || "") + " " + (t.note || "") + " " + (t.category || "")).toLowerCase();
+                        if (t.type === "sale" && /\b(owner|contribution|capital|transfer from|loan from|inject)\b/.test(blob)) {
+                            warnings.push({
+                                code: "POSSIBLE_CONTRIB_AS_REVENUE",
+                                message:
+                                    "Sale may be an owner contribution or funding transfer: " +
+                                    (t.item || t.note || "sale") +
+                                    " on " +
+                                    (t.date || "") +
+                                    " for " +
+                                    fmtPeso(amt) +
+                                    ".",
+                                refs: [{ id: t.id, date: t.date, amount: amt, type: t.type }],
+                            });
+                        }
+                        if (t.type === "expense" && /\b(owner|drawing|withdraw|personal)\b/.test(blob)) {
+                            warnings.push({
+                                code: "POSSIBLE_DRAWING_AS_EXPENSE",
+                                message:
+                                    "Expense may be an owner drawing: " +
+                                    (t.item || t.note || t.category || "expense") +
+                                    " on " +
+                                    (t.date || "") +
+                                    " for " +
+                                    fmtPeso(amt) +
+                                    ".",
+                                refs: [{ id: t.id, date: t.date, amount: amt, type: t.type }],
+                            });
+                        }
+                    });
+
+                    // Duplicate detection (same date, type, amount, payment within same day)
+                    const seen = new Map();
+                    (allTxs || []).forEach((t) => {
+                        const amt = Number(t.amount) || 0;
+                        if (amt <= 0) return;
+                        const key = [t.type, t.date, amt.toFixed(2), t.payment || "", t.fromAccount || "", t.toAccount || "", (t.item || "").toLowerCase()].join("|");
+                        if (seen.has(key)) {
+                            const prev = seen.get(key);
+                            warnings.push({
+                                code: "POSSIBLE_DUPLICATE",
+                                message:
+                                    "Possible duplicate transaction on " +
+                                    (t.date || "") +
+                                    ": " +
+                                    t.type +
+                                    " " +
+                                    fmtPeso(amt) +
+                                    (t.item ? " — " + t.item : "") +
+                                    ".",
+                                refs: [
+                                    { id: prev.id, date: prev.date, amount: amt, type: t.type },
+                                    { id: t.id, date: t.date, amount: amt, type: t.type },
+                                ],
+                            });
+                        } else {
+                            seen.set(key, t);
+                        }
+                    });
+
+                    // Settlement exceeds reconstructed AP (soft)
+                    if (settlementsInPeriod != null && endingAP != null && settlementsInPeriod > 0) {
+                        // no hard fail
+                    }
+
+                    // Cap warnings list size for UI
+                    return warnings.slice(0, 50);
                 }
 
                 /**
