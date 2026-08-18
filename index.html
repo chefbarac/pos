@@ -6819,22 +6819,28 @@
                     return { byAmount, byQty, all };
                 }
 
+                /**
+                 * Bucket POS line quantities by equipment-ish category keywords.
+                 * qty = sum of POS line qty for matched product names.
+                 * Unit is always "line qty as entered" — may mean pages, sheets, or jobs
+                 * depending on how the user records sales. Never converts between units.
+                 */
                 function categorizeDemand(topByQty, topByAmount) {
                     const buckets = {
-                        print: { qty: 0, amount: 0, labels: [] },
-                        laminate: { qty: 0, amount: 0, labels: [] },
-                        photo: { qty: 0, amount: 0, labels: [] },
-                        ukay: { qty: 0, amount: 0, labels: [] },
-                        supplies: { qty: 0, amount: 0, labels: [] },
-                        other: { qty: 0, amount: 0, labels: [] },
+                        print: { qty: 0, amount: 0, labels: [], unit: "line qty (print-named products)" },
+                        laminate: { qty: 0, amount: 0, labels: [], unit: "line qty (lamination products)" },
+                        photo: { qty: 0, amount: 0, labels: [], unit: "line qty (photo/ID products)" },
+                        ukay: { qty: 0, amount: 0, labels: [], unit: "line qty (apparel products)" },
+                        supplies: { qty: 0, amount: 0, labels: [], unit: "line qty (supplies products)" },
+                        other: { qty: 0, amount: 0, labels: [], unit: "line qty (uncategorized products)" },
                     };
                     function bucket(name) {
                         const n = (name || "").toLowerCase();
                         if (/laminat/.test(n)) return "laminate";
-                        if (/print|photocopy|xerox|copy|scan|document|b&w|colored|bond paper/.test(n)) return "print";
-                        if (/photo|picture|id\b|passport/.test(n)) return "photo";
+                        if (/print|photocopy|xerox|copy|scan|document|b&w|b\/w|\bbw\b|colored|bond paper|graphics/.test(n)) return "print";
+                        if (/photo|picture|\bid\b|passport/.test(n)) return "photo";
                         if (/ukay|shirt|clothes|apparel/.test(n)) return "ukay";
-                        if (/ballpen|notebook|pencil|paper|supplies/.test(n)) return "supplies";
+                        if (/ballpen|notebook|pencil|paper|supplies|glue|\bpen\b/.test(n)) return "supplies";
                         return "other";
                     }
                     const seen = new Set();
@@ -6844,22 +6850,51 @@
                         const b = bucket(t.name);
                         buckets[b].qty += Number(t.qty) || 0;
                         buckets[b].amount += Number(t.amount) || 0;
-                        buckets[b].labels.push(t.name);
+                        buckets[b].labels.push({ name: t.name, qty: Number(t.qty) || 0, amount: Number(t.amount) || 0 });
                     });
                     return buckets;
                 }
 
-                function equipmentHintsFromSales(topByQty, topByAmount) {
+                function equipmentHintsFromSales(topByQty, topByAmount, lookbackDays) {
                     const buckets = categorizeDemand(topByQty, topByAmount);
                     const ranked = Object.entries(buckets)
                         .filter(([k]) => k !== "other")
-                        .map(([key, v]) => ({ key, qty: v.qty, amount: v.amount, labels: v.labels }))
+                        .map(([key, v]) => ({ key, qty: v.qty, amount: v.amount, labels: v.labels, unit: v.unit }))
                         .filter((x) => x.qty > 0 || x.amount > 0)
                         .sort((a, b) => b.qty - a.qty || b.amount - a.amount);
 
                     const hints = [];
+                    const mismatches = [];
                     const leader = ranked[0];
                     const byKey = (k) => ranked.find((r) => r.key === k);
+                    const lb = lookbackDays || 30;
+                    const topVol = (topByQty || [])[0];
+
+                    function checkMismatch(categoryKey, categoryQty) {
+                        if (!topVol) return;
+                        const labels = buckets[categoryKey].labels || [];
+                        const inCat = labels.some((l) => l.name === topVol.name);
+                        if (!inCat && Number(topVol.qty) > 0 && Math.abs(Number(topVol.qty) - Number(categoryQty)) > 0.5) {
+                            mismatches.push({
+                                metricA: {
+                                    name: "Top product by POS line qty",
+                                    value: topVol.qty,
+                                    unit: "line qty (as entered on sale lines)",
+                                    product: topVol.name,
+                                    source: "POS topSoldItems byQty",
+                                    lookbackDays: lb,
+                                },
+                                metricB: {
+                                    name: categoryKey + " category workload",
+                                    value: categoryQty,
+                                    unit: buckets[categoryKey].unit,
+                                    product: labels.map((l) => l.name).join(", ") || "(none in category)",
+                                    source: "categorizeDemand keyword bucket on top products",
+                                    lookbackDays: lb,
+                                },
+                            });
+                        }
+                    }
 
                     const print = byKey("print");
                     const laminate = byKey("laminate");
@@ -6867,60 +6902,93 @@
                     const ukay = byKey("ukay");
 
                     if (print && (print.qty > 0 || print.amount > 0)) {
+                        checkMismatch("print", print.qty);
                         const volLead = !leader || leader.key === "print" || print.qty >= (leader.qty || 0) * 0.5;
                         hints.push({
-                            equipment: "Printer / high-volume printer",
+                            equipment: "Printer / capacity",
+                            demandMetric: "Print-category POS line quantity",
+                            volume: print.qty,
+                            unit: print.unit,
+                            revenue: print.amount,
+                            lookbackDays: lb,
+                            products: (print.labels || []).map((l) => l.name + " (" + Math.round(l.qty) + ")").join(", "),
                             reason:
-                                "Print/copy volume: ~" +
+                                "Print-category volume " +
                                 Math.round(print.qty) +
-                                " units / " +
+                                " line-qty / " +
                                 fmtPeso(print.amount) +
-                                " revenue in the lookback. " +
-                                (volLead
-                                    ? "Highest (or near-highest) unit demand — capacity or a backup unit protects throughput."
-                                    : "Meaningful print volume; weigh vs other categories by units, not only peso totals."),
+                                " over " +
+                                lb +
+                                "d. Line qty is as entered (pages, jobs, or sheets) — not auto-converted.",
                             priority: volLead || print.qty >= 20 ? "high" : "medium",
+                            confidence: "medium",
                         });
                     }
                     if (laminate && laminate.qty > 0) {
-                        // High peso / low qty should not auto-rank above print volume
                         const qtyLead = leader && leader.key === "laminate";
                         hints.push({
-                            equipment: "Laminator (or second unit)",
+                            equipment: "Laminator",
+                            demandMetric: "Lamination-category POS line quantity",
+                            volume: laminate.qty,
+                            unit: laminate.unit,
+                            revenue: laminate.amount,
+                            lookbackDays: lb,
+                            products: (laminate.labels || []).map((l) => l.name + " (" + Math.round(l.qty) + ")").join(", "),
                             reason:
-                                "Lamination: ~" +
+                                "Lamination volume " +
                                 Math.round(laminate.qty) +
-                                " units / " +
+                                " line-qty / " +
                                 fmtPeso(laminate.amount) +
-                                ". " +
-                                (qtyLead
-                                    ? "Leads by unit volume — film + reliable laminator matter."
-                                    : "May look large in ₱ if unit price is high; unit count is lower than print/copy — do not treat revenue alone as demand."),
+                                " over " +
+                                lb +
+                                "d. Rank capacity by units, not revenue alone.",
                             priority: qtyLead ? "high" : laminate.qty >= 15 ? "medium" : "low",
+                            confidence: "medium",
                         });
                     }
                     if (photo && photo.qty > 0) {
                         hints.push({
-                            equipment: "Photo printer / ID camera setup",
-                            reason: "Photo/ID: ~" + Math.round(photo.qty) + " units / " + fmtPeso(photo.amount) + " — dedicated gear helps if volume keeps growing.",
+                            equipment: "Photo / ID setup",
+                            demandMetric: "Photo-category POS line quantity",
+                            volume: photo.qty,
+                            unit: photo.unit,
+                            revenue: photo.amount,
+                            lookbackDays: lb,
+                            products: (photo.labels || []).map((l) => l.name + " (" + Math.round(l.qty) + ")").join(", "),
+                            reason: "Photo/ID volume " + Math.round(photo.qty) + " line-qty over " + lb + "d.",
                             priority: photo.qty >= 10 ? "medium" : "low",
+                            confidence: "medium",
                         });
                     }
                     if (ukay && (ukay.qty > 0 || ukay.amount > 0)) {
                         hints.push({
-                            equipment: "Display / storage for apparel",
-                            reason: "Ukay-ukay volume benefits more from display space than print hardware.",
+                            equipment: "Display / storage",
+                            demandMetric: "Apparel-category POS line quantity",
+                            volume: ukay.qty,
+                            unit: ukay.unit,
+                            revenue: ukay.amount,
+                            lookbackDays: lb,
+                            products: (ukay.labels || []).map((l) => l.name).join(", "),
+                            reason: "Apparel volume is space-driven more than print hardware.",
                             priority: "low",
+                            confidence: "low",
                         });
                     }
                     if (!hints.length && (topByQty || []).length) {
                         hints.push({
-                            equipment: "Review top SKUs by unit volume before big hardware buys",
-                            reason: "Match the next equipment peso to #1 by quantity (jobs/units), not only #1 by revenue.",
+                            equipment: "Review top SKUs by line quantity",
+                            demandMetric: "Top POS line quantity",
+                            volume: topVol ? topVol.qty : 0,
+                            unit: "line qty (as entered)",
+                            revenue: topVol ? topVol.amount : 0,
+                            lookbackDays: lb,
+                            products: topVol ? topVol.name : "",
+                            reason: "No category keyword match — use top-by-qty products for capacity decisions.",
                             priority: "low",
+                            confidence: "low",
                         });
                     }
-                    return hints;
+                    return { hints, mismatches, buckets };
                 }
 
                 /**
@@ -7385,7 +7453,9 @@
                     const arCollectionRate = 0.5; // explicit assumption — labeled in UI
                     const expectedArCollections = existingAR * arCollectionRate;
                     // Inventory replenishment cash (optional) — sum suggested order × unit cost when available
-                    const equipHints = equipmentHintsFromSales(topByQty, topByAmount);
+                    const equipResult = equipmentHintsFromSales(topByQty, topByAmount, lookbackDays);
+                    const equipHints = equipResult.hints || [];
+                    const demandMetricMismatches = equipResult.mismatches || [];
                     const replenishResult = replenishmentSuggestions(
                         costingSnap.materials || [],
                         topByQty.length ? topByQty : topItems,
@@ -7394,8 +7464,8 @@
                         {
                             moves: costingSnap.moves || [],
                             products: costingSnap.products || [],
-                            coverageDays: 30,
-                            safetyStockFactor: 0.15,
+                            coverageDays: App.forecastCoverageDays != null ? App.forecastCoverageDays : 30,
+                            safetyStockFactor: App.forecastSafetyStockFactor != null ? App.forecastSafetyStockFactor : 0,
                         },
                     );
                     const replenish = replenishResult.suggestions || [];
@@ -7501,6 +7571,31 @@
                             Math.round(topByQty[0].qty) +
                             ").";
                     }
+                    (demandMetricMismatches || []).forEach((mm) => {
+                        forecastWarnings.push({
+                            code: "DEMAND_SOURCE_UNIT_MISMATCH",
+                            message:
+                                "⚠ Forecast demand metric mismatch: " +
+                                mm.metricA.name +
+                                " = " +
+                                Math.round(mm.metricA.value) +
+                                " " +
+                                mm.metricA.unit +
+                                " (" +
+                                mm.metricA.product +
+                                ", " +
+                                mm.metricA.source +
+                                ") vs " +
+                                mm.metricB.name +
+                                " = " +
+                                Math.round(mm.metricB.value) +
+                                " " +
+                                mm.metricB.unit +
+                                " (" +
+                                mm.metricB.source +
+                                "). Values not overwritten.",
+                        });
+                    });
 
                     // ---- Controls: lookback + horizon ----
                     const ctrlCard = el("div", { class: "card" });
@@ -7635,11 +7730,23 @@
                     wrap.appendChild(el("div", { class: "section-title" }, "HISTORICAL PERFORMANCE"));
                     wrap.appendChild(
                         el("div", { class: "summary-grid" }, [
-                            summaryCard("Sales in lookback", salesStats.total, "sales"),
+                            summaryCard("Included sales (forecast baseline)", salesStats.total, "sales"),
+                            summaryCard("Excluded from forecast", salesStats.excludedTotal || 0, "expenses"),
                             summaryCard("Avg daily sales", salesStats.avgDaily, "sales"),
-                            summaryCardText("Sale count", String(salesStats.count), "sales"),
+                            summaryCardText("Included sale count", String(salesStats.count), "sales"),
+                            summaryCardText("Excluded sale count", String(salesStats.excludedCount || 0), "expenses"),
                             summaryCardText("Cash vs credit", Math.round((salesStats.cashSalesRatio || 0) * 100) + "% cash-like", "sales"),
                         ]),
+                    );
+                    wrap.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Exclude from Forecast removes sales from demand averages only — they stay in History and Financial Statements. " +
+                                "Source: POS sales with excludeFromForecast=false · lookback " +
+                                lookbackDays +
+                                "d · method: total ÷ calendar days.",
+                        ),
                     );
                     if (demandNote) {
                         wrap.appendChild(el("div", { class: "help-text" }, "Demand: " + demandNote));
@@ -7666,10 +7773,11 @@
                         summaryCard("Projected credit sales (not cash)", projectedCreditSales, "expenses"),
                         summaryCard("AR outstanding (actual)", existingAR, "sales"),
                         summaryCard(
-                            "Expected AR collections (" + Math.round(arCollectionRate * 100) + "% of AR)",
+                            "Expected AR collections (" + Math.round(arCollectionRate * 100) + "% assumption)",
                             expectedArCollections,
                             "sales",
                         ),
+                        summaryCard("Projected remaining AR", Math.max(0, existingAR - expectedArCollections), "expenses"),
                         summaryCard("Recurring costs in window", projectedRecurring, "expenses"),
                         summaryCard("Planned expenses in window", plannedInWindow, "expenses"),
                         summaryCard("Est. inventory spend", projectedInventorySpend, "expenses"),
@@ -7717,11 +7825,15 @@
                         el(
                             "div",
                             { class: "help-text" },
-                            "AR outstanding (" +
+                            "AR outstanding " +
                                 fmtPeso(existingAR) +
-                                ") is the full actual receivable balance. Expected collections are a forecast assumption (" +
+                                " (actual). Collection assumption " +
                                 Math.round(arCollectionRate * 100) +
-                                "% of that balance over the horizon) — not a second AR balance. " +
+                                "% → expected collections " +
+                                fmtPeso(expectedArCollections) +
+                                " → projected remaining AR " +
+                                fmtPeso(Math.max(0, existingAR - expectedArCollections)) +
+                                ". " +
                                 "Projected revenue " +
                                 fmtPeso(projectedRevenue) +
                                 " splits into cash-like " +
@@ -8287,6 +8399,13 @@
                     wrap.appendChild(el("div", { class: "section-title" }, "SMART SUGGESTIONS"));
                     const sugCard = el("div", { class: "card" });
                     sugCard.appendChild(el("div", { class: "chartcard-title" }, "Equipment based on recent demand"));
+                    sugCard.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Demand metric = POS line qty for keyword-matched product names (may be pages, jobs, or sheets as entered). Not auto-converted between units.",
+                        ),
+                    );
                     if (!equipHints.length) {
                         sugCard.appendChild(el("div", { class: "empty small" }, "Not enough sales history yet to suggest equipment."));
                     } else {
@@ -8296,11 +8415,58 @@
                                     el("div", { class: "txrow-main" }, [
                                         el("div", { class: "txrow-title" }, [
                                             document.createTextNode(h.equipment + " "),
-                                            el("span", { class: "badge-inv " + (h.priority === "high" ? "missing" : "ok") }, h.priority),
+                                            el(
+                                                "span",
+                                                { class: "badge-inv " + (h.priority === "high" ? "missing" : "ok") },
+                                                h.priority + (h.confidence ? " · " + h.confidence : ""),
+                                            ),
                                         ]),
-                                        el("div", { class: "txrow-sub" }, h.reason),
+                                        el(
+                                            "div",
+                                            { class: "txrow-sub" },
+                                            (h.demandMetric || "Demand") +
+                                                ": " +
+                                                Math.round(h.volume || 0) +
+                                                " " +
+                                                (h.unit || "line qty") +
+                                                (h.revenue != null ? " · " + fmtPeso(h.revenue) : "") +
+                                                (h.lookbackDays ? " · lookback " + h.lookbackDays + "d" : ""),
+                                        ),
+                                        el("div", { class: "txrow-sub" }, h.reason || ""),
+                                        h.products
+                                            ? el("div", { class: "txrow-sub" }, "Products: " + h.products)
+                                            : el("span", {}),
                                     ]),
                                 ]),
+                            );
+                        });
+                    }
+                    if (demandMetricMismatches && demandMetricMismatches.length) {
+                        demandMetricMismatches.forEach((mm) => {
+                            sugCard.appendChild(
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "color:var(--rust)" },
+                                    "⚠ Forecast demand metric mismatch — " +
+                                        mm.metricA.name +
+                                        ": " +
+                                        Math.round(mm.metricA.value) +
+                                        " " +
+                                        mm.metricA.unit +
+                                        " [" +
+                                        mm.metricA.product +
+                                        " · " +
+                                        mm.metricA.source +
+                                        "] vs " +
+                                        mm.metricB.name +
+                                        ": " +
+                                        Math.round(mm.metricB.value) +
+                                        " " +
+                                        mm.metricB.unit +
+                                        " [" +
+                                        mm.metricB.source +
+                                        "]. Both kept; neither overwritten.",
+                                ),
                             );
                         });
                     }
@@ -8309,7 +8475,7 @@
                         el(
                             "div",
                             { class: "help-text" },
-                            "Each material uses its own stock-outs, BOM×sales, or exact-name sales — never another material's daily use. Does not change inventory records.",
+                            "Formula: dailyUse = consumption/lookback; targetStock = dailyUse×coverageDays + safetyStock; suggestedOrder = ceil(max(0, target−stock)). Safety factor default 0 (no silent buffer). Est. spend = sum(suggestedQty×unitCost). Does not change inventory records.",
                         ),
                     );
                     if (!costingSnap.ok) {
@@ -8369,12 +8535,17 @@
                                             { class: "txrow-sub" },
                                             "Coverage " +
                                                 r.coverageDays +
-                                                "d · safety " +
-                                                (r.safetyStock != null ? r.safetyStock.toFixed(1) : "—") +
-                                                " · target " +
+                                                "d · safetyStock " +
+                                                (r.safetyStock != null ? r.safetyStock.toFixed(2) : "0") +
+                                                " (factor " +
+                                                (App.forecastSafetyStockFactor != null ? App.forecastSafetyStockFactor : 0) +
+                                                ") · target " +
                                                 (r.targetStock != null ? Math.ceil(r.targetStock) : "—") +
                                                 " · suggest +" +
-                                                r.suggestedQty,
+                                                r.suggestedQty +
+                                                (r.unitCost != null && r.unitCost > 0
+                                                    ? " · est. cost " + fmtPeso(r.suggestedQty * r.unitCost) + " @" + fmtPeso(r.unitCost) + "/" + (r.unit || "u")
+                                                    : " · ⚠ purchase cost unavailable"),
                                         ),
                                         el(
                                             "div",
@@ -8542,7 +8713,9 @@
                             projectedCogs,
                             investmentTest: investmentTest || invCard._lastSim || null,
                             equipHints,
+                            demandMetricMismatches,
                             replenish,
+                            replenishSkipped,
                         };
                     }
                     wrap._rebuildAiBrief = (sim) => {
