@@ -6923,38 +6923,65 @@
                     return hints;
                 }
 
-                function replenishmentSuggestions(materials, topItems, avgDailySales) {
+                /**
+                 * Replenishment suggestions with explicit method/source (explainable).
+                 * lookbackDays used to annualize matched sales qty into daily use.
+                 * Does not invent demand when no sales match — only tops up to reorder level.
+                 */
+                function replenishmentSuggestions(materials, topItems, avgDailySales, lookbackDays) {
+                    const lb = Math.max(1, Number(lookbackDays) || 30);
                     const suggestions = [];
-                    const topNames = topItems.map((t) => t.name.toLowerCase());
                     const consumableKeywords = ["bond", "paper", "film", "laminat", "ink", "toner", "photo paper", "a4", "legal"];
                     materials.forEach((m) => {
                         const name = (m.name || "").toLowerCase();
                         const isConsumable = consumableKeywords.some((k) => name.includes(k));
                         if (!isConsumable && m.reorderAt == null) return;
                         const stock = Number(m.stock) || 0;
-                        const reorder = m.reorderAt != null ? m.reorderAt : isConsumable ? 50 : null;
+                        const reorder = m.reorderAt != null ? Number(m.reorderAt) : isConsumable ? 50 : null;
                         if (reorder == null) return;
-                        // Rough daily use: if material name appears in top sold items, scale by qty share
                         let dailyUse = 0;
-                        topItems.forEach((ti) => {
-                            if (ti.name.toLowerCase().includes(name.split(" ")[0]) || name.includes(ti.name.toLowerCase().split(" ")[0])) {
-                                dailyUse += (ti.qty || 0) / 30;
+                        const matchedSales = [];
+                        (topItems || []).forEach((ti) => {
+                            const tn = (ti.name || "").toLowerCase();
+                            const token = name.split(" ")[0];
+                            if (token && (tn.includes(token) || name.includes(tn.split(" ")[0]))) {
+                                const q = Number(ti.qty) || 0;
+                                dailyUse += q / lb;
+                                matchedSales.push({ name: ti.name, qty: q, amount: Number(ti.amount) || 0 });
                             }
                         });
-                        // No invented demand: if we cannot estimate daily use from sales match, only flag reorder-level breach
                         const daysLeft = dailyUse > 0 ? stock / dailyUse : null;
-                        const belowReorder = reorder != null && stock <= reorder;
+                        const belowReorder = stock <= reorder;
                         const lowDays = daysLeft != null && daysLeft < 14;
                         if (!belowReorder && !lowDays) return;
                         const targetDays = 30;
                         let suggestedQty = 0;
+                        let method = "";
+                        let formula = "";
                         let insufficientHistory = false;
                         if (dailyUse > 0) {
                             suggestedQty = Math.max(0, Math.ceil(dailyUse * targetDays - stock));
+                            method = "sales-matched burn rate";
+                            formula =
+                                "dailyUse " +
+                                dailyUse.toFixed(2) +
+                                " = matched sales qty / " +
+                                lb +
+                                "d lookback; suggest max(0, ceil(dailyUse×" +
+                                targetDays +
+                                " − stock " +
+                                stock +
+                                "))";
                         } else {
-                            // Only top-up to reorder point when demand history is missing
-                            suggestedQty = Math.max(0, Math.ceil((reorder || 0) - stock));
+                            suggestedQty = Math.max(0, Math.ceil(reorder - stock));
                             insufficientHistory = true;
+                            method = "reorder-level top-up only";
+                            formula =
+                                "no matched sales demand; suggest max(0, reorder " +
+                                reorder +
+                                " − stock " +
+                                stock +
+                                ")";
                         }
                         suggestions.push({
                             name: m.name,
@@ -6963,24 +6990,39 @@
                             daysLeft: daysLeft != null ? Math.round(daysLeft) : null,
                             suggestedQty,
                             reorderAt: reorder,
+                            dailyUse: dailyUse > 0 ? dailyUse : null,
+                            targetDays,
+                            lookbackDays: lb,
+                            matchedSales,
+                            method,
+                            formula,
+                            unitCost: m.costPerUnit != null ? Number(m.costPerUnit) : null,
                             priority: stock <= 0 ? "critical" : daysLeft != null && daysLeft < 7 ? "high" : "medium",
                             insufficientHistory,
+                            source: "Costing material stock + POS top sales name match",
                         });
                     });
-                    // Also suggest from sales names when Costing has no materials
-                    if (!suggestions.length && topItems.length) {
+                    if (!suggestions.length && (topItems || []).length) {
                         topItems.slice(0, 5).forEach((ti) => {
-                            const n = ti.name.toLowerCase();
+                            const n = (ti.name || "").toLowerCase();
                             if (consumableKeywords.some((k) => n.includes(k)) || /paper|film|ink|toner|pen|notebook/.test(n)) {
+                                const q = Number(ti.qty) || 0;
+                                const suggestedQty = Math.max(10, Math.ceil(q * 1.2));
                                 suggestions.push({
                                     name: ti.name,
                                     stock: null,
-                                    unit: "based on sales",
+                                    unit: "sales units",
                                     daysLeft: null,
-                                    suggestedQty: Math.max(10, Math.ceil((ti.qty || 0) * 1.2)),
+                                    suggestedQty,
                                     reorderAt: null,
+                                    dailyUse: null,
+                                    method: "sales-name heuristic (no Costing stock)",
+                                    formula: "suggest max(10, ceil(lookback qty " + q + " × 1.2)) — not a stock-based reorder",
+                                    matchedSales: [{ name: ti.name, qty: q, amount: Number(ti.amount) || 0 }],
                                     priority: "medium",
-                                    note: "From recent sales volume (Costing stock not linked)",
+                                    insufficientHistory: true,
+                                    source: "POS sales only — Costing materials not linked",
+                                    note: "No Costing stock linked; treat as demand signal only",
                                 });
                             }
                         });
@@ -7112,9 +7154,13 @@
                     lines.push("Projected recurring costs in window: " + fmtPeso(ctx.projectedRecurring));
                     lines.push("Planned expenses in window: " + fmtPeso(ctx.plannedInWindow));
                     lines.push("Other income expected in window: " + fmtPeso(ctx.otherIncomeInWindow || 0));
-                    lines.push("Receivable expected (full outstanding assumed collectible): " + fmtPeso(ctx.bal.receivable));
-                    lines.push("Projected liquid cash on hand (rough): " + fmtPeso(ctx.projectedCash));
-                    lines.push("  Method: liquid + POS sales + other income + receivable − recurring − planned unpaid");
+                    lines.push("AR outstanding (actual): " + fmtPeso(ctx.bal.receivable));
+                    lines.push("Projected liquid cash: " + fmtPeso(ctx.projectedCash));
+                    lines.push(
+                        "  Cash bridge: opening liquid + cash-like sales + AR collections (" +
+                            Math.round((ctx.arCollectionRate || 0) * 100) +
+                            "% of AR) + other income − recurring − planned − est. inventory spend",
+                    );
                     lines.push("");
                     if (ctx.forecastWarnings && ctx.forecastWarnings.length) {
                         lines.push("--- Forecast confidence warnings ---");
@@ -7151,7 +7197,10 @@
                                 r.suggestedQty +
                                 " " +
                                 (r.unit || "") +
-                                (r.daysLeft != null ? " (~" + r.daysLeft + " days left)" : ""),
+                                (r.daysLeft != null ? " (~" + r.daysLeft + " days left)" : "") +
+                                (r.method ? " | method: " + r.method : "") +
+                                (r.formula ? " | " + r.formula : "") +
+                                (r.source ? " | source: " + r.source : ""),
                         ),
                     );
                     /* lines.push("");
@@ -7244,7 +7293,12 @@
                     const expectedArCollections = existingAR * arCollectionRate;
                     // Inventory replenishment cash (optional) — sum suggested order × unit cost when available
                     const equipHints = equipmentHintsFromSales(topByQty, topByAmount);
-                    const replenish = replenishmentSuggestions(costingSnap.materials || [], topByQty.length ? topByQty : topItems, salesStats.avgDaily);
+                    const replenish = replenishmentSuggestions(
+                        costingSnap.materials || [],
+                        topByQty.length ? topByQty : topItems,
+                        salesStats.avgDaily,
+                        lookbackDays,
+                    );
                     let projectedInventorySpend = 0;
                     replenish.forEach((r) => {
                         const mat = (costingSnap.materials || []).find((m) => m.name === r.name);
@@ -7294,19 +7348,47 @@
 
                     // Short demand note for AI / UI when revenue leader ≠ volume leader
                     let demandNote = "";
+                    let demandMismatch = null;
                     if (topByQty[0] && topByAmount[0] && topByQty[0].name !== topByAmount[0].name) {
+                        demandMismatch = {
+                            byVolume: {
+                                name: topByQty[0].name,
+                                qty: topByQty[0].qty,
+                                amount: topByQty[0].amount,
+                                source: "POS sales ranked by unit quantity (lookback " + lookbackDays + "d)",
+                            },
+                            byRevenue: {
+                                name: topByAmount[0].name,
+                                qty: topByAmount[0].qty,
+                                amount: topByAmount[0].amount,
+                                source: "POS sales ranked by revenue ₱ (lookback " + lookbackDays + "d)",
+                            },
+                        };
                         demandNote =
-                            "Volume leader is “" +
+                            "⚠ Forecast metric/source mismatch: volume leader “" +
                             topByQty[0].name +
                             "” (qty " +
                             Math.round(topByQty[0].qty) +
-                            "); revenue leader is “" +
+                            ", " +
+                            fmtPeso(topByQty[0].amount) +
+                            ") vs revenue leader “" +
                             topByAmount[0].name +
-                            "” (" +
+                            "” (qty " +
+                            Math.round(topByAmount[0].qty) +
+                            ", " +
                             fmtPeso(topByAmount[0].amount) +
-                            "). Prefer volume for capacity decisions.";
+                            "). Both values kept as reported — not merged or overwritten.";
+                        forecastWarnings.push({
+                            code: "DEMAND_METRIC_MISMATCH",
+                            message: demandNote,
+                        });
                     } else if (topByQty[0]) {
-                        demandNote = "Top by volume and a major revenue line: “" + topByQty[0].name + "” (qty " + Math.round(topByQty[0].qty) + ").";
+                        demandNote =
+                            "Top by volume and revenue align on “" +
+                            topByQty[0].name +
+                            "” (qty " +
+                            Math.round(topByQty[0].qty) +
+                            ").";
                     }
 
                     // ---- Controls: lookback + horizon ----
@@ -7470,7 +7552,13 @@
                     const projCards = [
                         summaryCard("Projected revenue", projectedRevenue, "sales"),
                         summaryCard("Projected cash sales", projectedCashSales, "sales"),
-                        summaryCard("Expected AR collections*", expectedArCollections, "sales"),
+                        summaryCard("Projected credit sales (not cash)", projectedCreditSales, "expenses"),
+                        summaryCard("AR outstanding (actual)", existingAR, "sales"),
+                        summaryCard(
+                            "Expected AR collections (" + Math.round(arCollectionRate * 100) + "% of AR)",
+                            expectedArCollections,
+                            "sales",
+                        ),
                         summaryCard("Recurring costs in window", projectedRecurring, "expenses"),
                         summaryCard("Planned expenses in window", plannedInWindow, "expenses"),
                         summaryCard("Est. inventory spend", projectedInventorySpend, "expenses"),
@@ -7483,22 +7571,64 @@
                         projCards.push(summaryCard("Projected COGS", projectedCogs, "expenses"));
                     }
                     wrap.appendChild(el("div", { class: "summary-grid" }, projCards));
-                    wrap.appendChild(
+
+                    // Explicit cash-flow bridge (opening → projected liquid)
+                    const bridgeCard = el("div", { class: "card" });
+                    bridgeCard.appendChild(el("div", { class: "flabel" }, "Cash-flow bridge (horizon)"));
+                    bridgeCard.appendChild(el("div", { class: "help-text" }, "How projected liquid cash is built from actual opening balances + forecast assumptions."));
+                    const bridgeRows = [
+                        ["Opening liquid cash (actual)", liquid, false],
+                        ["+ Projected cash-like sales", projectedCashSales, false],
+                        [
+                            "+ Expected AR collections (" +
+                                Math.round(arCollectionRate * 100) +
+                                "% of outstanding AR " +
+                                fmtPeso(existingAR) +
+                                ")",
+                            expectedArCollections,
+                            false,
+                        ],
+                        ["+ Other / external income in window", otherIncomeInWindowAmt, false],
+                        ["− Recurring operating costs", -projectedRecurring, true],
+                        ["− Planned expenses due in window", -plannedInWindow, true],
+                        ["− Est. inventory replenishment spend", -projectedInventorySpend, true],
+                        ["= Projected liquid cash", projectedCash, false],
+                    ];
+                    bridgeRows.forEach(([lab, amt, isOut]) => {
+                        bridgeCard.appendChild(
+                            el("div", { class: "totalsrow" + (lab.startsWith("=") ? " grand" : "") }, [
+                                el("span", {}, lab),
+                                el("span", { class: "val" }, fmtPeso(amt)),
+                            ]),
+                        );
+                    });
+                    bridgeCard.appendChild(
                         el(
                             "div",
                             { class: "help-text" },
-                            "Projected liquid ≈ opening liquid + cash-like sales + expected collections of existing AR (" +
+                            "AR outstanding (" +
+                                fmtPeso(existingAR) +
+                                ") is the full actual receivable balance. Expected collections are a forecast assumption (" +
                                 Math.round(arCollectionRate * 100) +
-                                "% assumption) + other income − recurring − planned − estimated inventory replenishment. " +
-                                "Revenue is not the same as cash. New credit sales in the horizon are not assumed collected. " +
-                                "Existing AP (" +
+                                "% of that balance over the horizon) — not a second AR balance. " +
+                                "Projected revenue " +
+                                fmtPeso(projectedRevenue) +
+                                " splits into cash-like " +
+                                fmtPeso(projectedCashSales) +
+                                " (" +
+                                Math.round(cashSalesRatio * 100) +
+                                "% historical) and credit " +
+                                fmtPeso(projectedCreditSales) +
+                                " (not assumed collected in-horizon). " +
+                                "Existing AP " +
                                 fmtPeso(existingAP) +
-                                ") is a liability already; only scheduled planned payments reduce cash again. " +
+                                " is already a liability; only planned payment rows reduce cash here. " +
                                 (avgMarginPct != null
-                                    ? "GP uses Costing weighted gross margin (" + fmtPct(avgMarginPct) + "); COGS rate " + fmtPct(cogsRatePct) + "."
+                                    ? "GP uses Costing gross margin " + fmtPct(avgMarginPct) + " (COGS rate " + fmtPct(cogsRatePct) + ")."
                                     : "⚠ No Costing margin — GP/COGS not projected."),
                         ),
                     );
+                    wrap.appendChild(bridgeCard);
 
                     // Forecast warnings
                     if (forecastWarnings.length) {
@@ -8063,30 +8193,68 @@
                             );
                         });
                     }
-                    sugCard.appendChild(el("div", { class: "chartcard-title", style: "margin-top:14px" }, "Replenishment (Costing stock + sales)"));
+                    sugCard.appendChild(el("div", { class: "chartcard-title", style: "margin-top:14px" }, "Replenishment (explainable)"));
+                    sugCard.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Each line shows method, formula, and source. Suggestions do not change inventory records.",
+                        ),
+                    );
                     if (!costingSnap.ok) {
-                        sugCard.appendChild(el("div", { class: "help-text" }, "Costing DB not reachable — suggestions fall back to sales names only. " + (costingSnap.message || "")));
+                        sugCard.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "Costing DB not reachable — sales-name heuristics only. " + (costingSnap.message || ""),
+                            ),
+                        );
                     }
                     if (!replenish.length) {
                         sugCard.appendChild(el("div", { class: "empty small" }, "No low-stock or consumable signals right now."));
                     } else {
                         replenish.forEach((r) => {
+                            const matchTxt =
+                                r.matchedSales && r.matchedSales.length
+                                    ? "Matched sales: " +
+                                      r.matchedSales
+                                          .slice(0, 3)
+                                          .map((ms) => ms.name + " qty " + Math.round(ms.qty))
+                                          .join("; ")
+                                    : "Matched sales: none";
                             sugCard.appendChild(
                                 el("div", { class: "txrow", style: "cursor:default" }, [
                                     el("div", { class: "txrow-main" }, [
                                         el("div", { class: "txrow-title" }, [
                                             document.createTextNode(r.name + " "),
-                                            el("span", { class: "badge-inv " + (r.priority === "critical" || r.priority === "high" ? "missing" : "ok") }, r.priority),
+                                            el(
+                                                "span",
+                                                {
+                                                    class:
+                                                        "badge-inv " +
+                                                        (r.priority === "critical" || r.priority === "high" ? "missing" : "ok"),
+                                                },
+                                                r.priority,
+                                            ),
                                         ]),
                                         el(
                                             "div",
                                             { class: "txrow-sub" },
-                                            (r.stock != null ? "Stock " + r.stock + " " + (r.unit || "") : "Sales-based") +
+                                            (r.stock != null ? "Stock " + r.stock + " " + (r.unit || "") : "No stock figure") +
                                                 (r.daysLeft != null ? " · ~" + r.daysLeft + " days left" : "") +
                                                 (r.reorderAt != null ? " · reorder @" + r.reorderAt : "") +
-                                                (r.insufficientHistory ? " · ⚠ limited demand history" : "") +
-                                                (r.note ? " · " + r.note : ""),
+                                                (r.dailyUse != null ? " · daily use ~" + r.dailyUse.toFixed(2) : "") +
+                                                (r.insufficientHistory ? " · ⚠ limited demand history" : ""),
                                         ),
+                                        el(
+                                            "div",
+                                            { class: "txrow-sub" },
+                                            "Method: " +
+                                                (r.method || "—") +
+                                                (r.formula ? " · " + r.formula : "") +
+                                                (r.source ? " · Source: " + r.source : ""),
+                                        ),
+                                        el("div", { class: "txrow-sub" }, matchTxt + (r.note ? " · " + r.note : "")),
                                     ]),
                                     el("div", { class: "txrow-amt sales" }, "+" + r.suggestedQty),
                                 ]),
@@ -8117,7 +8285,43 @@
                             );
                         });
                     }
-                    if (demandNote) {
+                    if (demandMismatch) {
+                        sugCard.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text", style: "margin-top:8px;color:var(--rust)" },
+                                "⚠ Forecast metric/source mismatch — both rankings kept:",
+                            ),
+                        );
+                        sugCard.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "By volume: “" +
+                                    demandMismatch.byVolume.name +
+                                    "” qty " +
+                                    Math.round(demandMismatch.byVolume.qty) +
+                                    " / " +
+                                    fmtPeso(demandMismatch.byVolume.amount) +
+                                    " — " +
+                                    demandMismatch.byVolume.source,
+                            ),
+                        );
+                        sugCard.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "By revenue: “" +
+                                    demandMismatch.byRevenue.name +
+                                    "” qty " +
+                                    Math.round(demandMismatch.byRevenue.qty) +
+                                    " / " +
+                                    fmtPeso(demandMismatch.byRevenue.amount) +
+                                    " — " +
+                                    demandMismatch.byRevenue.source,
+                            ),
+                        );
+                    } else if (demandNote) {
                         sugCard.appendChild(el("div", { class: "help-text", style: "margin-top:8px" }, demandNote));
                     }
                     wrap.appendChild(sugCard);
