@@ -3912,17 +3912,49 @@
                     }
 
                     let tenderedInp = null;
+                    let editChangeDisplay = null;
+                    let editChangeRow = null;
+                    function updateEditChangeDue() {
+                        if (!editChangeDisplay || !editChangeRow) return;
+                        const total = parseFloat(amtInp.value) || 0;
+                        const tendered = tenderedInp ? parseFloat(tenderedInp.value) || 0 : 0;
+                        const diff = tendered - total;
+                        if (!tendered) {
+                            editChangeDisplay.textContent = fmtPeso(0);
+                            editChangeRow.classList.remove("short");
+                        } else if (diff < 0) {
+                            editChangeDisplay.textContent = "Short " + fmtPeso(Math.abs(diff));
+                            editChangeRow.classList.add("short");
+                        } else {
+                            editChangeDisplay.textContent = fmtPeso(diff);
+                            editChangeRow.classList.remove("short");
+                        }
+                    }
                     if (t.type === "sale") {
                         modal.appendChild(el("label", { class: "flabel" }, "Amount Tendered (optional)"));
-                        tenderedInp = el("input", { type: "number", class: "finput", value: t.tendered != null ? t.tendered : "", min: "0", step: "0.01" });
+                        tenderedInp = el("input", {
+                            type: "number",
+                            class: "finput",
+                            value: t.tendered != null ? t.tendered : "",
+                            min: "0",
+                            step: "0.01",
+                            inputmode: "decimal",
+                            oninput: updateEditChangeDue,
+                        });
                         modal.appendChild(tenderedInp);
                         const changeNow = t.tendered != null ? +(t.tendered - t.amount).toFixed(2) : null;
-                        modal.appendChild(
-                            el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [
-                                el("span", {}, "Change Due"),
-                                el("span", { class: "val" }, changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow)),
-                            ]),
+                        editChangeDisplay = el(
+                            "span",
+                            { class: "val" },
+                            changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow),
                         );
+                        editChangeRow = el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [
+                            el("span", {}, "Change Due"),
+                            editChangeDisplay,
+                        ]);
+                        modal.appendChild(editChangeRow);
+                        // Keep change due in sync when total amount is edited
+                        amtInp.addEventListener("input", updateEditChangeDue);
                     }
 
                     modal.appendChild(el("label", { class: "flabel" }, "Date & Time"));
