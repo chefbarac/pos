@@ -1382,6 +1382,10 @@
                 let costingNamesPromise = null;
 
                 async function loadCostingProductNames(force) {
+                    if (!isCostingLinkEnabled()) {
+                        costingProductNames = new Set();
+                        return costingProductNames;
+                    }
                     if (!force && costingProductNames) return costingProductNames;
                     if (!force && costingNamesPromise) return costingNamesPromise;
                     costingNamesPromise = (async () => {
@@ -1406,6 +1410,7 @@
                 }
 
                 function hasCostingProduct(name) {
+                    if (!isCostingLinkEnabled()) return true; // link off — never flag as missing
                     if (!costingProductNames) return true; // unknown yet — don't badge until loaded
                     const key = (name || "").toLowerCase().trim();
                     if (!key) return true;
@@ -1417,6 +1422,10 @@
                 let recordedPosPromise = null;
 
                 async function loadRecordedPosSaleIds(force) {
+                    if (!isCostingLinkEnabled()) {
+                        recordedPosSaleIds = new Set();
+                        return recordedPosSaleIds;
+                    }
                     if (!force && recordedPosSaleIds) return recordedPosSaleIds;
                     if (!force && recordedPosPromise) return recordedPosPromise;
                     recordedPosPromise = (async () => {
@@ -1529,6 +1538,11 @@
                     opts = opts || {};
                     const force = !!opts.force;
                     const result = { ok: true, deducted: 0, lineStatus: [], message: "", skipped: false };
+                    if (!isCostingLinkEnabled()) {
+                        result.skipped = true;
+                        result.message = "";
+                        return result;
+                    }
                     try {
                         const cdb = await openCostingDB();
                         if (!cdb.objectStoreNames.contains("products") || !cdb.objectStoreNames.contains("stockMoves")) {
@@ -1647,6 +1661,11 @@
                  */
                 async function reverseCostingInventoryForSale(tx) {
                     const result = { ok: true, reversed: 0, message: "", skipped: false };
+                    if (!isCostingLinkEnabled()) {
+                        result.skipped = true;
+                        result.message = "";
+                        return result;
+                    }
                     if (!tx || tx.type !== "sale" || tx.id == null) {
                         result.skipped = true;
                         result.message = "Not a sale";
@@ -1868,6 +1887,19 @@
                 }
                 async function setSetting(key, value) {
                     return dbPut("settings", { key, value });
+                }
+
+                /**
+                 * Cross-app link to Costing (documentingCostingDB). OFF by default so sales
+                 * never pop “no Costing” warnings until the user opts in under Settings.
+                 */
+                function isCostingLinkEnabled() {
+                    return !!App.linkCosting;
+                }
+                async function refreshCostingLinkSetting() {
+                    const v = await getSetting("linkCosting", false);
+                    App.linkCosting = v === true || v === "true" || v === 1;
+                    return App.linkCosting;
                 }
 
                 async function listCompanies() {
@@ -2107,6 +2139,7 @@
                     metricsCustom: { from: null, to: null },
                     valuationMultiples: { low: 1.5, base: 2.0, high: 2.5 },
                     operatingHours: null, // { open: "08:00", close: "18:00", days: [1,2,3,4,5,6] } optional
+                    linkCosting: false, // Settings → Link Costing inventory (off by default)
                 };
 
                 /* ---------- Routing ---------- */
@@ -3587,7 +3620,7 @@
                             note: qs("#f-note").value.trim(),
                             createdAt: new Date().toISOString(),
                         };
-                        if (isSale) {
+                        if (isSale && isCostingLinkEnabled()) {
                             await loadCostingProductNames(false);
                             const missingNames = [...new Set(App.saleLines.map((l) => l.item).filter((n) => n && !hasCostingProduct(n)))];
                             if (missingNames.length) {
@@ -3898,7 +3931,11 @@
                             );
                         } else if (t.type === "expense" && t.payment === "payable" && !t.settledAt) {
                             modal.appendChild(
-                                el("div", { class: "help-text", style: "margin-top:8px" }, "This expense is on accounts payable. Use “Mark as paid” below when you settle it from Cash, GCash, or Bank."),
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:8px" },
+                                    "This expense is on accounts payable. Use “Mark as paid” below when you settle it from Cash, GCash, or Bank.",
+                                ),
                             );
                         } else if (t.type === "expense" && t.settledAt) {
                             modal.appendChild(
@@ -3986,9 +4023,7 @@
                         el("button", { type: "button", class: "bigbtn danger" }, "Delete"),
                         el("button", { type: "button", class: "bigbtn sale" }, "Save"),
                     ];
-                    const canMarkPaid =
-                        (t.type === "sale" && t.payment === "receivable" && !t.collectedAt) ||
-                        (t.type === "expense" && t.payment === "payable" && !t.settledAt);
+                    const canMarkPaid = (t.type === "sale" && t.payment === "receivable" && !t.collectedAt) || (t.type === "expense" && t.payment === "payable" && !t.settledAt);
                     if (canMarkPaid) {
                         btnKids.push(el("button", { type: "button", class: "bigbtn transfer", style: "flex-basis:100%" }, "Mark as paid"));
                     }
@@ -4793,7 +4828,10 @@
                 }
 
                 function medianOf(nums) {
-                    const a = (nums || []).filter((n) => isFinite(n)).slice().sort((x, y) => x - y);
+                    const a = (nums || [])
+                        .filter((n) => isFinite(n))
+                        .slice()
+                        .sort((x, y) => x - y);
                     if (!a.length) return null;
                     const mid = Math.floor(a.length / 2);
                     return a.length % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2;
@@ -4956,8 +4994,7 @@
 
                     const invPurchaseVsCostingIns = Math.round((posInvPurchasesPostCosting - invFlow.ins) * 100) / 100;
                     // Only post-costing POS purchases belong in a bridge to Costing stock-ins
-                    const calcEndingFromPosPost =
-                        Math.round((rollOpen + posInvPurchasesPostCosting - cogs) * 100) / 100;
+                    const calcEndingFromPosPost = Math.round((rollOpen + posInvPurchasesPostCosting - cogs) * 100) / 100;
                     const invDiffPosBridge = Math.round((calcEndingFromPosPost - endingInventory) * 100) / 100;
 
                     // ---- Income Statement ----
@@ -5039,12 +5076,10 @@
 
                     // Reconstruct AP from dated expenses (payment=payable) and settlements (transfer → payable)
                     const endingAPRecon = reconstructPayableBalance(allTxs, company, null);
-                    const apAtCostingStart =
-                        costingStartAt != null ? reconstructPayableBalance(allTxs, company, costingStartAt) : settingsStartingPayable;
+                    const apAtCostingStart = costingStartAt != null ? reconstructPayableBalance(allTxs, company, costingStartAt) : settingsStartingPayable;
                     const periodFromMs = periodFrom ? periodFrom.getTime() : null;
                     const periodToMs = periodTo ? periodTo.getTime() : null;
-                    const openingAP =
-                        periodFromMs != null ? reconstructPayableBalance(allTxs, company, periodFromMs) : settingsStartingPayable;
+                    const openingAP = periodFromMs != null ? reconstructPayableBalance(allTxs, company, periodFromMs) : settingsStartingPayable;
                     const creditsInPeriod = sumPayableCreditsInWindow(allTxs, periodFromMs, periodToMs);
                     const settlementsInPeriod = sumPayableSettlementsInWindow(allTxs, periodFromMs, periodToMs);
 
@@ -5057,8 +5092,7 @@
                     const endingARRecon = reconstructReceivableBalance(allTxs, company, null);
                     const arBalance = Number(bal.receivable) || 0;
                     const arReconGap = Math.round((endingARRecon - arBalance) * 100) / 100;
-                    const openingAR =
-                        periodFromMs != null ? reconstructReceivableBalance(allTxs, company, periodFromMs) : Number(company && company.startingReceivable) || 0;
+                    const openingAR = periodFromMs != null ? reconstructReceivableBalance(allTxs, company, periodFromMs) : Number(company && company.startingReceivable) || 0;
 
                     // Opening equity at system start: net assets that existed then
                     // Assets side: cash-side seed + intentional opening inventory
@@ -5088,12 +5122,7 @@
                     let cogsAll = 0;
                     let cogsAllSource = "none";
                     if (costingSnap.ok) {
-                        const allOut = computePeriodCogsFromMoves(
-                            costingSnap.moves || [],
-                            costingSnap.materials || [],
-                            costingStartDate,
-                            periodTo || new Date(),
-                        );
+                        const allOut = computePeriodCogsFromMoves(costingSnap.moves || [], costingSnap.materials || [], costingStartDate, periodTo || new Date());
                         if (allOut.hasData) {
                             cogsAll = allOut.cogs;
                             cogsAllSource = "stock-outs";
@@ -5170,11 +5199,7 @@
                         bs.appendChild(stmtRow("Business funds withdrawn", -businessFundsDraw, { indent: true, signed: true }));
                     }
                     bs.appendChild(
-                        stmtRow(
-                            costingStartAt != null ? "Accumulated net income (since Costing start)" : "Accumulated net income (all-time)",
-                            accumulatedNetIncome,
-                            { indent: true, signed: true },
-                        ),
+                        stmtRow(costingStartAt != null ? "Accumulated net income (since Costing start)" : "Accumulated net income (all-time)", accumulatedNetIncome, { indent: true, signed: true }),
                     );
                     bs.appendChild(stmtRow("Total equity (calculated)", calculatedEquity, { total: true, signed: true }));
                     if (ownerContrib > 0 || businessFundsContrib > 0) {
@@ -5379,9 +5404,7 @@
                     // ---- AR reconciliation ----
                     const arCard = el("div", { class: "card stmt-card" });
                     arCard.appendChild(el("div", { class: "stmt-title" }, "Accounts receivable reconciliation"));
-                    arCard.appendChild(
-                        el("div", { class: "stmt-period" }, "Reconstructed from transaction dates. Credit sale → +AR; collection → −AR (collections are not revenue)."),
-                    );
+                    arCard.appendChild(el("div", { class: "stmt-period" }, "Reconstructed from transaction dates. Credit sale → +AR; collection → −AR (collections are not revenue)."));
                     arCard.appendChild(stmtRow("Opening AR (start of period)", openingAR, { indent: true }));
                     arCard.appendChild(stmtRow("+ Credit sales this period", creditSalesPeriod, { indent: true }));
                     if (arOtherIn > 0) arCard.appendChild(stmtRow("+ Other transfers into AR", arOtherIn, { indent: true }));
@@ -5400,13 +5423,7 @@
                             el(
                                 "div",
                                 { class: "stmt-note", style: "color:var(--rust)" },
-                                "⚠ AR ledger " +
-                                    fmtPeso(endingAR) +
-                                    " vs reconstructed " +
-                                    fmtPeso(endingARRecon) +
-                                    " (Δ " +
-                                    fmtPeso(arReconGap) +
-                                    ").",
+                                "⚠ AR ledger " + fmtPeso(endingAR) + " vs reconstructed " + fmtPeso(endingARRecon) + " (Δ " + fmtPeso(arReconGap) + ").",
                             ),
                         );
                     }
@@ -5415,18 +5432,10 @@
                     // ---- AP reconciliation ----
                     const apCard = el("div", { class: "card stmt-card" });
                     apCard.appendChild(el("div", { class: "stmt-title" }, "Accounts payable reconciliation"));
-                    apCard.appendChild(
-                        el(
-                            "div",
-                            { class: "stmt-period" },
-                            "Reconstructed from each transaction’s date (not entry date). Credit purchase/expense → +AP; settlement payment → −AP.",
-                        ),
-                    );
+                    apCard.appendChild(el("div", { class: "stmt-period" }, "Reconstructed from each transaction’s date (not entry date). Credit purchase/expense → +AP; settlement payment → −AP."));
                     apCard.appendChild(stmtRow("Opening AP (start of period)", openingAP, { indent: true }));
                     if (Math.abs(apAtCostingStart) > 0.005 && costingStartAt != null) {
-                        apCard.appendChild(
-                            stmtRow("Memo: AP outstanding at Costing start", apAtCostingStart, { indent: true }),
-                        );
+                        apCard.appendChild(stmtRow("Memo: AP outstanding at Costing start", apAtCostingStart, { indent: true }));
                     }
                     apCard.appendChild(stmtRow("+ Credit purchases/expenses in period", creditsInPeriod, { indent: true }));
                     if (invPurchasesCredit > 0) {
@@ -5449,13 +5458,7 @@
                             el(
                                 "div",
                                 { class: "stmt-note" },
-                                "Open payable expenses (not settled): " +
-                                    fmtPeso(openPayableExpenses) +
-                                    " vs ledger AP " +
-                                    fmtPeso(endingAP) +
-                                    " (Δ " +
-                                    fmtPeso(apGap) +
-                                    ").",
+                                "Open payable expenses (not settled): " + fmtPeso(openPayableExpenses) + " vs ledger AP " + fmtPeso(endingAP) + " (Δ " + fmtPeso(apGap) + ").",
                             ),
                         );
                     }
@@ -5468,9 +5471,7 @@
                         el(
                             "div",
                             { class: "stmt-period" },
-                            costingSnap.ok
-                                ? "At cost for the Balance Sheet · potential sales value is informational only"
-                                : "Costing DB not available — open both apps on the same origin",
+                            costingSnap.ok ? "At cost for the Balance Sheet · potential sales value is informational only" : "Costing DB not available — open both apps on the same origin",
                         ),
                     );
                     if (costingSnap.ok) {
@@ -5484,7 +5485,39 @@
                             invCard.appendChild(stmtRow("Potential gross profit", potentialFGProfit || 0, { indent: true, signed: true }));
                         }
                         if (avgMargin != null) {
-                            invCard.appendChild(stmtRow("Weighted average margin", avgMargin, { indent: true, pct: true }));
+                            invCard.appendChild(stmtRow("Weighted average margin (all)", avgMargin, { indent: true, pct: true }));
+                        }
+                        const byCatReport = (costingSnap.metrics && costingSnap.metrics.byCategory) || {};
+                        const preferredReport = ["Service", "Merchandise"];
+                        const catKeysReport = Object.keys(byCatReport).sort((a, b) => {
+                            const ia = preferredReport.indexOf(a);
+                            const ib = preferredReport.indexOf(b);
+                            if (ia >= 0 && ib >= 0) return ia - ib;
+                            if (ia >= 0) return -1;
+                            if (ib >= 0) return 1;
+                            return a.localeCompare(b);
+                        });
+                        if (catKeysReport.length) {
+                            invCard.appendChild(stmtRow("Margin by category", 0, { section: true }));
+                            catKeysReport.forEach((name) => {
+                                const b = byCatReport[name];
+                                const label =
+                                    name +
+                                    " (" +
+                                    b.count +
+                                    " item" +
+                                    (b.count === 1 ? "" : "s") +
+                                    ")" +
+                                    (name === "Service" ? " · typically high" : name === "Merchandise" ? " · typically lower" : "");
+                                invCard.appendChild(
+                                    stmtRow(label, b.avgMargin != null ? b.avgMargin : 0, {
+                                        indent: true,
+                                        pct: true,
+                                        text: b.avgMargin == null ? "—" : undefined,
+                                    }),
+                                );
+                                invCard.appendChild(stmtRow(name + " potential profit", b.profit || 0, { indent: true, signed: true }));
+                            });
                         }
                         if (costingStartAt != null) {
                             invCard.appendChild(
@@ -5499,12 +5532,8 @@
                         }
 
                         invCard.appendChild(stmtRow("Historical / pre-costing (books only)", 0, { section: true }));
-                        invCard.appendChild(
-                            stmtRow("Opening inventory at Costing start (intentional)", systemOpeningInventory, { indent: true }),
-                        );
-                        invCard.appendChild(
-                            stmtRow("POS inventory purchases before Costing start", posInvAllPre, { indent: true }),
-                        );
+                        invCard.appendChild(stmtRow("Opening inventory at Costing start (intentional)", systemOpeningInventory, { indent: true }));
+                        invCard.appendChild(stmtRow("POS inventory purchases before Costing start", posInvAllPre, { indent: true }));
                         invCard.appendChild(
                             el(
                                 "div",
@@ -5519,11 +5548,7 @@
                         invCard.appendChild(stmtRow("− Stock-outs / COGS (at cost)", invFlow.outs, { indent: true }));
                         if (invFlow.adjustCount > 0) {
                             invCard.appendChild(
-                                stmtRow(
-                                    "Adjustments recorded (" + invFlow.adjustCount + " move" + (invFlow.adjustCount === 1 ? "" : "s") + ")",
-                                    0,
-                                    { indent: true, text: "see Costing" },
-                                ),
+                                stmtRow("Adjustments recorded (" + invFlow.adjustCount + " move" + (invFlow.adjustCount === 1 ? "" : "s") + ")", 0, { indent: true, text: "see Costing" }),
                             );
                         }
                         invCard.appendChild(stmtRow("= Calculated ending (Costing moves)", calcEndingFromCosting, { indent: true }));
@@ -5547,14 +5572,10 @@
                         }
 
                         invCard.appendChild(stmtRow("Post-costing POS purchase bridge", 0, { section: true }));
-                        invCard.appendChild(
-                            stmtRow("POS inventory purchases after Costing start (this period)", posInvPurchasesPostCosting, { indent: true }),
-                        );
+                        invCard.appendChild(stmtRow("POS inventory purchases after Costing start (this period)", posInvPurchasesPostCosting, { indent: true }));
                         invCard.appendChild(stmtRow("Costing stock-ins (same window)", invFlow.ins, { indent: true }));
                         invCard.appendChild(stmtRow("Post-start purchases − Costing stock-ins", invPurchaseVsCostingIns, { indent: true, signed: true }));
-                        invCard.appendChild(
-                            stmtRow("COGS on P&L (" + (cogsEstimated ? "estimated" : cogsSource) + ")", cogs, { indent: true }),
-                        );
+                        invCard.appendChild(stmtRow("COGS on P&L (" + (cogsEstimated ? "estimated" : cogsSource) + ")", cogs, { indent: true }));
                         if (Math.abs(posInvPurchasesPreCosting) > 0.005) {
                             invCard.appendChild(
                                 stmtRow("POS inventory purchases before Costing (this period, excluded from bridge)", posInvPurchasesPreCosting, {
@@ -5599,30 +5620,18 @@
                             );
                         }
                         inventoryDetail.slice(0, 6).forEach((ln) => {
-                            invCard.appendChild(
-                                stmtRow("· " + ln.name + (ln.unit ? " (" + fmtNumish(ln.stock) + " " + ln.unit + ")" : ""), ln.value, { indent: true }),
-                            );
+                            invCard.appendChild(stmtRow("· " + ln.name + (ln.unit ? " (" + fmtNumish(ln.stock) + " " + ln.unit + ")" : ""), ln.value, { indent: true }));
                         });
                         if (inventoryDetail.length > 6) {
                             invCard.appendChild(el("div", { class: "stmt-note" }, "+" + (inventoryDetail.length - 6) + " more materials"));
                         }
                         invCard.appendChild(
-                            el(
-                                "div",
-                                { class: "stmt-note" },
-                                "Potential sales value and profit are not assets, revenue, or equity — informational only from Costing product prices × sellable units.",
-                            ),
+                            el("div", { class: "stmt-note" }, "Potential sales value and profit are not assets, revenue, or equity — informational only from Costing product prices × sellable units."),
                         );
                     } else {
                         invCard.appendChild(el("div", { class: "stmt-note" }, costingSnap.message || "Link Costing on the same domain to value inventory."));
                         if (inventoryPurchases > 0) {
-                            invCard.appendChild(
-                                el(
-                                    "div",
-                                    { class: "stmt-note" },
-                                    "POS still classified " + fmtPeso(inventoryPurchases) + " as inventory purchases this period (excluded from opex).",
-                                ),
-                            );
+                            invCard.appendChild(el("div", { class: "stmt-note" }, "POS still classified " + fmtPeso(inventoryPurchases) + " as inventory purchases this period (excluded from opex)."));
                         }
                     }
                     section.appendChild(invCard);
@@ -5631,25 +5640,14 @@
                     const timeline = buildAccountingTimeline(allTxs, costingStartAt, systemOpeningInventory);
                     const tlCard = el("div", { class: "card stmt-card" });
                     tlCard.appendChild(el("div", { class: "stmt-title" }, "Accounting timeline"));
-                    tlCard.appendChild(
-                        el(
-                            "div",
-                            { class: "stmt-period" },
-                            "Capital, credit purchases, AP settlements, and inventory-tracking start — sorted by transaction date",
-                        ),
-                    );
+                    tlCard.appendChild(el("div", { class: "stmt-period" }, "Capital, credit purchases, AP settlements, and inventory-tracking start — sorted by transaction date"));
                     if (!timeline.length) {
                         tlCard.appendChild(el("div", { class: "stmt-note" }, "No capital or AP events found yet."));
                     } else {
                         const maxShow = 40;
                         timeline.slice(0, maxShow).forEach((ev) => {
                             const when = ev.t ? new Date(ev.t).toLocaleString("en-PH") : "—";
-                            tlCard.appendChild(
-                                el("div", { class: "stmt-row indent" }, [
-                                    el("span", {}, when + " · " + ev.label),
-                                    el("span", { class: "stmt-amt" }, ev.detail || ""),
-                                ]),
-                            );
+                            tlCard.appendChild(el("div", { class: "stmt-row indent" }, [el("span", {}, when + " · " + ev.label), el("span", { class: "stmt-amt" }, ev.detail || "")]));
                         });
                         if (timeline.length > maxShow) {
                             tlCard.appendChild(el("div", { class: "stmt-note" }, "+" + (timeline.length - maxShow) + " more events"));
@@ -5718,13 +5716,7 @@
 
                     const diagCard = el("div", { class: "card stmt-card" });
                     diagCard.appendChild(el("div", { class: "stmt-title" }, "Source-data diagnostics"));
-                    diagCard.appendChild(
-                        el(
-                            "div",
-                            { class: "stmt-period" },
-                            "Flags possible entry issues. Raw transactions are not modified automatically.",
-                        ),
-                    );
+                    diagCard.appendChild(el("div", { class: "stmt-period" }, "Flags possible entry issues. Raw transactions are not modified automatically."));
                     diagCard.appendChild(stmtRow("Opening assets (cash/AR seed + opening inventory)", openAssetsSide, { indent: true }));
                     diagCard.appendChild(stmtRow("Opening liabilities (AP at tracking start)", openLiabSide, { indent: true }));
                     diagCard.appendChild(stmtRow("Opening equity (calculated)", openEqSide, { indent: true, signed: true }));
@@ -5733,15 +5725,11 @@
                             el(
                                 "div",
                                 { class: "stmt-note", style: "color:var(--rust)" },
-                                "⚠ Opening balance discrepancy: " +
-                                    fmtPeso(openBalGap) +
-                                    " (opening assets − opening liabilities − opening equity).",
+                                "⚠ Opening balance discrepancy: " + fmtPeso(openBalGap) + " (opening assets − opening liabilities − opening equity).",
                             ),
                         );
                     } else {
-                        diagCard.appendChild(
-                            el("div", { class: "stmt-note" }, "Opening cash/inventory/AP equity equation ties for those accounts ✓"),
-                        );
+                        diagCard.appendChild(el("div", { class: "stmt-note" }, "Opening cash/inventory/AP equity equation ties for those accounts ✓"));
                     }
                     if (!diagList.length) {
                         diagCard.appendChild(el("div", { class: "stmt-note" }, "No additional source-data warnings for this dataset."));
@@ -5749,15 +5737,9 @@
                         diagList.forEach((w) => {
                             const refTxt =
                                 w.refs && w.refs.length
-                                    ? " [" +
-                                      w.refs
-                                          .map((r) => (r.id != null ? "#" + r.id : "") + (r.date ? " " + r.date : "") + (r.amount != null ? " " + fmtPeso(r.amount) : ""))
-                                          .join("; ") +
-                                      "]"
+                                    ? " [" + w.refs.map((r) => (r.id != null ? "#" + r.id : "") + (r.date ? " " + r.date : "") + (r.amount != null ? " " + fmtPeso(r.amount) : "")).join("; ") + "]"
                                     : "";
-                            diagCard.appendChild(
-                                el("div", { class: "stmt-note", style: "color:var(--rust)" }, "⚠ " + w.message + refTxt),
-                            );
+                            diagCard.appendChild(el("div", { class: "stmt-note", style: "color:var(--rust)" }, "⚠ " + w.message + refTxt));
                         });
                     }
                     diagCard.appendChild(
@@ -5833,12 +5815,7 @@
                               "\nMaterials: " +
                               (costingSnap.materials || []).length +
                               (inventoryBelowReorder ? "\nBelow reorder: " + inventoryBelowReorder : "") +
-                              (potentialFGRevenue != null
-                                  ? "\nPotential sales value: " +
-                                    fmtPeso(potentialFGRevenue) +
-                                    "\nPotential gross profit: " +
-                                    fmtPeso(potentialFGProfit || 0)
-                                  : "") +
+                              (potentialFGRevenue != null ? "\nPotential sales value: " + fmtPeso(potentialFGRevenue) + "\nPotential gross profit: " + fmtPeso(potentialFGProfit || 0) : "") +
                               (avgMargin != null ? "\nWeighted avg margin: " + fmtPct(avgMargin) : "") +
                               "\nCosting start opening inventory (intentional): " +
                               fmtPeso(systemOpeningInventory) +
@@ -5910,7 +5887,6 @@
                     if (n == null || !isFinite(Number(n))) return "—";
                     return Number(n).toFixed(1).replace(/\.0$/, "") + "%";
                 }
-
 
                 /* ---------- BUSINESS METRICS & VALUATION ---------- */
                 /**
@@ -6202,15 +6178,9 @@
                     const bounds = reportPeriodBounds(App.metricsRange, App.metricsCustom);
                     const periodFrom = bounds.from;
                     const periodTo = bounds.to;
-                    const periodTxs =
-                        periodFrom == null
-                            ? allTxs
-                            : allTxs.filter((t) => inRange(t.date, periodFrom, periodTo));
+                    const periodTxs = periodFrom == null ? allTxs : allTxs.filter((t) => inRange(t.date, periodFrom, periodTo));
                     const prevBounds = previousPeriodBounds(periodFrom || startOfDay(new Date(0)), periodTo || endOfDay(new Date()));
-                    const prevTxs =
-                        prevBounds.from && prevBounds.to
-                            ? allTxs.filter((t) => inRange(t.date, prevBounds.from, prevBounds.to))
-                            : [];
+                    const prevTxs = prevBounds.from && prevBounds.to ? allTxs.filter((t) => inRange(t.date, prevBounds.from, prevBounds.to)) : [];
 
                     const cur = aggregateSalesMetrics(periodTxs);
                     const prev = aggregateSalesMetrics(prevTxs);
@@ -6246,7 +6216,11 @@
                         el("div", { class: "summary-grid" }, [
                             summaryCard("Total revenue", cur.revenue, "sales"),
                             summaryCardText("vs prior period", prev.revenue || prev.txnCount ? fmtPeso(prev.revenue) : "n/a", ""),
-                            summaryCardText("Revenue growth", revenueGrowth != null ? fmtGrowth(revenueGrowth) : "Insufficient data", revenueGrowth != null && revenueGrowth >= 0 ? "sales" : "expenses"),
+                            summaryCardText(
+                                "Revenue growth",
+                                revenueGrowth != null ? fmtGrowth(revenueGrowth) : "Insufficient data",
+                                revenueGrowth != null && revenueGrowth >= 0 ? "sales" : "expenses",
+                            ),
                             summaryCard("Avg transaction", cur.avgTxn, "sales"),
                         ]),
                     );
@@ -6256,12 +6230,7 @@
                         bits.push("Prior period revenue: " + fmtPeso(prev.revenue));
                         bits.push("Source: POS sales only (excludes transfers)");
                         if (cur.excludedCount) {
-                            bits.push(
-                                "Excluded from metrics (excl. forecast): " +
-                                    cur.excludedCount +
-                                    " sale(s) · " +
-                                    fmtPeso(cur.excludedRevenue),
-                            );
+                            bits.push("Excluded from metrics (excl. forecast): " + cur.excludedCount + " sale(s) · " + fmtPeso(cur.excludedRevenue));
                         }
                         wrap.appendChild(el("div", { class: "help-text" }, bits.join(" · ") + "."));
                     } else if (cur.excludedCount) {
@@ -6269,11 +6238,7 @@
                             el(
                                 "div",
                                 { class: "help-text" },
-                                "Excluded from metrics (excl. forecast): " +
-                                    cur.excludedCount +
-                                    " sale(s) · " +
-                                    fmtPeso(cur.excludedRevenue) +
-                                    " — same rule as Forecast demand baseline.",
+                                "Excluded from metrics (excl. forecast): " + cur.excludedCount + " sale(s) · " + fmtPeso(cur.excludedRevenue) + " — same rule as Forecast demand baseline.",
                             ),
                         );
                     }
@@ -6292,9 +6257,7 @@
                             "div",
                             { class: "help-text" },
                             "A transaction is one completed sale/order — not unique customers. " +
-                                (cur.operatingDays
-                                    ? "Transactions per operating day: " + (cur.txnCount / cur.operatingDays).toFixed(1) + "."
-                                    : "No sales days in this period."),
+                                (cur.operatingDays ? "Transactions per operating day: " + (cur.txnCount / cur.operatingDays).toFixed(1) + "." : "No sales days in this period."),
                         ),
                     );
 
@@ -6314,13 +6277,7 @@
                             ]),
                         );
                     } else {
-                        wrap.appendChild(
-                            el(
-                                "div",
-                                { class: "help-text" },
-                                "Configure optional operating hours below to unlock revenue/profit per hour. Not required for other metrics.",
-                            ),
-                        );
+                        wrap.appendChild(el("div", { class: "help-text" }, "Configure optional operating hours below to unlock revenue/profit per hour. Not required for other metrics."));
                     }
 
                     // ---- Profitability ----
@@ -6343,12 +6300,7 @@
                               ? "COGS estimated from Costing average product margin — label as estimated."
                               : "COGS unavailable (no Costing consumption data). Treated as ₱0 for display.";
                     wrap.appendChild(
-                        el(
-                            "div",
-                            { class: "help-text" },
-                            cogsNote +
-                                " Inventory purchases are not treated as opex when Costing materials are linked. Same model as Financial Statements.",
-                        ),
+                        el("div", { class: "help-text" }, cogsNote + " Inventory purchases are not treated as opex when Costing materials are linked. Same model as Financial Statements."),
                     );
                     if (gpGrowth != null || netGrowth != null) {
                         wrap.appendChild(
@@ -6369,8 +6321,7 @@
                     wrap.appendChild(el("div", { class: "section-title" }, "SERVICE / PRODUCT PERFORMANCE"));
                     const itemRows = Object.values(cur.byItem)
                         .map((it) => {
-                            const estCogs =
-                                pl.avgMargin != null && it.revenue > 0 ? it.revenue * (1 - pl.avgMargin / 100) : null;
+                            const estCogs = pl.avgMargin != null && it.revenue > 0 ? it.revenue * (1 - pl.avgMargin / 100) : null;
                             const gp = estCogs != null ? it.revenue - estCogs : null;
                             const gm = it.revenue > 0 && gp != null ? (gp / it.revenue) * 100 : null;
                             const share = cur.revenue > 0 ? (it.revenue / cur.revenue) * 100 : 0;
@@ -6394,17 +6345,7 @@
                             perfCard.appendChild(
                                 el("div", { class: "toprow" }, [
                                     el("span", { class: "toprow-rank" }, String(i + 1)),
-                                    el(
-                                        "span",
-                                        { class: "toprow-name" },
-                                        r.name +
-                                            " · qty " +
-                                            Math.round(r.qty) +
-                                            (r.gm != null ? " · GM " + fmtPct(r.gm) : "") +
-                                            " · " +
-                                            r.share.toFixed(0) +
-                                            "%",
-                                    ),
+                                    el("span", { class: "toprow-name" }, r.name + " · qty " + Math.round(r.qty) + (r.gm != null ? " · GM " + fmtPct(r.gm) : "") + " · " + r.share.toFixed(0) + "%"),
                                     el("span", { class: "toprow-amt" }, fmtPeso(r.revenue)),
                                 ]),
                             );
@@ -6489,21 +6430,13 @@
                             ]),
                         );
                         if (n) {
-                            timeCard.appendChild(
-                                el("div", { class: "help-text", style: "margin:-4px 0 6px 102px" }, n + " txn · avg " + fmtPeso(avg)),
-                            );
+                            timeCard.appendChild(el("div", { class: "help-text", style: "margin:-4px 0 6px 102px" }, n + " txn · avg " + fmtPeso(avg)));
                         }
                     });
                     const peakDay = order.reduce((best, di) => (cur.byDow[di] > cur.byDow[best] ? di : best), order[0]);
                     const weakDay = order.reduce((best, di) => (cur.byDow[di] < cur.byDow[best] ? di : best), order[0]);
                     if (cur.revenue > 0) {
-                        timeCard.appendChild(
-                            el(
-                                "div",
-                                { class: "help-text" },
-                                "Strongest: " + dayNames[peakDay] + " · Weakest: " + dayNames[weakDay] + ".",
-                            ),
-                        );
+                        timeCard.appendChild(el("div", { class: "help-text" }, "Strongest: " + dayNames[peakDay] + " · Weakest: " + dayNames[weakDay] + "."));
                     }
 
                     timeCard.appendChild(el("div", { class: "chartcard-title", style: "margin-top:14px" }, "Sales by hour"));
@@ -6564,13 +6497,7 @@
                     // ---- Business valuation ----
                     wrap.appendChild(el("div", { class: "section-title" }, "BUSINESS VALUE"));
                     const valCard = el("div", { class: "card" });
-                    valCard.appendChild(
-                        el(
-                            "div",
-                            { class: "help-text" },
-                            "Management estimate / planning tool — not a professional appraisal or market selling price.",
-                        ),
-                    );
+                    valCard.appendChild(el("div", { class: "help-text" }, "Management estimate / planning tool — not a professional appraisal or market selling price."));
 
                     const totalAssets = liquid + (bal.receivable || 0) + pl.inventoryValue + assetValue;
                     const totalLiab = bal.payable || 0;
@@ -6600,13 +6527,7 @@
                         valCard.appendChild(el("div", { class: "empty small" }, "Insufficient historical data to annualize profit."));
                     } else {
                         valCard.appendChild(stmtRow("Annualized sustainable profit (from period)", annualizedProfit, { signed: true }));
-                        valCard.appendChild(
-                            el(
-                                "div",
-                                { class: "help-text" },
-                                "Annualized = period net income ÷ period days × 365. Adjust multiples for risk and growth.",
-                            ),
-                        );
+                        valCard.appendChild(el("div", { class: "help-text" }, "Annualized = period net income ÷ period days × 365. Adjust multiples for risk and growth."));
                         const multRow = el("div", { class: "frow", style: "margin-top:8px" });
                         ["low", "base", "high"].forEach((k) => {
                             const col = el("div", { class: "fcol" });
@@ -6659,9 +6580,7 @@
                     if (health.score == null) {
                         healthCard.appendChild(el("div", { class: "empty small" }, health.message || "Insufficient data"));
                     } else {
-                        healthCard.appendChild(
-                            el("div", { class: "hero-amount", style: "color:var(--ink);font-size:36px" }, health.score + " / 100"),
-                        );
+                        healthCard.appendChild(el("div", { class: "hero-amount", style: "color:var(--ink);font-size:36px" }, health.score + " / 100"));
                         healthCard.appendChild(el("div", { class: "hero-label", style: "color:var(--ink-soft)" }, "BUSINESS HEALTH SCORE"));
                         const pos = health.checks.filter((c) => c.ok);
                         const neg = health.checks.filter((c) => !c.ok);
@@ -6679,13 +6598,7 @@
                     // ---- Optional operating hours ----
                     wrap.appendChild(el("div", { class: "section-title" }, "OPTIONAL · OPERATING HOURS"));
                     const ohCard = el("div", { class: "card form" });
-                    ohCard.appendChild(
-                        el(
-                            "div",
-                            { class: "help-text" },
-                            "Optional. Enables revenue and profit per operating hour. Does not affect POS checkout.",
-                        ),
-                    );
+                    ohCard.appendChild(el("div", { class: "help-text" }, "Optional. Enables revenue and profit per operating hour. Does not affect POS checkout."));
                     const oh = App.operatingHours || { open: "08:00", close: "18:00" };
                     const ohRow = el("div", { class: "frow" });
                     const openInp = el("input", { type: "time", class: "finput", value: oh.open || "08:00" });
@@ -6702,17 +6615,10 @@
                     ohCard.appendChild(saveOh);
                     wrap.appendChild(ohCard);
 
-                    wrap.appendChild(
-                        el(
-                            "div",
-                            { class: "footnote" },
-                            "Business Metrics · calculated on demand from POS transactions · same accounting rules as Reports & Forecast",
-                        ),
-                    );
+                    wrap.appendChild(el("div", { class: "footnote" }, "Business Metrics · calculated on demand from POS transactions · same accounting rules as Reports & Forecast"));
 
                     return wrap;
                 }
-
 
                 /* ---------- FORECAST ---------- */
                 const DEFAULT_ASSET_SEED = [
@@ -6983,22 +6889,24 @@
                     const invByCat = {};
                     const opexByCat = {};
                     const invTxIds = new Set();
-                    (txs || []).filter((t) => t.type === "expense").forEach((t) => {
-                        const lines = txLines(t);
-                        lines.forEach((ln) => {
-                            const cat = ln.category || t.category || "Other";
-                            const item = ln.item || t.item || "";
-                            const amt = Number(ln.amount) || 0;
-                            if (isInventoryPurchaseLine(cat, item, materialNameSet)) {
-                                invTotal += amt;
-                                invByCat[cat] = (invByCat[cat] || 0) + amt;
-                                if (t.id != null) invTxIds.add(t.id);
-                            } else {
-                                opexTotal += amt;
-                                opexByCat[cat] = (opexByCat[cat] || 0) + amt;
-                            }
+                    (txs || [])
+                        .filter((t) => t.type === "expense")
+                        .forEach((t) => {
+                            const lines = txLines(t);
+                            lines.forEach((ln) => {
+                                const cat = ln.category || t.category || "Other";
+                                const item = ln.item || t.item || "";
+                                const amt = Number(ln.amount) || 0;
+                                if (isInventoryPurchaseLine(cat, item, materialNameSet)) {
+                                    invTotal += amt;
+                                    invByCat[cat] = (invByCat[cat] || 0) + amt;
+                                    if (t.id != null) invTxIds.add(t.id);
+                                } else {
+                                    opexTotal += amt;
+                                    opexByCat[cat] = (opexByCat[cat] || 0) + amt;
+                                }
+                            });
                         });
-                    });
                     return {
                         invTotal,
                         opexTotal,
@@ -7164,9 +7072,7 @@
                                 amount: amt,
                             });
                         } else if (t.type === "expense" && t.payment === "payable") {
-                            const invish = /stock|restock|inventory|spay|spaylater|paper|ink|film|laminat/i.test(
-                                (t.category || "") + " " + (t.item || "") + " " + (t.note || ""),
-                            );
+                            const invish = /stock|restock|inventory|spay|spaylater|paper|ink|film|laminat/i.test((t.category || "") + " " + (t.item || "") + " " + (t.note || ""));
                             events.push({
                                 t: tt,
                                 kind: "ap-credit",
@@ -7272,13 +7178,7 @@
                         warnings.push({
                             code: "AP_LEDGER_MISMATCH",
                             message:
-                                "AP ledger balance (" +
-                                fmtPeso(endingAP) +
-                                ") does not match reconstruction from transaction dates (" +
-                                fmtPeso(endingAPRecon) +
-                                "). Δ " +
-                                fmtPeso(apReconGap) +
-                                ".",
+                                "AP ledger balance (" + fmtPeso(endingAP) + ") does not match reconstruction from transaction dates (" + fmtPeso(endingAPRecon) + "). Δ " + fmtPeso(apReconGap) + ".",
                             refs: [],
                         });
                     }
@@ -7288,24 +7188,13 @@
                         warnings.push({
                             code: "AR_LEDGER_MISMATCH",
                             message:
-                                "AR ledger balance (" +
-                                fmtPeso(endingAR) +
-                                ") does not match reconstruction from transaction dates (" +
-                                fmtPeso(endingARRecon) +
-                                "). Δ " +
-                                fmtPeso(arReconGap) +
-                                ".",
+                                "AR ledger balance (" + fmtPeso(endingAR) + ") does not match reconstruction from transaction dates (" + fmtPeso(endingARRecon) + "). Δ " + fmtPeso(arReconGap) + ".",
                             refs: [],
                         });
                     }
 
                     // AP period roll-forward
-                    if (
-                        openingAP != null &&
-                        creditsInPeriod != null &&
-                        settlementsInPeriod != null &&
-                        endingAP != null
-                    ) {
+                    if (openingAP != null && creditsInPeriod != null && settlementsInPeriod != null && endingAP != null) {
                         const apRoll = Math.round((openingAP + creditsInPeriod - settlementsInPeriod - endingAP) * 100) / 100;
                         if (Math.abs(apRoll) > eps) {
                             warnings.push({
@@ -7352,11 +7241,7 @@
                     }
 
                     // POS inventory purchases after costing start with no matching stock-ins
-                    if (
-                        invPurchaseVsCostingIns != null &&
-                        Math.abs(invPurchaseVsCostingIns) > 0.5 &&
-                        (posInvPurchasesPostCosting || 0) > 0.5
-                    ) {
+                    if (invPurchaseVsCostingIns != null && Math.abs(invPurchaseVsCostingIns) > 0.5 && (posInvPurchasesPostCosting || 0) > 0.5) {
                         warnings.push({
                             code: "INV_PURCHASE_NO_STOCK_IN",
                             message:
@@ -7405,28 +7290,14 @@
                         if (t.type === "sale" && /\b(owner|contribution|capital|transfer from|loan from|inject)\b/.test(blob)) {
                             warnings.push({
                                 code: "POSSIBLE_CONTRIB_AS_REVENUE",
-                                message:
-                                    "Sale may be an owner contribution or funding transfer: " +
-                                    (t.item || t.note || "sale") +
-                                    " on " +
-                                    (t.date || "") +
-                                    " for " +
-                                    fmtPeso(amt) +
-                                    ".",
+                                message: "Sale may be an owner contribution or funding transfer: " + (t.item || t.note || "sale") + " on " + (t.date || "") + " for " + fmtPeso(amt) + ".",
                                 refs: [{ id: t.id, date: t.date, amount: amt, type: t.type }],
                             });
                         }
                         if (t.type === "expense" && /\b(owner|drawing|withdraw|personal)\b/.test(blob)) {
                             warnings.push({
                                 code: "POSSIBLE_DRAWING_AS_EXPENSE",
-                                message:
-                                    "Expense may be an owner drawing: " +
-                                    (t.item || t.note || t.category || "expense") +
-                                    " on " +
-                                    (t.date || "") +
-                                    " for " +
-                                    fmtPeso(amt) +
-                                    ".",
+                                message: "Expense may be an owner drawing: " + (t.item || t.note || t.category || "expense") + " on " + (t.date || "") + " for " + fmtPeso(amt) + ".",
                                 refs: [{ id: t.id, date: t.date, amount: amt, type: t.type }],
                             });
                         }
@@ -7442,15 +7313,7 @@
                             const prev = seen.get(key);
                             warnings.push({
                                 code: "POSSIBLE_DUPLICATE",
-                                message:
-                                    "Possible duplicate transaction on " +
-                                    (t.date || "") +
-                                    ": " +
-                                    t.type +
-                                    " " +
-                                    fmtPeso(amt) +
-                                    (t.item ? " — " + t.item : "") +
-                                    ".",
+                                message: "Possible duplicate transaction on " + (t.date || "") + ": " + t.type + " " + fmtPeso(amt) + (t.item ? " — " + t.item : "") + ".",
                                 refs: [
                                     { id: prev.id, date: prev.date, amount: amt, type: t.type },
                                     { id: t.id, date: t.date, amount: amt, type: t.type },
@@ -7502,9 +7365,14 @@
                         moves: [],
                         ok: false,
                         message: "",
+                        metrics: {},
                         costingStartAt: null,
                         openingInventoryAtStart: 0,
                     };
+                    if (!isCostingLinkEnabled()) {
+                        result.message = "Costing link is off — enable in Settings → Link Costing inventory";
+                        return result;
+                    }
                     try {
                         const cdb = await openCostingDB();
                         if (!cdb.objectStoreNames.contains("materials")) {
@@ -7579,6 +7447,7 @@
                         totalRevenue: 0,
                         totalProfit: 0,
                         simpleAvgMargin: null,
+                        byCategory: {},
                     };
                     if (!products || !products.length) return empty;
 
@@ -7627,6 +7496,7 @@
                         unitsSum = 0,
                         simpleMarginSum = 0,
                         simpleCount = 0;
+                    const byCat = {};
 
                     products.forEach((p) => {
                         const cost = (p.costItems || []).reduce((s, c) => s + (Number(c.amount) || 0), 0);
@@ -7645,6 +7515,42 @@
                             simpleMarginSum += margin;
                             simpleCount++;
                         }
+
+                        // Service / Merchandise (and any other Costing category)
+                        const catKey = (p.category || "").trim() || "Uncategorized";
+                        if (!byCat[catKey]) {
+                            byCat[catKey] = {
+                                count: 0,
+                                cost: 0,
+                                revenue: 0,
+                                profit: 0,
+                                marginWeighted: 0,
+                                unitsSum: 0,
+                                simpleMarginSum: 0,
+                                simpleCount: 0,
+                                avgMargin: null,
+                                simpleAvgMargin: null,
+                            };
+                        }
+                        const bucket = byCat[catKey];
+                        bucket.count += 1;
+                        bucket.cost += units * cost;
+                        bucket.revenue += units * price;
+                        bucket.profit = bucket.revenue - bucket.cost;
+                        if (units > 0 && isFinite(margin)) {
+                            bucket.marginWeighted += margin * units;
+                            bucket.unitsSum += units;
+                        }
+                        if (price > 0 && isFinite(margin)) {
+                            bucket.simpleMarginSum += margin;
+                            bucket.simpleCount++;
+                        }
+                    });
+
+                    Object.keys(byCat).forEach((k) => {
+                        const b = byCat[k];
+                        b.avgMargin = b.unitsSum ? b.marginWeighted / b.unitsSum : b.simpleCount ? b.simpleMarginSum / b.simpleCount : null;
+                        b.simpleAvgMargin = b.simpleCount ? b.simpleMarginSum / b.simpleCount : null;
                     });
 
                     const totalProfit = totalRevenue - totalCost;
@@ -7656,6 +7562,7 @@
                         totalCost,
                         totalRevenue,
                         totalProfit,
+                        byCategory: byCat,
                     };
                 }
 
@@ -7812,14 +7719,7 @@
                             revenue: laminate.amount,
                             lookbackDays: lb,
                             products: (laminate.labels || []).map((l) => l.name + " (" + Math.round(l.qty) + ")").join(", "),
-                            reason:
-                                "Lamination volume " +
-                                Math.round(laminate.qty) +
-                                " line-qty / " +
-                                fmtPeso(laminate.amount) +
-                                " over " +
-                                lb +
-                                "d. Rank capacity by units, not revenue alone.",
+                            reason: "Lamination volume " + Math.round(laminate.qty) + " line-qty / " + fmtPeso(laminate.amount) + " over " + lb + "d. Rank capacity by units, not revenue alone.",
                             priority: qtyLead ? "high" : laminate.qty >= 15 ? "medium" : "low",
                             confidence: "medium",
                         });
@@ -7915,9 +7815,7 @@
                         let qty = 0;
                         const links = [];
                         (products || []).forEach((p) => {
-                            const lines = (p.costItems || []).filter(
-                                (c) => c.materialId != null && String(c.materialId) === String(materialId) && !c.optional && Number(c.invQty) > 0,
-                            );
+                            const lines = (p.costItems || []).filter((c) => c.materialId != null && String(c.materialId) === String(materialId) && !c.optional && Number(c.invQty) > 0);
                             if (!lines.length) return;
                             const pname = (p.name || "").toLowerCase().trim();
                             const sold = salesQtyByName[pname] || 0;
@@ -7962,12 +7860,7 @@
                             method = "actual stock-outs";
                             confidence = "high";
                             source = "Costing stockMoves type=out for materialId " + m.id + " (" + outs.moveCount + " moves in lookback)";
-                            formula =
-                                "consumption " +
-                                historicalConsumption +
-                                " from stock-outs / " +
-                                lb +
-                                "d lookback";
+                            formula = "consumption " + historicalConsumption + " from stock-outs / " + lb + "d lookback";
                         } else {
                             const bom = bomConsumptionForMaterial(m.id);
                             if (bom.qty > 0) {
@@ -7976,12 +7869,7 @@
                                 confidence = "medium";
                                 source = "Product costItems (invQty) × POS sales qty by exact product name";
                                 detailLinks = bom.links;
-                                formula =
-                                    "consumption " +
-                                    historicalConsumption +
-                                    " = Σ(product sold qty × material per unit) over " +
-                                    lb +
-                                    "d";
+                                formula = "consumption " + historicalConsumption + " = Σ(product sold qty × material per unit) over " + lb + "d";
                             } else {
                                 const exactQty = exactNameSalesQty(m.name);
                                 if (exactQty > 0) {
@@ -7992,9 +7880,9 @@
                                     formula =
                                         "consumption " +
                                         historicalConsumption +
-                                        " = POS qty for exact name \"" +
+                                        ' = POS qty for exact name "' +
                                         (m.name || "") +
-                                        "\" / " +
+                                        '" / ' +
                                         lb +
                                         "d (1:1 assumed; may overstate if name is a finished good)";
                                 }
@@ -8046,14 +7934,7 @@
                             formula,
                             source,
                             detailLinks,
-                            priority:
-                                stock <= 0
-                                    ? "critical"
-                                    : daysLeft != null && daysLeft < 7
-                                      ? "high"
-                                      : belowReorder
-                                        ? "medium"
-                                        : "low",
+                            priority: stock <= 0 ? "critical" : daysLeft != null && daysLeft < 7 ? "high" : belowReorder ? "medium" : "low",
                             insufficientHistory: confidence === "low",
                         });
                     });
@@ -8091,14 +7972,42 @@
                     lines.push("");
                     lines.push("--- Costing product margins (from Costing app Products) ---");
                     if (ctx.avgMarginPct != null) {
-                        lines.push("Weighted avg margin (sellable units): " + fmtPct(ctx.avgMarginPct));
+                        lines.push("Weighted avg margin overall (sellable units): " + fmtPct(ctx.avgMarginPct));
                         if (ctx.simpleAvgMargin != null) lines.push("Unweighted avg margin (per product): " + fmtPct(ctx.simpleAvgMargin));
                         lines.push("Product count: " + (ctx.productCount != null ? ctx.productCount : "—"));
                         lines.push("Potential revenue (at current stock × price): " + fmtPeso(ctx.costingPotentialRevenue || 0));
                         lines.push("Potential cost: " + fmtPeso(ctx.costingPotentialCost || 0));
                         lines.push("Potential profit: " + fmtPeso(ctx.costingPotentialProfit || 0));
+                        const byCat = ctx.costingByCategory || {};
+                        const preferred = ["Service", "Merchandise"];
+                        const catKeys = Object.keys(byCat).sort((a, b) => {
+                            const ia = preferred.indexOf(a);
+                            const ib = preferred.indexOf(b);
+                            if (ia >= 0 && ib >= 0) return ia - ib;
+                            if (ia >= 0) return -1;
+                            if (ib >= 0) return 1;
+                            return a.localeCompare(b);
+                        });
+                        if (catKeys.length) {
+                            lines.push("By category (Service = high-margin jobs; Merchandise = resale goods):");
+                            catKeys.forEach((name) => {
+                                const b = byCat[name];
+                                lines.push(
+                                    "  • " +
+                                        name +
+                                        ": " +
+                                        (b.avgMargin != null ? fmtPct(b.avgMargin) : "—") +
+                                        " margin · " +
+                                        b.count +
+                                        " product(s) · potential profit " +
+                                        fmtPeso(b.profit || 0) +
+                                        " · revenue " +
+                                        fmtPeso(b.revenue || 0),
+                                );
+                            });
+                        }
                     } else {
-                        lines.push("(Costing margins not available — open Costing on same domain with priced products)");
+                        lines.push("(Costing margins not available — enable Link Costing in Settings, open Costing on same domain with priced products)");
                     }
                     lines.push("");
                     lines.push("--- Recent sales (last " + ctx.lookbackDays + " days) ---");
@@ -8172,14 +8081,10 @@
                     lines.push("Projected POS revenue: " + fmtPeso(ctx.projectedRevenue) + " (not all cash)");
                     if (ctx.projectedCashSales != null) lines.push("Projected cash-like sales: " + fmtPeso(ctx.projectedCashSales));
                     if (ctx.expectedArCollections != null)
-                        lines.push(
-                            "Expected AR collections (existing AR × " +
-                                Math.round((ctx.arCollectionRate || 0) * 100) +
-                                "% assumption): " +
-                                fmtPeso(ctx.expectedArCollections),
-                        );
+                        lines.push("Expected AR collections (existing AR × " + Math.round((ctx.arCollectionRate || 0) * 100) + "% assumption): " + fmtPeso(ctx.expectedArCollections));
                     if (ctx.projectedInventorySpend) lines.push("Est. inventory replenishment spend: " + fmtPeso(ctx.projectedInventorySpend));
-                    if (ctx.existingAP != null) lines.push("Existing AP: " + fmtPeso(ctx.existingAP) + " — liability only; excluded from forecast cash outflow until payment is expected in the horizon.");
+                    if (ctx.existingAP != null)
+                        lines.push("Existing AP: " + fmtPeso(ctx.existingAP) + " — liability only; excluded from forecast cash outflow until payment is expected in the horizon.");
                     if (ctx.avgMarginPct != null) {
                         lines.push("Gross margin: " + fmtPct(ctx.avgMarginPct) + (ctx.cogsRatePct != null ? " · COGS rate: " + fmtPct(ctx.cogsRatePct) : ""));
                         lines.push("Projected gross profit (revenue × margin): " + fmtPeso(ctx.projectedGrossProfit || 0));
@@ -8290,12 +8195,7 @@
                     const projectedRevenue = salesStats.avgDaily * horizonDays;
                     const costingSnap = await loadCostingInventorySnapshot();
                     const costingMetrics = costingSnap.metrics || {};
-                    const invValueActual = costingSnap.ok
-                        ? (costingSnap.materials || []).reduce(
-                              (s, m) => s + Math.max(0, Number(m.stock) || 0) * (Number(m.costPerUnit) || 0),
-                              0,
-                          )
-                        : 0;
+                    const invValueActual = costingSnap.ok ? (costingSnap.materials || []).reduce((s, m) => s + Math.max(0, Number(m.stock) || 0) * (Number(m.costPerUnit) || 0), 0) : 0;
                     const valuation = currentAssets + assetValue + invValueActual;
                     const avgMarginPct = costingMetrics.avgMargin != null && isFinite(costingMetrics.avgMargin) ? costingMetrics.avgMargin : null;
                     const marginIsEstimate = avgMarginPct == null;
@@ -8334,18 +8234,12 @@
                     const equipResult = equipmentHintsFromSales(topByQty, topByAmount, lookbackDays);
                     const equipHints = equipResult.hints || [];
                     const demandMetricMismatches = equipResult.mismatches || [];
-                    const replenishResult = replenishmentSuggestions(
-                        costingSnap.materials || [],
-                        topByQty.length ? topByQty : topItems,
-                        salesStats.avgDaily,
-                        lookbackDays,
-                        {
-                            moves: costingSnap.moves || [],
-                            products: costingSnap.products || [],
-                            coverageDays: App.forecastCoverageDays != null ? App.forecastCoverageDays : 30,
-                            safetyStockFactor: App.forecastSafetyStockFactor != null ? App.forecastSafetyStockFactor : 0,
-                        },
-                    );
+                    const replenishResult = replenishmentSuggestions(costingSnap.materials || [], topByQty.length ? topByQty : topItems, salesStats.avgDaily, lookbackDays, {
+                        moves: costingSnap.moves || [],
+                        products: costingSnap.products || [],
+                        coverageDays: App.forecastCoverageDays != null ? App.forecastCoverageDays : 30,
+                        safetyStockFactor: App.forecastSafetyStockFactor != null ? App.forecastSafetyStockFactor : 0,
+                    });
                     const replenish = replenishResult.suggestions || [];
                     const replenishSkipped = replenishResult.skipped || [];
                     let projectedInventorySpend = 0;
@@ -8355,14 +8249,7 @@
                     });
 
                     // Projected liquid cash at horizon (total across cash/gcash/bank — internal transfers net to zero)
-                    const projectedCash =
-                        liquid +
-                        projectedCashSales +
-                        expectedArCollections +
-                        otherIncomeInWindowAmt -
-                        projectedRecurring -
-                        plannedInWindow -
-                        projectedInventorySpend;
+                    const projectedCash = liquid + projectedCashSales + expectedArCollections + otherIncomeInWindowAmt - projectedRecurring - plannedInWindow - projectedInventorySpend;
 
                     // Forecast confidence / diagnostics (read-only)
                     const forecastWarnings = [];
@@ -8376,7 +8263,10 @@
                         forecastWarnings.push({ code: "NO_RECURRING_COSTS", message: "No recurring costs recorded. Operating cash outflow may be understated." });
                     }
                     if (marginIsEstimate) {
-                        forecastWarnings.push({ code: "ESTIMATED_MARGIN", message: "No product margin from Costing — gross profit / COGS projection is unavailable or would require an assumed margin." });
+                        forecastWarnings.push({
+                            code: "ESTIMATED_MARGIN",
+                            message: "No product margin from Costing — gross profit / COGS projection is unavailable or would require an assumed margin.",
+                        });
                     }
                     if (plannedMissingDate.length) {
                         forecastWarnings.push({
@@ -8390,9 +8280,7 @@
                     if (replenishSkipped.length) {
                         forecastWarnings.push({
                             code: "INSUFFICIENT_MATERIAL_CONSUMPTION",
-                            message:
-                                replenishSkipped.length +
-                                " material(s) below reorder lack reliable consumption data — no order qty invented.",
+                            message: replenishSkipped.length + " material(s) below reorder lack reliable consumption data — no order qty invented.",
                         });
                     }
                     if (replenish.some((r) => r.confidence === "low")) {
@@ -8442,12 +8330,7 @@
                             message: demandNote,
                         });
                     } else if (topByQty[0]) {
-                        demandNote =
-                            "Top by volume and revenue align on “" +
-                            topByQty[0].name +
-                            "” (qty " +
-                            Math.round(topByQty[0].qty) +
-                            ").";
+                        demandNote = "Top by volume and revenue align on “" + topByQty[0].name + "” (qty " + Math.round(topByQty[0].qty) + ").";
                     }
                     (demandMetricMismatches || []).forEach((mm) => {
                         forecastWarnings.push({
@@ -8571,12 +8454,45 @@
                     if (costingSnap.ok && avgMarginPct != null) {
                         wrap.appendChild(
                             el("div", { class: "summary-grid" }, [
-                                summaryCardText("Avg margin", fmtPct(avgMarginPct), "sales"),
+                                summaryCardText("Avg margin (all)", fmtPct(avgMarginPct), "sales"),
                                 summaryCard("Potential revenue", costingMetrics.totalRevenue || 0, "sales"),
                                 summaryCard("Potential cost", costingMetrics.totalCost || 0, "expenses"),
                                 summaryCard("Potential profit", costingMetrics.totalProfit || 0, (costingMetrics.totalProfit || 0) >= 0 ? "sales" : "expenses"),
                             ]),
                         );
+                        // Service vs Merchandise (and other) segregation
+                        const byCat = costingMetrics.byCategory || {};
+                        const preferredCats = ["Service", "Merchandise"];
+                        const catKeys = Object.keys(byCat).sort((a, b) => {
+                            const ia = preferredCats.indexOf(a);
+                            const ib = preferredCats.indexOf(b);
+                            if (ia >= 0 && ib >= 0) return ia - ib;
+                            if (ia >= 0) return -1;
+                            if (ib >= 0) return 1;
+                            if (a === "Uncategorized") return 1;
+                            if (b === "Uncategorized") return -1;
+                            return a.localeCompare(b);
+                        });
+                        if (catKeys.length) {
+                            wrap.appendChild(el("div", { class: "section-title", style: "margin-top:14px" }, "MARGIN BY CATEGORY"));
+                            const catCards = [];
+                            catKeys.forEach((name) => {
+                                const b = byCat[name];
+                                const label = name === "Service" ? "Service (high margin)" : name === "Merchandise" ? "Merchandise (resale)" : name;
+                                catCards.push(
+                                    summaryCardText(label + " · " + b.count + " item" + (b.count === 1 ? "" : "s"), b.avgMargin != null ? fmtPct(b.avgMargin) : "—", name === "Service" ? "sales" : ""),
+                                );
+                                catCards.push(summaryCard(name + " potential profit", b.profit || 0, (b.profit || 0) >= 0 ? "sales" : "expenses"));
+                            });
+                            wrap.appendChild(el("div", { class: "summary-grid" }, catCards));
+                            wrap.appendChild(
+                                el(
+                                    "div",
+                                    { class: "help-text" },
+                                    "Service = print / laminate / copy jobs (usually high margin). Merchandise = school supplies & resale goods (usually lower margin). Set category on each product in Costing.",
+                                ),
+                            );
+                        }
                         wrap.appendChild(
                             el(
                                 "div",
@@ -8598,7 +8514,9 @@
                                     { class: "empty small" },
                                     costingSnap.ok
                                         ? "No product prices/costs in Costing yet — open Costing and set selling prices + cost breakdown."
-                                        : "Costing DB not available on this domain — open both apps on the same origin.",
+                                        : !isCostingLinkEnabled()
+                                          ? "Costing link is off — enable Settings → Link Costing inventory to pull margins."
+                                          : "Costing DB not available on this domain — open both apps on the same origin.",
                                 ),
                             ),
                         );
@@ -8635,10 +8553,7 @@
                             { class: "help-text" },
                             "Volume (qty/jobs) and revenue are listed separately for capacity decisions. " +
                                 (salesStats.excludedCount
-                                    ? salesStats.excludedCount +
-                                      " sale(s) excluded from averages (" +
-                                      fmtPeso(salesStats.excludedTotal) +
-                                      ")."
+                                    ? salesStats.excludedCount + " sale(s) excluded from averages (" + fmtPeso(salesStats.excludedTotal) + ")."
                                     : "Exclude one-off bulk/personal sales via History if they skew demand."),
                         ),
                     );
@@ -8650,11 +8565,7 @@
                         summaryCard("Projected cash sales", projectedCashSales, "sales"),
                         summaryCard("Projected credit sales (not cash)", projectedCreditSales, "expenses"),
                         summaryCard("AR outstanding (actual)", existingAR, "sales"),
-                        summaryCard(
-                            "Expected AR collections (" + Math.round(arCollectionRate * 100) + "% assumption)",
-                            expectedArCollections,
-                            "sales",
-                        ),
+                        summaryCard("Expected AR collections (" + Math.round(arCollectionRate * 100) + "% assumption)", expectedArCollections, "sales"),
                         summaryCard("Projected remaining AR", Math.max(0, existingAR - expectedArCollections), "expenses"),
                         summaryCard("Recurring costs in window", projectedRecurring, "expenses"),
                         summaryCard("Planned expenses in window", plannedInWindow, "expenses"),
@@ -8676,15 +8587,7 @@
                     const bridgeRows = [
                         ["Opening liquid cash (actual)", liquid, false],
                         ["+ Projected cash-like sales", projectedCashSales, false],
-                        [
-                            "+ Expected AR collections (" +
-                                Math.round(arCollectionRate * 100) +
-                                "% of outstanding AR " +
-                                fmtPeso(existingAR) +
-                                ")",
-                            expectedArCollections,
-                            false,
-                        ],
+                        ["+ Expected AR collections (" + Math.round(arCollectionRate * 100) + "% of outstanding AR " + fmtPeso(existingAR) + ")", expectedArCollections, false],
                         ["+ Other / external income in window", otherIncomeInWindowAmt, false],
                         ["− Recurring operating costs", -projectedRecurring, true],
                         ["− Planned expenses due in window", -plannedInWindow, true],
@@ -8692,12 +8595,7 @@
                         ["= Projected liquid cash", projectedCash, false],
                     ];
                     bridgeRows.forEach(([lab, amt, isOut]) => {
-                        bridgeCard.appendChild(
-                            el("div", { class: "totalsrow" + (lab.startsWith("=") ? " grand" : "") }, [
-                                el("span", {}, lab),
-                                el("span", { class: "val" }, fmtPeso(amt)),
-                            ]),
-                        );
+                        bridgeCard.appendChild(el("div", { class: "totalsrow" + (lab.startsWith("=") ? " grand" : "") }, [el("span", {}, lab), el("span", { class: "val" }, fmtPeso(amt))]));
                     });
                     bridgeCard.appendChild(
                         el(
@@ -9115,22 +9013,13 @@
                             risk = "—";
                         } else if (cashAfter < 0 && otherIncomeInWindowAmt + liquid < price) {
                             risk = "Insufficient buffer";
-                            verdict =
-                                "Liquid cash plus expected other income in the horizon does not cover this purchase. Consider credit, delay, or lower amount.";
+                            verdict = "Liquid cash plus expected other income in the horizon does not cover this purchase. Consider credit, delay, or lower amount.";
                         } else if (cashAfter < 0) {
                             risk = "High risk";
-                            verdict =
-                                "Short on liquid today; relies on other income (~" +
-                                fmtPeso(otherIncomeInWindowAmt) +
-                                ") arriving on time. Existing AP " +
-                                fmtPeso(existingAP) +
-                                " still due.";
+                            verdict = "Short on liquid today; relies on other income (~" + fmtPeso(otherIncomeInWindowAmt) + ") arriving on time. Existing AP " + fmtPeso(existingAP) + " still due.";
                         } else if (!recurringConfigured) {
                             risk = "Manageable*";
-                            verdict =
-                                "Appears fundable on recorded cash, but recurring costs are not configured — true buffer may be thinner. Volume signal: " +
-                                volTop +
-                                ".";
+                            verdict = "Appears fundable on recorded cash, but recurring costs are not configured — true buffer may be thinner. Volume signal: " + volTop + ".";
                         } else if (monthsCovered != null && monthsCovered < 1) {
                             risk = "High risk";
                             verdict = "Remaining cash covers under 1 month of recorded fixed costs after purchase.";
@@ -9195,21 +9084,14 @@
                             );
                         }
                         if (sim.risk) {
-                            invResult.appendChild(
-                                el("div", { class: "totalsrow grand" }, [
-                                    el("span", {}, "Assessment"),
-                                    el("span", { class: "val" }, sim.risk),
-                                ]),
-                            );
+                            invResult.appendChild(el("div", { class: "totalsrow grand" }, [el("span", {}, "Assessment"), el("span", { class: "val" }, sim.risk)]));
                         }
                         invResult.appendChild(el("div", { class: "help-text", style: "margin-top:8px" }, sim.verdict || ""));
                         invResult.appendChild(
                             el(
                                 "div",
                                 { class: "help-text" },
-                                "Considers liquid cash, projected horizon cash, recorded recurring costs, existing AP (" +
-                                    fmtPeso(existingAP) +
-                                    "), and optional other income. Not a guarantee.",
+                                "Considers liquid cash, projected horizon cash, recorded recurring costs, existing AP (" + fmtPeso(existingAP) + "), and optional other income. Not a guarantee.",
                             ),
                         );
                     }
@@ -9293,11 +9175,7 @@
                                     el("div", { class: "txrow-main" }, [
                                         el("div", { class: "txrow-title" }, [
                                             document.createTextNode(h.equipment + " "),
-                                            el(
-                                                "span",
-                                                { class: "badge-inv " + (h.priority === "high" ? "missing" : "ok") },
-                                                h.priority + (h.confidence ? " · " + h.confidence : ""),
-                                            ),
+                                            el("span", { class: "badge-inv " + (h.priority === "high" ? "missing" : "ok") }, h.priority + (h.confidence ? " · " + h.confidence : "")),
                                         ]),
                                         el(
                                             "div",
@@ -9311,9 +9189,7 @@
                                                 (h.lookbackDays ? " · lookback " + h.lookbackDays + "d" : ""),
                                         ),
                                         el("div", { class: "txrow-sub" }, h.reason || ""),
-                                        h.products
-                                            ? el("div", { class: "txrow-sub" }, "Products: " + h.products)
-                                            : el("span", {}),
+                                        h.products ? el("div", { class: "txrow-sub" }, "Products: " + h.products) : el("span", {}),
                                     ]),
                                 ]),
                             );
@@ -9359,13 +9235,7 @@
                         ),
                     );
                     if (!costingSnap.ok) {
-                        sugCard.appendChild(
-                            el(
-                                "div",
-                                { class: "help-text" },
-                                "Costing DB not reachable — material consumption cannot be derived. " + (costingSnap.message || ""),
-                            ),
-                        );
+                        sugCard.appendChild(el("div", { class: "help-text" }, "Costing DB not reachable — material consumption cannot be derived. " + (costingSnap.message || "")));
                     }
                     if (!replenish.length && !replenishSkipped.length) {
                         sugCard.appendChild(el("div", { class: "empty small" }, "No replenishment signals with reliable consumption data."));
@@ -9387,9 +9257,7 @@
                                             el(
                                                 "span",
                                                 {
-                                                    class:
-                                                        "badge-inv " +
-                                                        (r.priority === "critical" || r.priority === "high" ? "missing" : "ok"),
+                                                    class: "badge-inv " + (r.priority === "critical" || r.priority === "high" ? "missing" : "ok"),
                                                 },
                                                 r.priority + (r.confidence ? " · " + r.confidence : ""),
                                             ),
@@ -9404,7 +9272,7 @@
                                                 " · " +
                                                 r.lookbackDays +
                                                 "d consumption: " +
-                                                (Math.round(r.historicalConsumption * 100) / 100) +
+                                                Math.round(r.historicalConsumption * 100) / 100 +
                                                 " · Daily use: " +
                                                 (r.dailyUse != null ? r.dailyUse.toFixed(2) : "—") +
                                                 (r.daysLeft != null ? " · ~" + r.daysLeft + " days left" : "") +
@@ -9416,9 +9284,7 @@
                                             "Coverage target: " +
                                                 r.coverageDays +
                                                 " days" +
-                                                (r.safetyStock > 0
-                                                    ? " · Safety stock: " + r.safetyStock.toFixed(2)
-                                                    : " · Safety stock: none") +
+                                                (r.safetyStock > 0 ? " · Safety stock: " + r.safetyStock.toFixed(2) : " · Safety stock: none") +
                                                 " · Target stock: " +
                                                 (r.targetStock != null ? Math.ceil(r.targetStock) : "—") +
                                                 " · Suggested order: +" +
@@ -9428,23 +9294,10 @@
                                             "div",
                                             { class: "txrow-sub" },
                                             r.unitCost != null && r.unitCost > 0
-                                                ? "Unit cost: " +
-                                                  fmtPeso(r.unitCost) +
-                                                  " / " +
-                                                  (r.unit || "u") +
-                                                  " · Estimated purchase: " +
-                                                  fmtPeso(r.suggestedQty * r.unitCost)
+                                                ? "Unit cost: " + fmtPeso(r.unitCost) + " / " + (r.unit || "u") + " · Estimated purchase: " + fmtPeso(r.suggestedQty * r.unitCost)
                                                 : "⚠ Purchase cost unavailable for this material",
                                         ),
-                                        el(
-                                            "div",
-                                            { class: "txrow-sub" },
-                                            "Method: " +
-                                                (r.method || "—") +
-                                                " · Confidence: " +
-                                                (r.confidence || "—") +
-                                                (r.source ? " · Source: " + r.source : ""),
-                                        ),
+                                        el("div", { class: "txrow-sub" }, "Method: " + (r.method || "—") + " · Confidence: " + (r.confidence || "—") + (r.source ? " · Source: " + r.source : "")),
                                         bomTxt ? el("div", { class: "txrow-sub" }, bomTxt) : el("span", {}),
                                     ]),
                                     el("div", { class: "txrow-amt sales" }, "+" + r.suggestedQty),
@@ -9454,48 +9307,28 @@
                         if (projectedInventorySpend > 0 || replenish.some((r) => r.suggestedQty > 0)) {
                             const missingCost = replenish.filter((r) => r.suggestedQty > 0 && !(r.unitCost > 0));
                             sugCard.appendChild(
-                                el(
-                                    "div",
-                                    { class: "totalsrow grand", style: "margin-top:8px" },
-                                    [
-                                        el("span", {}, "Est. inventory replenishment spend (sum of lines)"),
-                                        el("span", { class: "val" }, fmtPeso(projectedInventorySpend)),
-                                    ],
-                                ),
+                                el("div", { class: "totalsrow grand", style: "margin-top:8px" }, [
+                                    el("span", {}, "Est. inventory replenishment spend (sum of lines)"),
+                                    el("span", { class: "val" }, fmtPeso(projectedInventorySpend)),
+                                ]),
                             );
                             if (missingCost.length) {
                                 sugCard.appendChild(
                                     el(
                                         "div",
                                         { class: "help-text", style: "color:var(--rust)" },
-                                        "⚠ " +
-                                            missingCost.length +
-                                            " recommendation(s) lack unit cost — total spend understates those lines.",
+                                        "⚠ " + missingCost.length + " recommendation(s) lack unit cost — total spend understates those lines.",
                                     ),
                                 );
                             }
                         }
                         if (replenishSkipped.length) {
                             sugCard.appendChild(
-                                el(
-                                    "div",
-                                    { class: "help-text", style: "color:var(--rust);margin-top:8px" },
-                                    "⚠ Insufficient inventory consumption data for reliable replenishment forecast:",
-                                ),
+                                el("div", { class: "help-text", style: "color:var(--rust);margin-top:8px" }, "⚠ Insufficient inventory consumption data for reliable replenishment forecast:"),
                             );
                             replenishSkipped.forEach((s) => {
                                 sugCard.appendChild(
-                                    el(
-                                        "div",
-                                        { class: "help-text" },
-                                        "· " +
-                                            s.name +
-                                            " (stock " +
-                                            s.stock +
-                                            (s.reorderAt != null ? ", reorder @" + s.reorderAt : "") +
-                                            ") — " +
-                                            s.reason,
-                                    ),
+                                    el("div", { class: "help-text" }, "· " + s.name + " (stock " + s.stock + (s.reorderAt != null ? ", reorder @" + s.reorderAt : "") + ") — " + s.reason),
                                 );
                             });
                         }
@@ -9525,13 +9358,7 @@
                         });
                     }
                     if (demandMismatch) {
-                        sugCard.appendChild(
-                            el(
-                                "div",
-                                { class: "help-text", style: "margin-top:8px;color:var(--rust)" },
-                                "⚠ Forecast metric/source mismatch — both rankings kept:",
-                            ),
-                        );
+                        sugCard.appendChild(el("div", { class: "help-text", style: "margin-top:8px;color:var(--rust)" }, "⚠ Forecast metric/source mismatch — both rankings kept:"));
                         sugCard.appendChild(
                             el(
                                 "div",
@@ -9622,6 +9449,7 @@
                             costingPotentialRevenue: costingMetrics.totalRevenue,
                             costingPotentialCost: costingMetrics.totalCost,
                             costingPotentialProfit: costingMetrics.totalProfit,
+                            costingByCategory: costingMetrics.byCategory || {},
                             projectedGrossProfit,
                             projectedCogs,
                             investmentTest: investmentTest || invCard._lastSim || null,
@@ -9813,6 +9641,43 @@
                     bizCard.appendChild(row);
                     bizCard.appendChild(row2);
                     wrap.appendChild(bizCard);
+
+                    // Costing inventory link (off by default — avoids “no Costing” popups on every sale)
+                    wrap.appendChild(el("div", { class: "section-title" }, "COSTING INVENTORY LINK"));
+                    const linkCard = el("div", { class: "card form" });
+                    linkCard.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "When on, sales can auto-deduct stock in the Costing app (same domain), show “no Costing” warnings, and Forecast/Reports pull Costing margins (including Service vs Merchandise). Leave off if you only use POS cash flow.",
+                        ),
+                    );
+                    const linkRow = el("div", { class: "addrow", style: "align-items:center;margin-top:4px" });
+                    const linkChk = el("input", {
+                        type: "checkbox",
+                        id: "link-costing-toggle",
+                        style: "width:18px;height:18px;accent-color:var(--green)",
+                    });
+                    linkChk.checked = !!App.linkCosting;
+                    const linkLabel = el("label", { for: "link-costing-toggle", style: "font-weight:600;font-size:14px;cursor:pointer" }, "Link Costing inventory");
+                    linkChk.addEventListener("change", async () => {
+                        App.linkCosting = !!linkChk.checked;
+                        await setSetting("linkCosting", App.linkCosting);
+                        costingProductNames = null;
+                        recordedPosSaleIds = null;
+                        toast(App.linkCosting ? "Costing link on — stock deduct, warnings & margins enabled" : "Costing link off — POS only, no Costing popups");
+                    });
+                    linkRow.appendChild(linkChk);
+                    linkRow.appendChild(linkLabel);
+                    linkCard.appendChild(linkRow);
+                    linkCard.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text", style: "margin-top:8px" },
+                            App.linkCosting ? "Active: product badges, save-sale confirm, stock-outs, and Costing margin metrics." : "Inactive (default): sales save without checking Costing.",
+                        ),
+                    );
+                    wrap.appendChild(linkCard);
 
                     // Categories
                     wrap.appendChild(el("div", { class: "section-title" }, "SALE CATEGORIES"));
@@ -10399,6 +10264,7 @@
                 async function init() {
                     await openDB();
                     await seedIfEmpty();
+                    await refreshCostingLinkSetting();
                     qsa(".navbtn").forEach((b) =>
                         b.addEventListener("click", (e) => {
                             if (b.dataset.route === "add") {
