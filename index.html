@@ -3695,6 +3695,7 @@
                         ["week", "This Week"],
                         ["month", "This Month"],
                         ["all", "All Time"],
+                        ["custom", "Custom"],
                     ].forEach(([val, label]) => {
                         const chip = el("button", { type: "button", class: "chip" + (App.historyFilters.range === val ? " active" : "") }, label);
                         chip.addEventListener("click", () => {
@@ -3704,6 +3705,44 @@
                         rangeRow.appendChild(chip);
                     });
                     filterCard.appendChild(rangeRow);
+
+                    if (App.historyFilters.range === "custom") {
+                        const crow = el("div", { class: "addrow", style: "margin-top:8px" });
+                        const fromInp = el("input", {
+                            type: "date",
+                            class: "finput",
+                            value: App.historyFilters.from || "",
+                            title: "From date",
+                        });
+                        const toInp = el("input", {
+                            type: "date",
+                            class: "finput",
+                            value: App.historyFilters.to || "",
+                            title: "To date",
+                        });
+                        const apply = el("button", { type: "button", class: "smallbtn" }, "Apply");
+                        apply.addEventListener("click", () => {
+                            App.historyFilters.from = fromInp.value || null;
+                            App.historyFilters.to = toInp.value || null;
+                            softRender();
+                        });
+                        crow.appendChild(fromInp);
+                        crow.appendChild(toInp);
+                        crow.appendChild(apply);
+                        filterCard.appendChild(crow);
+                        if (App.historyFilters.from || App.historyFilters.to) {
+                            filterCard.appendChild(
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:6px" },
+                                    "Custom: " +
+                                        (App.historyFilters.from || "…") +
+                                        " → " +
+                                        (App.historyFilters.to || "today"),
+                                ),
+                            );
+                        }
+                    }
 
                     const typeRow = el("div", { class: "chiprow" });
                     [
@@ -3768,6 +3807,12 @@
                         if (f.range === "today") txs = txs.filter((t) => inRange(t.date, startOfDay(now), endOfDay(now)));
                         else if (f.range === "week") txs = txs.filter((t) => inRange(t.date, startOfWeek(now), endOfDay(now)));
                         else if (f.range === "month") txs = txs.filter((t) => inRange(t.date, startOfMonth(now), endOfDay(now)));
+                        else if (f.range === "custom") {
+                            const from = f.from ? startOfDay(new Date(f.from)) : null;
+                            const to = f.to ? endOfDay(new Date(f.to)) : endOfDay(now);
+                            if (from) txs = txs.filter((t) => inRange(t.date, from, to));
+                            else txs = txs.filter((t) => inRange(t.date, startOfDay(new Date(0)), to));
+                        }
                         if (f.type !== "all") txs = txs.filter((t) => t.type === f.type);
                         if (f.inventory === "no_costing") {
                             txs = txs.filter((t) => {
@@ -4635,6 +4680,7 @@
                         ["week", "This Week"],
                         ["month", "This Month"],
                         ["all", "All Time"],
+                        ["custom", "Custom"],
                     ].forEach(([val, label]) => {
                         const chip = el("button", { type: "button", class: "chip" + (App.reportRange === val ? " active" : "") }, label);
                         chip.addEventListener("click", () => {
@@ -4644,6 +4690,42 @@
                         rangeRow.appendChild(chip);
                     });
                     rangeCard.appendChild(rangeRow);
+                    if (App.reportRange === "custom") {
+                        const crow = el("div", { class: "addrow", style: "margin-top:8px" });
+                        const fromInp = el("input", {
+                            type: "date",
+                            class: "finput",
+                            value: (App.reportCustom && App.reportCustom.from) || "",
+                            title: "From date",
+                        });
+                        const toInp = el("input", {
+                            type: "date",
+                            class: "finput",
+                            value: (App.reportCustom && App.reportCustom.to) || "",
+                            title: "To date",
+                        });
+                        const apply = el("button", { type: "button", class: "smallbtn" }, "Apply");
+                        apply.addEventListener("click", () => {
+                            App.reportCustom = { from: fromInp.value || null, to: toInp.value || null };
+                            softRender();
+                        });
+                        crow.appendChild(fromInp);
+                        crow.appendChild(toInp);
+                        crow.appendChild(apply);
+                        rangeCard.appendChild(crow);
+                        if (App.reportCustom && (App.reportCustom.from || App.reportCustom.to)) {
+                            rangeCard.appendChild(
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:6px" },
+                                    "Custom: " +
+                                        (App.reportCustom.from || "…") +
+                                        " → " +
+                                        (App.reportCustom.to || "today"),
+                                ),
+                            );
+                        }
+                    }
                     wrap.appendChild(rangeCard);
 
                     let txs = await allTx();
@@ -4651,6 +4733,11 @@
                     if (App.reportRange === "today") txs = txs.filter((t) => inRange(t.date, startOfDay(now), endOfDay(now)));
                     else if (App.reportRange === "week") txs = txs.filter((t) => inRange(t.date, startOfWeek(now), endOfDay(now)));
                     else if (App.reportRange === "month") txs = txs.filter((t) => inRange(t.date, startOfMonth(now), endOfDay(now)));
+                    else if (App.reportRange === "custom") {
+                        const bounds = reportPeriodBounds("custom", App.reportCustom);
+                        if (bounds.from) txs = txs.filter((t) => inRange(t.date, bounds.from, bounds.to));
+                        else if (bounds.to) txs = txs.filter((t) => inRange(t.date, startOfDay(new Date(0)), bounds.to));
+                    }
 
                     const sales = sumBy(txs, (t) => t.type === "sale");
                     const expenses = sumBy(txs, (t) => t.type === "expense");
@@ -4772,6 +4859,13 @@
                     if (range === "today") return "Today";
                     if (range === "week") return "This week";
                     if (range === "month") return "This month";
+                    if (range === "custom") {
+                        const c = App.reportCustom || {};
+                        if (c.from && c.to) return c.from + " → " + c.to;
+                        if (c.from) return "From " + c.from;
+                        if (c.to) return "Until " + c.to;
+                        return "Custom range";
+                    }
                     return "All time";
                 }
 
