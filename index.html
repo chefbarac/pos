@@ -1395,13 +1395,15 @@
                 const COSTING_DB_NAME = "documentingCostingDB";
                 const COSTING_DB_VERSION = 4; // must match Costing app
 
-                /** Cached set of Costing product names (lowercase). null = not loaded yet. */
+                /** Cached set of Costing product names + material names (lowercase). null = not loaded yet. */
                 let costingProductNames = null;
+                let costingMaterialNames = null;
                 let costingNamesPromise = null;
 
                 async function loadCostingProductNames(force) {
                     if (!isCostingLinkEnabled()) {
                         costingProductNames = new Set();
+                        costingMaterialNames = new Set();
                         return costingProductNames;
                     }
                     if (!force && costingProductNames) return costingProductNames;
@@ -1409,6 +1411,8 @@
                     costingNamesPromise = (async () => {
                         try {
                             const cdb = await openCostingDB();
+                            const mats = cdb.objectStoreNames.contains("materials") ? await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll()) : [];
+                            costingMaterialNames = new Set((mats || []).map((m) => (m.name || "").toLowerCase().trim()).filter(Boolean));
                             if (!cdb.objectStoreNames.contains("products")) {
                                 costingProductNames = new Set();
                                 return costingProductNames;
@@ -1419,6 +1423,7 @@
                         } catch (e) {
                             console.warn("[inventory] could not load Costing product names", e);
                             costingProductNames = costingProductNames || new Set();
+                            costingMaterialNames = costingMaterialNames || new Set();
                             return costingProductNames;
                         } finally {
                             costingNamesPromise = null;
@@ -1432,7 +1437,10 @@
                     if (!costingProductNames) return true; // unknown yet — don't badge until loaded
                     const key = (name || "").toLowerCase().trim();
                     if (!key) return true;
-                    return costingProductNames.has(key);
+                    if (costingProductNames.has(key)) return true;
+                    // Not a Costing product, but direct material fallback also deducts stock.
+                    if (costingMaterialNames) return costingMaterialNames.has(key);
+                    return false;
                 }
 
                 /** Set of POS transaction ids that already have stockMoves in Costing (source pos-sale). null = not loaded. */
@@ -1602,6 +1610,21 @@
                             byName[(p.name || "").toLowerCase().trim()] = p;
                         });
 
+                        // Direct material fallback: if a line is not a Costing product, match it
+                        // against inventory material names and deduct the material directly.
+                        const materials = cdb.objectStoreNames.contains("materials")
+                            ? await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll())
+                            : [];
+                        const matByName = {};
+                        materials.forEach((mat) => {
+                            const k = (mat.name || "").toLowerCase().trim();
+                            if (!k) return;
+                            matByName[k] = mat;
+                        });
+                        function findMaterialByName(lineName) {
+                            return matByName[(lineName || "").toLowerCase().trim()] || null;
+                        }
+
                         const includeOptional = noteWantsOptional(tx.note);
                         const lines = saleLinesFromTx(tx);
                         const merged = {};
@@ -1613,6 +1636,12 @@
                             }
                             const product = byName[(line.name || "").toLowerCase().trim()];
                             if (!product) {
+                                const mat = findMaterialByName(line.name);
+                                if (mat) {
+                                    merged[mat.id] = (merged[mat.id] || 0) + line.qty;
+                                    result.lineStatus.push({ name: line.name, status: "ok", detail: "deducted from material " + (mat.name || "?") });
+                                    continue;
+                                }
                                 result.lineStatus.push({ name: line.name, status: "no_recipe", detail: "name not in Costing products" });
                                 continue;
                             }
