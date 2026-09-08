@@ -3171,6 +3171,11 @@
                     return App.saleLines.reduce((s, ln) => s + (Number(ln.amount) || 0), 0);
                 }
 
+                /** Items whose name contains "+" are add-ons (e.g. "+ gold eyelet"); they may be free (amount 0). */
+                function isAddonItem(name) {
+                    return (name || "").indexOf("+") !== -1;
+                }
+
                 async function renderAdd() {
                     const company = await getActiveCompany();
                     const cats = company ? company.categories : { sale: DEFAULT_SALE_CATEGORIES, expense: DEFAULT_EXPENSE_CATEGORIES };
@@ -3506,8 +3511,12 @@
                             return;
                         }
                         if (!amount || amount <= 0) {
-                            toast("Enter a valid line amount");
-                            return;
+                            if (isAddonItem(item)) {
+                                amount = 0;
+                            } else {
+                                toast("Enter a valid line amount");
+                                return;
+                            }
                         }
                         App.saleLines.push({
                             category: App.selectedCategory,
@@ -3615,13 +3624,13 @@
                         // fold that pending line in automatically so it isn't silently dropped.
                         const pendingItem = qs("#ln-item").value.trim();
                         const pendingAmount = parseFloat(qs("#ln-amount").value);
-                        if (pendingItem && pendingAmount > 0) {
+                        if (pendingItem && (pendingAmount > 0 || isAddonItem(pendingItem))) {
                             App.saleLines.push({
                                 category: App.selectedCategory,
                                 item: pendingItem,
                                 qty: parseFloat(qs("#ln-qty").value) || null,
                                 unitPrice: parseFloat(qs("#ln-price").value) || null,
-                                amount: pendingAmount,
+                                amount: pendingAmount > 0 ? pendingAmount : 0,
                             });
                         }
 
