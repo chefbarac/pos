@@ -3505,7 +3505,7 @@
                     const addLineBtn = el("button", { type: "button", class: "bigbtn ghost small2" }, "+ Add Item to Transaction");
                     addLineBtn.addEventListener("click", () => {
                         const item = qs("#ln-item").value.trim();
-                        const amount = parseFloat(qs("#ln-amount").value);
+                        let amount = parseFloat(qs("#ln-amount").value);
                         if (!item) {
                             toast("Enter an item or description");
                             return;
