@@ -1447,11 +1447,11 @@
                 let recordedPosSaleIds = null;
                 let recordedPosPromise = null;
 
-                async function loadRecordedPosSaleIds(force) {
-                    if (!isCostingLinkEnabled()) {
-                        recordedPosSaleIds = new Set();
-                        return recordedPosSaleIds;
-                    }
+                 async function loadRecordedPosSaleIds(force) {
+                     if (!isCostingLinkEnabled()) {
+                         recordedPosSaleIds = null; // link off — unknown, never flag as missing
+                         return recordedPosSaleIds;
+                     }
                     if (!force && recordedPosSaleIds) return recordedPosSaleIds;
                     if (!force && recordedPosPromise) return recordedPosPromise;
                     recordedPosPromise = (async () => {
@@ -1500,6 +1500,7 @@
                 }
 
                 function isSaleRecordedInInventory(txOrId) {
+                    if (!isCostingLinkEnabled()) return null; // link off — not relevant
                     if (!recordedPosSaleIds) return null; // unknown
                     const id = typeof txOrId === "object" && txOrId ? txOrId.id : txOrId;
                     if (id == null) return false;
