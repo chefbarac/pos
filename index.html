@@ -4129,7 +4129,7 @@
                     if (canMarkPaid) {
                         btnKids.push(el("button", { type: "button", class: "bigbtn transfer", style: "flex-basis:100%" }, "Mark as paid"));
                     }
-                    if (t.type === "sale") {
+                    if (t.type === "sale" && isCostingLinkEnabled()) {
                         btnKids.push(el("button", { type: "button", class: "bigbtn transfer", style: "flex-basis:100%" }, "Apply inventory"));
                     }
                     const btnRow = el("div", { class: "modal-btnrow" }, btnKids);
