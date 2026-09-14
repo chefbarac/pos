@@ -4588,7 +4588,7 @@
                     if (t.type === "transfer") {
                         rows.push((t.item || "") + " (" + accountLabel(t.fromAccount) + " \u2192 " + accountLabel(t.toAccount) + ")");
                     } else {
-                        lines.forEach((ln) => rows.push(fmtPeso(ln.amount) + " - " + (ln.item || t.category || "Item") + (ln.qty ? " (qty " + ln.qty + ")" : "")));
+                        lines.forEach((ln) => rows.push(fmtPeso(ln.amount) + (ln.qty ? " (qty " + ln.qty + ")" : "") + " - " + (ln.item || t.category || "Item")));
                     }
                     rows.push("------------------------------");
                     rows.push("Total: " + fmtPeso(t.amount));
