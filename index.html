@@ -1549,11 +1549,11 @@
                 let recordedPosSaleIds = null;
                 let recordedPosPromise = null;
 
-                async function loadRecordedPosSaleIds(force) {
-                    if (!isCostingLinkEnabled()) {
-                        recordedPosSaleIds = null; // link off — unknown, never flag as missing
-                        return recordedPosSaleIds;
-                    }
+                 async function loadRecordedPosSaleIds(force) {
+                     if (!isCostingLinkEnabled()) {
+                         recordedPosSaleIds = null; // link off — unknown, never flag as missing
+                         return recordedPosSaleIds;
+                     }
                     if (!force && recordedPosSaleIds) return recordedPosSaleIds;
                     if (!force && recordedPosPromise) return recordedPosPromise;
                     recordedPosPromise = (async () => {
@@ -1715,7 +1715,9 @@
 
                         // Direct material fallback: if a line is not a Costing product, match it
                         // against inventory material names and deduct the material directly.
-                        const materials = cdb.objectStoreNames.contains("materials") ? await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll()) : [];
+                        const materials = cdb.objectStoreNames.contains("materials")
+                            ? await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll())
+                            : [];
                         const matByName = {};
                         materials.forEach((mat) => {
                             const k = (mat.name || "").toLowerCase().trim();
@@ -3871,7 +3873,14 @@
                         filterCard.appendChild(crow);
                         if (App.historyFilters.from || App.historyFilters.to) {
                             filterCard.appendChild(
-                                el("div", { class: "help-text", style: "margin-top:6px" }, "Custom: " + (App.historyFilters.from || "…") + " → " + (App.historyFilters.to || "today")),
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:6px" },
+                                    "Custom: " +
+                                        (App.historyFilters.from || "…") +
+                                        " → " +
+                                        (App.historyFilters.to || "today"),
+                                ),
                             );
                         }
                     }
@@ -4037,19 +4046,9 @@
                         ]),
                     );
 
-                    // Amount first, then item names/description
-                    modal.appendChild(el("label", { class: "flabel" }, isTransfer ? "Amount" : "Total Amount"));
-                    const amtInp = el("input", { type: "number", class: "finput", value: t.amount, min: "0", step: "0.01" });
-                    modal.appendChild(amtInp);
-
                     // Line-item breakdown — item names are editable so you can align them with Costing products
                     let lineNameInputs = [];
-                    let itemInp = null;
-                    if (isTransfer) {
-                        modal.appendChild(el("label", { class: "flabel" }, "Description"));
-                        itemInp = el("input", { type: "text", class: "finput", value: t.item });
-                        modal.appendChild(itemInp);
-                    } else if (lines.length) {
+                    if (!isTransfer && lines.length) {
                         modal.appendChild(el("label", { class: "flabel" }, `Items (${lines.length}) — edit names to match Costing`));
                         const list = el("div", { class: "linelist" });
                         lines.forEach((ln, idx) => {
@@ -4073,11 +4072,28 @@
                         if (lines.length > 1) {
                             modal.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Subtotal"), el("span", { class: "val" }, fmtPeso(t.subtotal != null ? t.subtotal : t.amount))]));
                         }
-                    } else {
+                    } else if (!isTransfer) {
                         modal.appendChild(el("label", { class: "flabel" }, t.type === "sale" ? "Item / Service" : "Description"));
                         const itemInp0 = el("input", { type: "text", class: "finput", value: t.item });
                         lineNameInputs.push(itemInp0);
                         modal.appendChild(itemInp0);
+                    }
+
+                    modal.appendChild(el("label", { class: "flabel" }, isTransfer ? "Description" : "Total Amount"));
+                    const amtInp = el("input", { type: "number", class: "finput", value: t.amount, min: "0", step: "0.01" });
+                    if (isTransfer) {
+                        // For transfers, this slot is actually the description field (kept from original layout below); amount handled separately.
+                    }
+
+                    let itemInp = null;
+                    if (isTransfer) {
+                        modal.appendChild(el("label", { class: "flabel" }, "Description"));
+                        itemInp = el("input", { type: "text", class: "finput", value: t.item });
+                        modal.appendChild(itemInp);
+                        modal.appendChild(el("label", { class: "flabel" }, "Amount"));
+                        modal.appendChild(amtInp);
+                    } else {
+                        modal.appendChild(amtInp);
                     }
 
                     let payRow = null,
@@ -4173,8 +4189,15 @@
                         });
                         modal.appendChild(tenderedInp);
                         const changeNow = t.tendered != null ? +(t.tendered - t.amount).toFixed(2) : null;
-                        editChangeDisplay = el("span", { class: "val" }, changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow));
-                        editChangeRow = el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [el("span", {}, "Change Due"), editChangeDisplay]);
+                        editChangeDisplay = el(
+                            "span",
+                            { class: "val" },
+                            changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow),
+                        );
+                        editChangeRow = el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [
+                            el("span", {}, "Change Due"),
+                            editChangeDisplay,
+                        ]);
                         modal.appendChild(editChangeRow);
                         // Keep change due in sync when total amount is edited
                         amtInp.addEventListener("input", updateEditChangeDue);
@@ -4453,7 +4476,9 @@
                     const overlay = el("div", { class: "overlay" });
                     const modal = el("div", { class: "modal" });
                     const copyIconBtn = el("button", { type: "button", class: "receipt-copy-icon", title: "Copy as text" }, "\u{1F4CB}");
-                    modal.appendChild(el("div", { class: "modal-title-row" }, [el("div", { class: "modal-title" }, "Generate Receipt"), copyIconBtn]));
+                    modal.appendChild(
+                        el("div", { class: "modal-title-row" }, [el("div", { class: "modal-title" }, "Generate Receipt"), copyIconBtn]),
+                    );
 
                     const paper = el("div", { class: "receipt-paper", id: "receiptPrintArea" });
                     paper.appendChild(
@@ -4466,9 +4491,15 @@
                     paper.appendChild(el("hr", { class: "receipt-divider" }));
 
                     if (t.type === "transfer") {
-                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Description"), el("span", {}, t.item || "")]));
-                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "From"), el("span", {}, accountLabel(t.fromAccount))]));
-                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "To"), el("span", {}, accountLabel(t.toAccount))]));
+                        paper.appendChild(
+                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Description"), el("span", {}, t.item || "")]),
+                        );
+                        paper.appendChild(
+                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "From"), el("span", {}, accountLabel(t.fromAccount))]),
+                        );
+                        paper.appendChild(
+                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "To"), el("span", {}, accountLabel(t.toAccount))]),
+                        );
                     } else if (lines.length) {
                         lines.forEach((ln) => {
                             const sub = [ln.category, ln.qty ? "qty " + ln.qty : null, ln.unitPrice ? "@ " + fmtPeso(ln.unitPrice) : null].filter(Boolean).join(" · ");
@@ -4485,9 +4516,13 @@
                     paper.appendChild(el("div", { class: "receipt-total" }, [el("span", {}, "Total"), el("span", {}, fmtPeso(t.amount))]));
 
                     if (t.type !== "transfer") {
-                        paper.appendChild(el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Payment"), el("span", {}, paymentLabel(t.payment))]));
+                        paper.appendChild(
+                            el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Payment"), el("span", {}, paymentLabel(t.payment))]),
+                        );
                         if (t.tendered != null) {
-                            paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Tendered"), el("span", {}, fmtPeso(t.tendered))]));
+                            paper.appendChild(
+                                el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Tendered"), el("span", {}, fmtPeso(t.tendered))]),
+                            );
                             paper.appendChild(
                                 el("div", { class: "receipt-line" }, [
                                     el("span", { class: "rl-label" }, t.change != null && t.change < 0 ? "Short" : "Change"),
@@ -4497,9 +4532,13 @@
                         }
                     }
                     if (t.note) {
-                        paper.appendChild(el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Note"), el("span", {}, t.note)]));
+                        paper.appendChild(
+                            el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Note"), el("span", {}, t.note)]),
+                        );
                     }
-                    paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Ref #"), el("span", {}, String(id))]));
+                    paper.appendChild(
+                        el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Ref #"), el("span", {}, String(id))]),
+                    );
                     paper.appendChild(el("div", { class: "receipt-footer" }, "Thank you!"));
 
                     modal.appendChild(paper);
@@ -4546,13 +4585,13 @@
                     rows.push(businessName);
                     rows.push(kindLabel + " · " + dateStr + " " + timeStr);
                     rows.push("------------------------------");
+                    rows.push("Total: " + fmtPeso(t.amount));
+                    rows.push("------------------------------");
                     if (t.type === "transfer") {
                         rows.push((t.item || "") + " (" + accountLabel(t.fromAccount) + " \u2192 " + accountLabel(t.toAccount) + ")");
                     } else {
-                        lines.forEach((ln) => rows.push((ln.item || t.category || "Item") + " - " + fmtPeso(ln.amount)));
+                        lines.forEach((ln) => rows.push(fmtPeso(ln.amount) + " - " + (ln.item || t.category || "Item")));
                     }
-                    rows.push("------------------------------");
-                    rows.push("Total: " + fmtPeso(t.amount));
                     if (t.type !== "transfer") rows.push("Payment: " + paymentLabel(t.payment));
                     if (t.note) rows.push("Note: " + t.note);
                     rows.push("Ref #" + t.id);
@@ -4958,7 +4997,16 @@
                         crow.appendChild(apply);
                         rangeCard.appendChild(crow);
                         if (App.reportCustom && (App.reportCustom.from || App.reportCustom.to)) {
-                            rangeCard.appendChild(el("div", { class: "help-text", style: "margin-top:6px" }, "Custom: " + (App.reportCustom.from || "…") + " → " + (App.reportCustom.to || "today")));
+                            rangeCard.appendChild(
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:6px" },
+                                    "Custom: " +
+                                        (App.reportCustom.from || "…") +
+                                        " → " +
+                                        (App.reportCustom.to || "today"),
+                                ),
+                            );
                         }
                     }
                     wrap.appendChild(rangeCard);
