@@ -1915,7 +1915,7 @@
 
                 /* ---------- IndexedDB layer ---------- */
                 const DB_NAME = "littleLedgerDB";
-                const DB_VERSION = 5;
+                const DB_VERSION = 6;
                 let dbPromise = null;
 
                 function openDB() {
@@ -1971,6 +1971,13 @@
                                 const tplStore = db.createObjectStore("txTemplates", { keyPath: "id", autoIncrement: true });
                                 tplStore.createIndex("companyId", "companyId");
                                 tplStore.createIndex("type", "type");
+                            }
+                            // Customer balances: running owed/owing per customer (short-cash shortfalls, partial settles).
+                            // key: customerLower (normalized name) — one row per unique lowercase name per company-style scoping.
+                            if (!db.objectStoreNames.contains("customerBalances")) {
+                                const cbStore = db.createObjectStore("customerBalances", { keyPath: "customerLower" });
+                                cbStore.createIndex("companyId", "companyId");
+                                cbStore.createIndex("customer", "customer");
                             }
                         };
                         req.onsuccess = (e) => resolve(e.target.result);
