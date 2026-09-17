@@ -2519,35 +2519,49 @@
                  * Record a customer-balance collection: reduce what they owe and credit Cash/GCash/Bank.
                  * Uses transfer from "owner" (not in balance map) → payment account so only the till increases.
                  */
-                async function collectCustomerBalance(customer, companyId, amount, paymentAccount, note) {
+                /**
+                 * Move a customer balance toward zero and update the till.
+                 * direction "collect" (customer owes you): cash/gcash/bank += amount, balance -= amount
+                 * direction "payout"  (you owe customer):  cash/gcash/bank -= amount, balance += amount
+                 * Uses dedicated transfer sources with no counterparty account in the balance map.
+                 */
+                async function settleCustomerBalance(customer, companyId, amount, paymentAccount, direction, note) {
                     const amt = Math.round(Number(amount) * 100) / 100;
                     if (!(amt > 0)) return { ok: false, message: "Enter an amount" };
                     if (!customer || !String(customer).trim()) return { ok: false, message: "Enter a customer name" };
                     if (!["cash", "gcash", "bank"].includes(paymentAccount)) {
                         return { ok: false, message: "Pick Cash, GCash, or Bank" };
                     }
+                    const dir = direction === "payout" ? "payout" : "collect";
                     const cid = companyId != null ? companyId : await getActiveCompanyId();
                     const name = String(customer).trim();
-                    await dbUpsertBalance(name, cid, -amt);
+                    // collect: reduce what they owe (−); payout: reduce what we owe (balance was negative → add toward 0)
+                    await dbUpsertBalance(name, cid, dir === "collect" ? -amt : +amt);
                     const transfer = {
                         type: "transfer",
                         companyId: cid,
                         category: "Transfer",
-                        item: "Customer balance · " + name,
+                        item: (dir === "collect" ? "Collect · " : "Pay out credit · ") + name,
                         qty: null,
                         unitPrice: null,
                         amount: amt,
                         payment: null,
-                        fromAccount: "owner",
-                        toAccount: paymentAccount,
+                        // Dedicated legs: only one side touches the till (see computeAccountBalances)
+                        fromAccount: dir === "payout" ? paymentAccount : null,
+                        toAccount: dir === "collect" ? paymentAccount : null,
                         date: new Date().toISOString(),
-                        note: note || "Customer balance collection · " + name,
+                        note: note || (dir === "collect" ? "Customer balance collection · " + name + " · " + paymentAccount : "Customer credit payout · " + name + " · " + paymentAccount),
                         createdAt: new Date().toISOString(),
-                        source: "customer-balance-collect",
+                        source: dir === "collect" ? "customer-balance-collect" : "customer-balance-payout",
                         customerName: name,
                     };
                     const transferId = await dbAdd("transactions", transfer);
-                    return { ok: true, transferId, amount: amt, paymentAccount };
+                    return { ok: true, transferId, amount: amt, paymentAccount, direction: dir };
+                }
+
+                /** @deprecated use settleCustomerBalance(..., "collect") */
+                async function collectCustomerBalance(customer, companyId, amount, paymentAccount, note) {
+                    return settleCustomerBalance(customer, companyId, amount, paymentAccount, "collect", note);
                 }
 
                 /**
@@ -2555,11 +2569,20 @@
                  * mode: "settle" | "writeoff"
                  * Resolves { action: "settled"|"writtenoff"|"cancelled", ... }
                  */
+                /**
+                 * Settle / write-off UI for a signed customer balance (no window.prompt).
+                 * balance > 0 → collect into Cash/GCash/Bank (till up)
+                 * balance < 0 → pay out from Cash/GCash/Bank (till down)
+                 * mode: "settle" | "writeoff"
+                 */
                 function openCustomerBalanceSettleModal(opts) {
                     opts = opts || {};
                     const customer = (opts.customer || "").trim();
                     const companyId = opts.companyId;
-                    const owed = Math.round((Number(opts.balance) || 0) * 100) / 100;
+                    const balance = Math.round((Number(opts.balance) || 0) * 100) / 100;
+                    const isCredit = balance < -0.009;
+                    const isOwed = balance > 0.009;
+                    const magnitude = Math.abs(balance);
                     const mode = opts.mode || "settle";
                     return new Promise((resolve) => {
                         const existing = qs("#cust-balance-overlay");
@@ -2569,9 +2592,10 @@
 
                         if (mode === "writeoff") {
                             modal.appendChild(el("div", { class: "modal-title" }, "Write off balance"));
-                            modal.appendChild(
-                                el("div", { class: "help-text" }, "Clear " + fmtPeso(owed) + " owed by " + (customer || "this customer") + " without collecting cash. This cannot be undone."),
-                            );
+                            const woHelp = isCredit
+                                ? "Clear store credit of " + fmtPeso(magnitude) + " for " + (customer || "this customer") + " without paying out cash. This cannot be undone."
+                                : "Clear " + fmtPeso(magnitude) + " owed by " + (customer || "this customer") + " without collecting cash. This cannot be undone.";
+                            modal.appendChild(el("div", { class: "help-text" }, woHelp));
                             const btnRow = el("div", { class: "modal-btnrow" });
                             const cancelBtn = el("button", { type: "button", class: "bigbtn ghost" }, "Cancel");
                             const confirmBtn = el("button", { type: "button", class: "bigbtn danger" }, "Write off");
@@ -2583,18 +2607,35 @@
                                 confirmBtn.disabled = true;
                                 await dbClearBalance(customer, companyId);
                                 overlay.remove();
-                                resolve({ action: "writtenoff", customer, amount: owed });
+                                resolve({ action: "writtenoff", customer, amount: magnitude, wasCredit: isCredit });
                             });
                             btnRow.appendChild(cancelBtn);
                             btnRow.appendChild(confirmBtn);
                             modal.appendChild(btnRow);
+                        } else if (!isOwed && !isCredit) {
+                            modal.appendChild(el("div", { class: "modal-title" }, "No balance"));
+                            modal.appendChild(el("div", { class: "help-text" }, "This customer is already settled."));
+                            const btnRow = el("div", { class: "modal-btnrow" });
+                            const okBtn = el("button", { type: "button", class: "bigbtn ghost" }, "Close");
+                            okBtn.addEventListener("click", () => {
+                                overlay.remove();
+                                resolve({ action: "cancelled" });
+                            });
+                            btnRow.appendChild(okBtn);
+                            modal.appendChild(btnRow);
                         } else {
-                            modal.appendChild(el("div", { class: "modal-title" }, "Settle customer balance"));
+                            const dir = isCredit ? "payout" : "collect";
+                            modal.appendChild(el("div", { class: "modal-title" }, dir === "collect" ? "Collect from customer" : "Pay out store credit"));
                             modal.appendChild(
                                 el(
                                     "div",
                                     { class: "help-text" },
-                                    (customer || "Customer") + " owes " + fmtPeso(owed) + ". Collect into Cash, GCash, or Bank — that account increases and the balance is reduced.",
+                                    dir === "collect"
+                                        ? (customer || "Customer") + " owes you " + fmtPeso(magnitude) + ". Collect into Cash, GCash, or Bank — that account increases and the balance goes down."
+                                        : (customer || "Customer") +
+                                              " has " +
+                                              fmtPeso(magnitude) +
+                                              " store credit (you owe them). Pay out from Cash, GCash, or Bank — that account decreases and the credit is reduced.",
                                 ),
                             );
 
@@ -2610,20 +2651,22 @@
                                 ),
                             );
 
-                            modal.appendChild(el("label", { class: "flabel" }, "Amount to collect"));
+                            modal.appendChild(el("label", { class: "flabel" }, dir === "collect" ? "Amount to collect" : "Amount to pay out"));
                             const amtInp = el("input", {
                                 type: "number",
                                 class: "finput famount",
                                 id: "cust-settle-amt",
                                 min: "0.01",
                                 step: "0.01",
-                                value: owed > 0 ? owed.toFixed(2) : "",
+                                value: magnitude > 0 ? magnitude.toFixed(2) : "",
                                 inputmode: "decimal",
                             });
                             modal.appendChild(amtInp);
-                            modal.appendChild(el("div", { class: "help-text", style: "margin-top:4px" }, "Leave as full amount, or enter a smaller amount for a partial collection."));
+                            modal.appendChild(
+                                el("div", { class: "help-text", style: "margin-top:4px" }, "Leave as full amount, or enter less for a partial " + (dir === "collect" ? "collection" : "payout") + "."),
+                            );
 
-                            modal.appendChild(el("label", { class: "flabel" }, "Collect into"));
+                            modal.appendChild(el("label", { class: "flabel" }, dir === "collect" ? "Collect into" : "Pay out from"));
                             const payRow = el("div", { class: "chiprow" });
                             let payAcct = "cash";
                             ["cash", "gcash", "bank"].forEach((acct) => {
@@ -2645,10 +2688,10 @@
                             modal.appendChild(payRow);
 
                             const quickRow = el("div", { class: "chiprow", style: "margin-top:8px" });
-                            if (owed > 0) {
-                                const fullChip = el("button", { type: "button", class: "chip preset" }, "Full " + fmtPeso(owed));
+                            if (magnitude > 0) {
+                                const fullChip = el("button", { type: "button", class: "chip preset" }, "Full " + fmtPeso(magnitude));
                                 fullChip.addEventListener("click", () => {
-                                    amtInp.value = owed.toFixed(2);
+                                    amtInp.value = magnitude.toFixed(2);
                                 });
                                 quickRow.appendChild(fullChip);
                             }
@@ -2656,7 +2699,14 @@
 
                             const btnRow = el("div", { class: "modal-btnrow" });
                             const cancelBtn = el("button", { type: "button", class: "bigbtn ghost" }, "Cancel");
-                            const confirmBtn = el("button", { type: "button", class: "bigbtn sale" }, "Collect payment");
+                            const confirmBtn = el(
+                                "button",
+                                {
+                                    type: "button",
+                                    class: "bigbtn " + (dir === "collect" ? "sale" : "transfer"),
+                                },
+                                dir === "collect" ? "Collect payment" : "Pay out",
+                            );
                             cancelBtn.addEventListener("click", () => {
                                 overlay.remove();
                                 resolve({ action: "cancelled" });
@@ -2664,29 +2714,31 @@
                             confirmBtn.addEventListener("click", async () => {
                                 const amt = Math.round((parseFloat(amtInp.value) || 0) * 100) / 100;
                                 if (!(amt > 0)) {
-                                    toast("Enter an amount to collect");
+                                    toast("Enter an amount");
                                     amtInp.focus();
                                     return;
                                 }
-                                if (amt > owed + 0.001) {
-                                    toast("Amount is more than they owe (" + fmtPeso(owed) + ")");
+                                if (amt > magnitude + 0.001) {
+                                    toast("Amount is more than the " + (dir === "collect" ? "balance owed" : "credit") + " (" + fmtPeso(magnitude) + ")");
                                     amtInp.focus();
                                     return;
                                 }
                                 confirmBtn.disabled = true;
-                                const result = await collectCustomerBalance(customer, companyId, amt, payAcct, "Settle customer balance · " + customer);
+                                const result = await settleCustomerBalance(customer, companyId, amt, payAcct, dir, (dir === "collect" ? "Collect · " : "Pay out credit · ") + customer);
                                 if (!result.ok) {
                                     confirmBtn.disabled = false;
                                     toast(result.message || "Could not settle");
                                     return;
                                 }
+                                const newBal = dir === "collect" ? Math.round((balance - amt) * 100) / 100 : Math.round((balance + amt) * 100) / 100;
                                 overlay.remove();
                                 resolve({
-                                    action: "settled",
+                                    action: dir === "collect" ? "settled" : "paidout",
                                     customer,
                                     amount: amt,
                                     paymentAccount: payAcct,
-                                    remaining: Math.round((owed - amt) * 100) / 100,
+                                    direction: dir,
+                                    remaining: newBal,
                                 });
                             });
                             btnRow.appendChild(cancelBtn);
@@ -2861,10 +2913,18 @@
                             if (t.payment === "payable") bal.payable += amt;
                             else if (bal.hasOwnProperty(t.payment)) bal[t.payment] -= amt;
                         } else if (t.type === "transfer") {
-                            if (bal.hasOwnProperty(t.fromAccount)) bal[t.fromAccount] -= amt;
-                            // Paying AP: transfer cash/GCash/bank → payable reduces the liability
-                            if (t.toAccount === "payable") bal.payable -= amt;
-                            else if (bal.hasOwnProperty(t.toAccount)) bal[t.toAccount] += amt;
+                            // Customer balance collect: only credit the till (no from-account).
+                            if (t.source === "customer-balance-collect") {
+                                if (bal.hasOwnProperty(t.toAccount)) bal[t.toAccount] += amt;
+                            } else if (t.source === "customer-balance-payout") {
+                                // Customer credit payout: only debit the till (Cash/GCash/Bank).
+                                if (bal.hasOwnProperty(t.fromAccount)) bal[t.fromAccount] -= amt;
+                            } else {
+                                if (bal.hasOwnProperty(t.fromAccount)) bal[t.fromAccount] -= amt;
+                                // Paying AP: transfer cash/GCash/bank → payable reduces the liability
+                                if (t.toAccount === "payable") bal.payable -= amt;
+                                else if (bal.hasOwnProperty(t.toAccount)) bal[t.toAccount] += amt;
+                            }
                         }
                     }
                     return bal;
@@ -10944,60 +11004,91 @@
                 async function customerBalancesCard(companyId) {
                     const card = el("div", { class: "card" });
                     card.appendChild(
-                        el("div", { class: "help-text" }, "Money customers still owe (short cash, partial pays). Settling collects into Cash, GCash, or Bank and updates running balances."),
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Signed balances for this company. Positive = customer owes you (collect into Cash/GCash/Bank). Negative = store credit — you owe them (pay out from Cash/GCash/Bank).",
+                        ),
                     );
 
+                    // Include zeros? Only non-trivial — list helper already filters abs >= 0.01
                     const balances = await dbListBalancesForCompany(companyId);
-                    const totalOwed = balances.reduce((s, r) => s + Math.max(0, Number(r.balance) || 0), 0);
+                    // Also pull any negative credits (same filter works for abs)
+                    const allBal = await dbGetAll("customerBalances");
+                    const scoped = (allBal || [])
+                        .filter((r) => r.companyId === companyId && Math.abs(Number(r.balance) || 0) >= 0.01)
+                        .sort((a, b) => Math.abs(Number(b.balance) || 0) - Math.abs(Number(a.balance) || 0));
 
-                    if (balances.length === 0) {
+                    const totalOwed = scoped.reduce((s, r) => s + Math.max(0, Number(r.balance) || 0), 0);
+                    const totalCredit = scoped.reduce((s, r) => s + Math.max(0, -(Number(r.balance) || 0)), 0);
+
+                    if (scoped.length === 0) {
                         card.appendChild(
                             el("div", { class: "empty small" }, [
-                                el("div", { class: "empty-title" }, "No outstanding balances"),
-                                el("div", { class: "empty-sub" }, "Short-cash sales or the form below can add amounts customers owe."),
+                                el("div", { class: "empty-title" }, "No customer balances"),
+                                el("div", { class: "empty-sub" }, "Short-cash sales add amounts customers owe. Use Add below for prior balances or store credit (enter a negative amount)."),
                             ]),
                         );
                     } else {
-                        // Summary strip
-                        const summary = el(
-                            "div",
-                            {
-                                class: "totalsrow grand",
-                                style: "margin:4px 0 12px;padding:10px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)",
-                            },
-                            [el("span", {}, balances.length + " customer" + (balances.length === 1 ? "" : "s")), el("span", { class: "val" }, fmtPeso(totalOwed))],
+                        const summary = el("div", { style: "margin:4px 0 12px" });
+                        summary.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Customers owe you"), el("span", { class: "val", style: "color:var(--rust)" }, fmtPeso(totalOwed))]));
+                        summary.appendChild(
+                            el("div", { class: "totalsrow" }, [el("span", {}, "Store credit (you owe)"), el("span", { class: "val", style: "color:var(--green)" }, fmtPeso(totalCredit))]),
                         );
                         card.appendChild(summary);
 
-                        balances.forEach((r) => {
-                            const owed = Number(r.balance) || 0;
+                        scoped.forEach((r) => {
+                            const bal = Number(r.balance) || 0;
+                            const isCredit = bal < 0;
+                            const mag = Math.abs(bal);
                             const block = el("div", {
                                 class: "txrow",
                                 style: "cursor:default;align-items:flex-start;padding:12px 2px",
                             });
                             const main = el("div", { class: "txrow-main", style: "min-width:0;flex:1" });
                             main.appendChild(el("div", { class: "txrow-title" }, r.customer || "(unnamed)"));
-                            const updated = r.updatedAt ? "Updated " + new Date(r.updatedAt).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" }) : "Outstanding";
-                            main.appendChild(el("div", { class: "txrow-sub" }, updated));
+                            const statusNote = isCredit ? "Store credit · you owe them" : "Owes you";
+                            const updated = r.updatedAt
+                                ? " · " +
+                                  new Date(r.updatedAt).toLocaleDateString("en-PH", {
+                                      month: "short",
+                                      day: "numeric",
+                                      year: "numeric",
+                                  })
+                                : "";
+                            main.appendChild(el("div", { class: "txrow-sub" }, statusNote + updated));
 
                             const amtCol = el("div", { style: "flex-shrink:0;text-align:right;padding-left:10px" });
-                            amtCol.appendChild(el("div", { class: "txrow-amt expenses", style: "padding-left:0" }, fmtPeso(owed)));
+                            amtCol.appendChild(
+                                el(
+                                    "div",
+                                    {
+                                        class: "txrow-amt " + (isCredit ? "sales" : "expenses"),
+                                        style: "padding-left:0",
+                                    },
+                                    (isCredit ? "−" : "") + fmtPeso(mag),
+                                ),
+                            );
 
                             const actionRow = el("div", {
                                 class: "chiprow",
                                 style: "margin-top:8px;width:100%",
                             });
-                            const settleBtn = el("button", { type: "button", class: "chip pay active" }, "Settle");
-                            settleBtn.addEventListener("click", async () => {
+                            const primaryBtn = el("button", { type: "button", class: "chip pay active" }, isCredit ? "Pay out" : "Collect");
+                            primaryBtn.addEventListener("click", async () => {
                                 const result = await openCustomerBalanceSettleModal({
                                     customer: r.customer,
                                     companyId,
-                                    balance: owed,
+                                    balance: bal,
                                     mode: "settle",
                                 });
                                 if (result.action === "settled") {
-                                    const left = result.remaining > 0.009 ? " · still owes " + fmtPeso(result.remaining) : " · paid in full";
+                                    const left = Math.abs(result.remaining) > 0.009 ? " · still owes " + fmtPeso(result.remaining) : " · paid in full";
                                     toast("Collected " + fmtPeso(result.amount) + " → " + accountLabel(result.paymentAccount) + left);
+                                    softRender();
+                                } else if (result.action === "paidout") {
+                                    const left = Math.abs(result.remaining) > 0.009 ? " · credit left " + fmtPeso(Math.abs(result.remaining)) : " · credit cleared";
+                                    toast("Paid out " + fmtPeso(result.amount) + " from " + accountLabel(result.paymentAccount) + left);
                                     softRender();
                                 }
                             });
@@ -11006,18 +11097,17 @@
                                 const result = await openCustomerBalanceSettleModal({
                                     customer: r.customer,
                                     companyId,
-                                    balance: owed,
+                                    balance: bal,
                                     mode: "writeoff",
                                 });
                                 if (result.action === "writtenoff") {
-                                    toast("Wrote off " + fmtPeso(result.amount) + " for " + (r.customer || ""));
+                                    toast("Wrote off " + fmtPeso(result.amount) + (result.wasCredit ? " credit" : "") + " for " + (r.customer || ""));
                                     softRender();
                                 }
                             });
-                            actionRow.appendChild(settleBtn);
+                            actionRow.appendChild(primaryBtn);
                             actionRow.appendChild(woBtn);
 
-                            // Wrap main+amt in a top row, actions full width
                             const top = el("div", {
                                 style: "display:flex;justify-content:space-between;align-items:flex-start;width:100%",
                             });
@@ -11031,9 +11121,11 @@
                         });
                     }
 
-                    // Add form
-                    card.appendChild(el("div", { class: "section-title", style: "margin-top:18px" }, "ADD BALANCE"));
-                    card.appendChild(el("div", { class: "help-text" }, "Record an amount already owed without creating a sale (e.g. prior shortfall)."));
+                    card.appendChild(el("div", { class: "section-title", style: "margin-top:18px" }, "ADD OR ADJUST"));
+                    card.appendChild(
+                        el("div", { class: "help-text" }, "Positive amount = customer owes you. Negative amount = store credit (you owe them). Does not move Cash/GCash until you Collect or Pay out."),
+                    );
+                    card.appendChild(el("label", { class: "flabel" }, "Customer name"));
                     const nameInp = el("input", {
                         type: "text",
                         class: "finput",
@@ -11046,20 +11138,18 @@
                         const names = await dbGetNamesFromBalances(companyId);
                         (names || []).forEach((n) => nameList.appendChild(el("option", { value: n })));
                     } catch (e) {}
-                    card.appendChild(el("label", { class: "flabel" }, "Customer name"));
                     card.appendChild(nameList);
                     card.appendChild(nameInp);
-                    card.appendChild(el("label", { class: "flabel" }, "Amount owed"));
+                    card.appendChild(el("label", { class: "flabel" }, "Amount (+ owes you / − credit)"));
                     const amtInp = el("input", {
                         type: "number",
                         class: "finput famount",
-                        placeholder: "0.00",
-                        min: "0.01",
+                        placeholder: "e.g. 50 or -50",
                         step: "0.01",
                         inputmode: "decimal",
                     });
                     card.appendChild(amtInp);
-                    const addBtn = el("button", { type: "button", class: "bigbtn sale small2" }, "Add customer balance");
+                    const addBtn = el("button", { type: "button", class: "bigbtn sale small2" }, "Save adjustment");
                     addBtn.addEventListener("click", async () => {
                         const name = nameInp.value.trim();
                         const amt = Math.round((parseFloat(amtInp.value) || 0) * 100) / 100;
@@ -11068,8 +11158,8 @@
                             nameInp.focus();
                             return;
                         }
-                        if (!(amt > 0)) {
-                            toast("Enter an amount greater than zero");
+                        if (!amt) {
+                            toast("Enter a non-zero amount");
                             amtInp.focus();
                             return;
                         }
@@ -11079,7 +11169,10 @@
                         }
                         const result = await dbUpsertBalance(name, companyId, amt);
                         if (result && result.ok) {
-                            toast(name + " now owes " + fmtPeso(result.balance));
+                            const b = result.balance;
+                            if (b > 0.009) toast(name + " owes you " + fmtPeso(b));
+                            else if (b < -0.009) toast(name + " has " + fmtPeso(Math.abs(b)) + " store credit");
+                            else toast(name + " is settled");
                             softRender();
                         } else {
                             toast((result && result.message) || "Could not save balance");
