@@ -1549,11 +1549,11 @@
                 let recordedPosSaleIds = null;
                 let recordedPosPromise = null;
 
-                 async function loadRecordedPosSaleIds(force) {
-                     if (!isCostingLinkEnabled()) {
-                         recordedPosSaleIds = null; // link off — unknown, never flag as missing
-                         return recordedPosSaleIds;
-                     }
+                async function loadRecordedPosSaleIds(force) {
+                    if (!isCostingLinkEnabled()) {
+                        recordedPosSaleIds = null; // link off — unknown, never flag as missing
+                        return recordedPosSaleIds;
+                    }
                     if (!force && recordedPosSaleIds) return recordedPosSaleIds;
                     if (!force && recordedPosPromise) return recordedPosPromise;
                     recordedPosPromise = (async () => {
@@ -1715,9 +1715,7 @@
 
                         // Direct material fallback: if a line is not a Costing product, match it
                         // against inventory material names and deduct the material directly.
-                        const materials = cdb.objectStoreNames.contains("materials")
-                            ? await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll())
-                            : [];
+                        const materials = cdb.objectStoreNames.contains("materials") ? await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll()) : [];
                         const matByName = {};
                         materials.forEach((mat) => {
                             const k = (mat.name || "").toLowerCase().trim();
@@ -2163,9 +2161,7 @@
                 /* Non-zero balances for one company, largest first — backs the Settings "Customer Balances" list. */
                 async function dbListBalancesForCompany(companyId) {
                     const all = await dbGetAll("customerBalances");
-                    return all
-                        .filter((r) => r.companyId === companyId && Math.abs(Number(r.balance) || 0) >= 0.01)
-                        .sort((a, b) => Math.abs(Number(b.balance) || 0) - Math.abs(Number(a.balance) || 0));
+                    return all.filter((r) => r.companyId === companyId && Math.abs(Number(r.balance) || 0) >= 0.01).sort((a, b) => Math.abs(Number(b.balance) || 0) - Math.abs(Number(a.balance) || 0));
                 }
 
                 /* ---------- Settings & company helpers ---------- */
@@ -2545,13 +2541,169 @@
                         fromAccount: "owner",
                         toAccount: paymentAccount,
                         date: new Date().toISOString(),
-                        note: note || ("Customer balance collection · " + name),
+                        note: note || "Customer balance collection · " + name,
                         createdAt: new Date().toISOString(),
                         source: "customer-balance-collect",
                         customerName: name,
                     };
                     const transferId = await dbAdd("transactions", transfer);
                     return { ok: true, transferId, amount: amt, paymentAccount };
+                }
+
+                /**
+                 * Proper settle / write-off UI for a customer balance (no window.prompt).
+                 * mode: "settle" | "writeoff"
+                 * Resolves { action: "settled"|"writtenoff"|"cancelled", ... }
+                 */
+                function openCustomerBalanceSettleModal(opts) {
+                    opts = opts || {};
+                    const customer = (opts.customer || "").trim();
+                    const companyId = opts.companyId;
+                    const owed = Math.round((Number(opts.balance) || 0) * 100) / 100;
+                    const mode = opts.mode || "settle";
+                    return new Promise((resolve) => {
+                        const existing = qs("#cust-balance-overlay");
+                        if (existing) existing.remove();
+                        const overlay = el("div", { class: "overlay", id: "cust-balance-overlay" });
+                        const modal = el("div", { class: "modal" });
+
+                        if (mode === "writeoff") {
+                            modal.appendChild(el("div", { class: "modal-title" }, "Write off balance"));
+                            modal.appendChild(
+                                el("div", { class: "help-text" }, "Clear " + fmtPeso(owed) + " owed by " + (customer || "this customer") + " without collecting cash. This cannot be undone."),
+                            );
+                            const btnRow = el("div", { class: "modal-btnrow" });
+                            const cancelBtn = el("button", { type: "button", class: "bigbtn ghost" }, "Cancel");
+                            const confirmBtn = el("button", { type: "button", class: "bigbtn danger" }, "Write off");
+                            cancelBtn.addEventListener("click", () => {
+                                overlay.remove();
+                                resolve({ action: "cancelled" });
+                            });
+                            confirmBtn.addEventListener("click", async () => {
+                                confirmBtn.disabled = true;
+                                await dbClearBalance(customer, companyId);
+                                overlay.remove();
+                                resolve({ action: "writtenoff", customer, amount: owed });
+                            });
+                            btnRow.appendChild(cancelBtn);
+                            btnRow.appendChild(confirmBtn);
+                            modal.appendChild(btnRow);
+                        } else {
+                            modal.appendChild(el("div", { class: "modal-title" }, "Settle customer balance"));
+                            modal.appendChild(
+                                el(
+                                    "div",
+                                    { class: "help-text" },
+                                    (customer || "Customer") + " owes " + fmtPeso(owed) + ". Collect into Cash, GCash, or Bank — that account increases and the balance is reduced.",
+                                ),
+                            );
+
+                            modal.appendChild(el("label", { class: "flabel" }, "Customer"));
+                            modal.appendChild(
+                                el(
+                                    "div",
+                                    {
+                                        class: "finput",
+                                        style: "background:var(--border-soft);font-weight:600",
+                                    },
+                                    customer || "(unnamed)",
+                                ),
+                            );
+
+                            modal.appendChild(el("label", { class: "flabel" }, "Amount to collect"));
+                            const amtInp = el("input", {
+                                type: "number",
+                                class: "finput famount",
+                                id: "cust-settle-amt",
+                                min: "0.01",
+                                step: "0.01",
+                                value: owed > 0 ? owed.toFixed(2) : "",
+                                inputmode: "decimal",
+                            });
+                            modal.appendChild(amtInp);
+                            modal.appendChild(el("div", { class: "help-text", style: "margin-top:4px" }, "Leave as full amount, or enter a smaller amount for a partial collection."));
+
+                            modal.appendChild(el("label", { class: "flabel" }, "Collect into"));
+                            const payRow = el("div", { class: "chiprow" });
+                            let payAcct = "cash";
+                            ["cash", "gcash", "bank"].forEach((acct) => {
+                                const chip = el(
+                                    "button",
+                                    {
+                                        type: "button",
+                                        class: "chip pay" + (acct === payAcct ? " active" : ""),
+                                    },
+                                    accountLabel(acct),
+                                );
+                                chip.addEventListener("click", () => {
+                                    payAcct = acct;
+                                    qsa(".chip.pay", payRow).forEach((c) => c.classList.remove("active"));
+                                    chip.classList.add("active");
+                                });
+                                payRow.appendChild(chip);
+                            });
+                            modal.appendChild(payRow);
+
+                            const quickRow = el("div", { class: "chiprow", style: "margin-top:8px" });
+                            if (owed > 0) {
+                                const fullChip = el("button", { type: "button", class: "chip preset" }, "Full " + fmtPeso(owed));
+                                fullChip.addEventListener("click", () => {
+                                    amtInp.value = owed.toFixed(2);
+                                });
+                                quickRow.appendChild(fullChip);
+                            }
+                            modal.appendChild(quickRow);
+
+                            const btnRow = el("div", { class: "modal-btnrow" });
+                            const cancelBtn = el("button", { type: "button", class: "bigbtn ghost" }, "Cancel");
+                            const confirmBtn = el("button", { type: "button", class: "bigbtn sale" }, "Collect payment");
+                            cancelBtn.addEventListener("click", () => {
+                                overlay.remove();
+                                resolve({ action: "cancelled" });
+                            });
+                            confirmBtn.addEventListener("click", async () => {
+                                const amt = Math.round((parseFloat(amtInp.value) || 0) * 100) / 100;
+                                if (!(amt > 0)) {
+                                    toast("Enter an amount to collect");
+                                    amtInp.focus();
+                                    return;
+                                }
+                                if (amt > owed + 0.001) {
+                                    toast("Amount is more than they owe (" + fmtPeso(owed) + ")");
+                                    amtInp.focus();
+                                    return;
+                                }
+                                confirmBtn.disabled = true;
+                                const result = await collectCustomerBalance(customer, companyId, amt, payAcct, "Settle customer balance · " + customer);
+                                if (!result.ok) {
+                                    confirmBtn.disabled = false;
+                                    toast(result.message || "Could not settle");
+                                    return;
+                                }
+                                overlay.remove();
+                                resolve({
+                                    action: "settled",
+                                    customer,
+                                    amount: amt,
+                                    paymentAccount: payAcct,
+                                    remaining: Math.round((owed - amt) * 100) / 100,
+                                });
+                            });
+                            btnRow.appendChild(cancelBtn);
+                            btnRow.appendChild(confirmBtn);
+                            modal.appendChild(btnRow);
+                            setTimeout(() => amtInp.focus(), 50);
+                        }
+
+                        overlay.appendChild(modal);
+                        overlay.addEventListener("click", (e) => {
+                            if (e.target === overlay) {
+                                overlay.remove();
+                                resolve({ action: "cancelled" });
+                            }
+                        });
+                        document.body.appendChild(overlay);
+                    });
                 }
 
                 /* ---------- App state ---------- */
@@ -2699,12 +2851,7 @@
                             // Full sale amount stays on the transaction for revenue; shortfall is tracked
                             // via customerBalances (or left as under-collection if the user skipped it).
                             const tendered = t.tendered != null ? Number(t.tendered) : null;
-                            if (
-                                tendered != null &&
-                                isFinite(tendered) &&
-                                ["cash", "gcash", "bank"].includes(t.payment) &&
-                                tendered < amt
-                            ) {
+                            if (tendered != null && isFinite(tendered) && ["cash", "gcash", "bank"].includes(t.payment) && tendered < amt) {
                                 bal[t.payment] += tendered;
                             } else {
                                 bal[t.payment] += amt;
@@ -4131,8 +4278,7 @@
                             tendered,
                             change,
                             // When short, amountReceived is the cash that actually hit the till.
-                            amountReceived:
-                                isSale && cashLike && tendered != null && tendered < total ? tendered : total,
+                            amountReceived: isSale && cashLike && tendered != null && tendered < total ? tendered : total,
                             customerName: isSale ? customerName || null : null,
                             shortfall: isSale && App._short ? App._short : null,
                             fromAccount: null,
@@ -4235,14 +4381,7 @@
                         filterCard.appendChild(crow);
                         if (App.historyFilters.from || App.historyFilters.to) {
                             filterCard.appendChild(
-                                el(
-                                    "div",
-                                    { class: "help-text", style: "margin-top:6px" },
-                                    "Custom: " +
-                                        (App.historyFilters.from || "…") +
-                                        " → " +
-                                        (App.historyFilters.to || "today"),
-                                ),
+                                el("div", { class: "help-text", style: "margin-top:6px" }, "Custom: " + (App.historyFilters.from || "…") + " → " + (App.historyFilters.to || "today")),
                             );
                         }
                     }
@@ -4502,11 +4641,7 @@
                             );
                         } else if (t.type === "expense" && t.payment === "payable" && !t.settledAt) {
                             modal.appendChild(
-                                el(
-                                    "div",
-                                    { class: "help-text", style: "margin-top:8px" },
-                                    "This expense is on accounts payable. Use “Settle” below when you settle it from Cash, GCash, or Bank.",
-                                ),
+                                el("div", { class: "help-text", style: "margin-top:8px" }, "This expense is on accounts payable. Use “Settle” below when you settle it from Cash, GCash, or Bank."),
                             );
                         } else if (t.type === "expense" && t.settledAt) {
                             modal.appendChild(
@@ -4551,15 +4686,8 @@
                         });
                         modal.appendChild(tenderedInp);
                         const changeNow = t.tendered != null ? +(t.tendered - t.amount).toFixed(2) : null;
-                        editChangeDisplay = el(
-                            "span",
-                            { class: "val" },
-                            changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow),
-                        );
-                        editChangeRow = el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [
-                            el("span", {}, "Change Due"),
-                            editChangeDisplay,
-                        ]);
+                        editChangeDisplay = el("span", { class: "val" }, changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow));
+                        editChangeRow = el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [el("span", {}, "Change Due"), editChangeDisplay]);
                         modal.appendChild(editChangeRow);
                         // Keep change due in sync when total amount is edited
                         amtInp.addEventListener("input", updateEditChangeDue);
@@ -4765,20 +4893,16 @@
                                     { class: "help-text" },
                                     custForBalance
                                         ? custForBalance +
-                                          " currently owes " +
-                                          fmtPeso(currentBalance) +
-                                          ". Choose Cash or GCash (or Bank) — that account increases and the customer balance is reduced."
+                                              " currently owes " +
+                                              fmtPeso(currentBalance) +
+                                              ". Choose Cash or GCash (or Bank) — that account increases and the customer balance is reduced."
                                         : "No customer name on this transaction — partial pay unavailable.",
                                 ),
                             );
                             const payMethodRow = el("div", { class: "chiprow", style: "margin-top:6px" });
                             let partialPayAcct = "cash";
                             ["cash", "gcash", "bank"].forEach((acct) => {
-                                const chip = el(
-                                    "button",
-                                    { type: "button", class: "chip pay" + (acct === partialPayAcct ? " active" : "") },
-                                    accountLabel(acct),
-                                );
+                                const chip = el("button", { type: "button", class: "chip pay" + (acct === partialPayAcct ? " active" : "") }, accountLabel(acct));
                                 chip.dataset.value = acct;
                                 chip.addEventListener("click", () => {
                                     partialPayAcct = acct;
@@ -4820,27 +4944,16 @@
                                 const balRec = await dbGetBalance(cust, cid);
                                 const owed = balRec ? Number(balRec.balance) || 0 : 0;
                                 if (partial > owed + 0.001) {
-                                    if (!confirm(cust + " only owes " + fmtPeso(owed) + ". Apply " + fmtPeso(partial) + " anyway?")) return;
+                                    toast(cust + " only owes " + fmtPeso(owed));
+                                    return;
                                 }
-                                const result = await collectCustomerBalance(
-                                    cust,
-                                    cid,
-                                    partial,
-                                    partialPayAcct,
-                                    "Partial settle · Sale #" + id + " · " + accountLabel(partialPayAcct),
-                                );
+                                const result = await collectCustomerBalance(cust, cid, partial, partialPayAcct, "Partial settle · Sale #" + id + " · " + accountLabel(partialPayAcct));
                                 if (!result.ok) {
                                     toast(result.message || "Could not apply partial");
                                     return;
                                 }
                                 overlay.remove();
-                                toast(
-                                    "Partial " +
-                                        fmtPeso(partial) +
-                                        " → " +
-                                        accountLabel(partialPayAcct) +
-                                        " · balance reduced",
-                                );
+                                toast("Partial " + fmtPeso(partial) + " → " + accountLabel(partialPayAcct) + " · balance reduced");
                                 softRender();
                             });
                             modal.appendChild(picker);
@@ -4930,9 +5043,7 @@
                     const overlay = el("div", { class: "overlay" });
                     const modal = el("div", { class: "modal" });
                     const copyIconBtn = el("button", { type: "button", class: "receipt-copy-icon", title: "Copy as text" }, "\u{1F4CB}");
-                    modal.appendChild(
-                        el("div", { class: "modal-title-row" }, [el("div", { class: "modal-title" }, "Generate Receipt"), copyIconBtn]),
-                    );
+                    modal.appendChild(el("div", { class: "modal-title-row" }, [el("div", { class: "modal-title" }, "Generate Receipt"), copyIconBtn]));
 
                     const paper = el("div", { class: "receipt-paper", id: "receiptPrintArea" });
                     paper.appendChild(
@@ -4945,15 +5056,9 @@
                     paper.appendChild(el("hr", { class: "receipt-divider" }));
 
                     if (t.type === "transfer") {
-                        paper.appendChild(
-                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Description"), el("span", {}, t.item || "")]),
-                        );
-                        paper.appendChild(
-                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "From"), el("span", {}, accountLabel(t.fromAccount))]),
-                        );
-                        paper.appendChild(
-                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "To"), el("span", {}, accountLabel(t.toAccount))]),
-                        );
+                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Description"), el("span", {}, t.item || "")]));
+                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "From"), el("span", {}, accountLabel(t.fromAccount))]));
+                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "To"), el("span", {}, accountLabel(t.toAccount))]));
                     } else if (lines.length) {
                         lines.forEach((ln) => {
                             const sub = [ln.category, ln.qty ? "qty " + ln.qty : null, ln.unitPrice ? "@ " + fmtPeso(ln.unitPrice) : null].filter(Boolean).join(" · ");
@@ -4970,13 +5075,9 @@
                     paper.appendChild(el("div", { class: "receipt-total" }, [el("span", {}, "Total"), el("span", {}, fmtPeso(t.amount))]));
 
                     if (t.type !== "transfer") {
-                        paper.appendChild(
-                            el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Payment"), el("span", {}, paymentLabel(t.payment))]),
-                        );
+                        paper.appendChild(el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Payment"), el("span", {}, paymentLabel(t.payment))]));
                         if (t.tendered != null) {
-                            paper.appendChild(
-                                el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Tendered"), el("span", {}, fmtPeso(t.tendered))]),
-                            );
+                            paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Tendered"), el("span", {}, fmtPeso(t.tendered))]));
                             paper.appendChild(
                                 el("div", { class: "receipt-line" }, [
                                     el("span", { class: "rl-label" }, t.change != null && t.change < 0 ? "Short" : "Change"),
@@ -4986,13 +5087,9 @@
                         }
                     }
                     if (t.note) {
-                        paper.appendChild(
-                            el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Note"), el("span", {}, t.note)]),
-                        );
+                        paper.appendChild(el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Note"), el("span", {}, t.note)]));
                     }
-                    paper.appendChild(
-                        el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Ref #"), el("span", {}, String(id))]),
-                    );
+                    paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Ref #"), el("span", {}, String(id))]));
                     paper.appendChild(el("div", { class: "receipt-footer" }, "Thank you!"));
 
                     modal.appendChild(paper);
@@ -5451,16 +5548,7 @@
                         crow.appendChild(apply);
                         rangeCard.appendChild(crow);
                         if (App.reportCustom && (App.reportCustom.from || App.reportCustom.to)) {
-                            rangeCard.appendChild(
-                                el(
-                                    "div",
-                                    { class: "help-text", style: "margin-top:6px" },
-                                    "Custom: " +
-                                        (App.reportCustom.from || "…") +
-                                        " → " +
-                                        (App.reportCustom.to || "today"),
-                                ),
-                            );
+                            rangeCard.appendChild(el("div", { class: "help-text", style: "margin-top:6px" }, "Custom: " + (App.reportCustom.from || "…") + " → " + (App.reportCustom.to || "today")));
                         }
                     }
                     wrap.appendChild(rangeCard);
@@ -10856,135 +10944,96 @@
                 async function customerBalancesCard(companyId) {
                     const card = el("div", { class: "card" });
                     card.appendChild(
-                        el(
-                            "div",
-                            { class: "help-text" },
-                            "Amounts customers still owe from short-cash sales or partial settles, for this company only. Settle with Cash or GCash to update running balances.",
-                        ),
+                        el("div", { class: "help-text" }, "Money customers still owe (short cash, partial pays). Settling collects into Cash, GCash, or Bank and updates running balances."),
                     );
+
                     const balances = await dbListBalancesForCompany(companyId);
+                    const totalOwed = balances.reduce((s, r) => s + Math.max(0, Number(r.balance) || 0), 0);
+
                     if (balances.length === 0) {
-                        card.appendChild(el("div", { class: "empty small" }, "No outstanding customer balances."));
+                        card.appendChild(
+                            el("div", { class: "empty small" }, [
+                                el("div", { class: "empty-title" }, "No outstanding balances"),
+                                el("div", { class: "empty-sub" }, "Short-cash sales or the form below can add amounts customers owe."),
+                            ]),
+                        );
                     } else {
+                        // Summary strip
+                        const summary = el(
+                            "div",
+                            {
+                                class: "totalsrow grand",
+                                style: "margin:4px 0 12px;padding:10px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)",
+                            },
+                            [el("span", {}, balances.length + " customer" + (balances.length === 1 ? "" : "s")), el("span", { class: "val" }, fmtPeso(totalOwed))],
+                        );
+                        card.appendChild(summary);
+
                         balances.forEach((r) => {
+                            const owed = Number(r.balance) || 0;
                             const block = el("div", {
-                                style: "border-bottom:1px dotted var(--border);padding:10px 0",
+                                class: "txrow",
+                                style: "cursor:default;align-items:flex-start;padding:12px 2px",
                             });
-                            const row = el("div", { class: "totalsrow", style: "align-items:center;margin:0" }, [
-                                el("span", {}, r.customer || "(unnamed)"),
-                                el("span", { class: "val" }, fmtPeso(r.balance)),
-                            ]);
-                            block.appendChild(row);
-                            const actions = el("div", { class: "chiprow", style: "margin-top:6px" });
-                            let settleAcct = "cash";
-                            ["cash", "gcash"].forEach((acct) => {
-                                const chip = el(
-                                    "button",
-                                    { type: "button", class: "chip pay" + (acct === settleAcct ? " active" : "") },
-                                    accountLabel(acct),
-                                );
-                                chip.addEventListener("click", () => {
-                                    settleAcct = acct;
-                                    qsa(".chip.pay", actions).forEach((c) => {
-                                        if (c.dataset.role === "pay") c.classList.remove("active");
-                                    });
-                                    chip.classList.add("active");
-                                });
-                                chip.dataset.role = "pay";
-                                actions.appendChild(chip);
+                            const main = el("div", { class: "txrow-main", style: "min-width:0;flex:1" });
+                            main.appendChild(el("div", { class: "txrow-title" }, r.customer || "(unnamed)"));
+                            const updated = r.updatedAt ? "Updated " + new Date(r.updatedAt).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" }) : "Outstanding";
+                            main.appendChild(el("div", { class: "txrow-sub" }, updated));
+
+                            const amtCol = el("div", { style: "flex-shrink:0;text-align:right;padding-left:10px" });
+                            amtCol.appendChild(el("div", { class: "txrow-amt expenses", style: "padding-left:0" }, fmtPeso(owed)));
+
+                            const actionRow = el("div", {
+                                class: "chiprow",
+                                style: "margin-top:8px;width:100%",
                             });
-                            const settleBtn = el("button", { type: "button", class: "chip" }, "Settle full");
+                            const settleBtn = el("button", { type: "button", class: "chip pay active" }, "Settle");
                             settleBtn.addEventListener("click", async () => {
-                                const owed = Math.abs(Number(r.balance) || 0);
-                                if (!(owed > 0)) {
-                                    toast("Nothing to settle");
-                                    return;
-                                }
-                                if (
-                                    !confirm(
-                                        "Collect " +
-                                            fmtPeso(owed) +
-                                            " from " +
-                                            (r.customer || "") +
-                                            " into " +
-                                            accountLabel(settleAcct) +
-                                            "?",
-                                    )
-                                )
-                                    return;
-                                const result = await collectCustomerBalance(
-                                    r.customer,
+                                const result = await openCustomerBalanceSettleModal({
+                                    customer: r.customer,
                                     companyId,
-                                    owed,
-                                    settleAcct,
-                                    "Settle customer balance · " + (r.customer || ""),
-                                );
-                                if (!result.ok) {
-                                    toast(result.message || "Settle failed");
-                                    return;
+                                    balance: owed,
+                                    mode: "settle",
+                                });
+                                if (result.action === "settled") {
+                                    const left = result.remaining > 0.009 ? " · still owes " + fmtPeso(result.remaining) : " · paid in full";
+                                    toast("Collected " + fmtPeso(result.amount) + " → " + accountLabel(result.paymentAccount) + left);
+                                    softRender();
                                 }
-                                toast("Settled " + fmtPeso(owed) + " → " + accountLabel(settleAcct));
-                                softRender();
                             });
-                            actions.appendChild(settleBtn);
-                            const partialBtn = el("button", { type: "button", class: "chip" }, "Partial…");
-                            partialBtn.addEventListener("click", async () => {
-                                const raw = prompt(
-                                    "Amount to collect from " + (r.customer || "") + " into " + accountLabel(settleAcct) + ":",
-                                    String(Math.abs(Number(r.balance) || 0)),
-                                );
-                                if (raw == null) return;
-                                const partial = Math.round((parseFloat(raw) || 0) * 100) / 100;
-                                if (!(partial > 0)) {
-                                    toast("Enter an amount");
-                                    return;
-                                }
-                                const result = await collectCustomerBalance(
-                                    r.customer,
-                                    companyId,
-                                    partial,
-                                    settleAcct,
-                                    "Partial customer balance · " + (r.customer || ""),
-                                );
-                                if (!result.ok) {
-                                    toast(result.message || "Partial settle failed");
-                                    return;
-                                }
-                                toast("Collected " + fmtPeso(partial) + " → " + accountLabel(settleAcct));
-                                softRender();
-                            });
-                            actions.appendChild(partialBtn);
-                            const woBtn = el("button", { type: "button", class: "chip-x", title: "Write off balance" }, "×");
+                            const woBtn = el("button", { type: "button", class: "chip" }, "Write off");
                             woBtn.addEventListener("click", async () => {
-                                if (
-                                    !confirm(
-                                        'Write off ' +
-                                            fmtPeso(r.balance) +
-                                            ' owed by "' +
-                                            (r.customer || "") +
-                                            '"? This cannot be undone.',
-                                    )
-                                )
-                                    return;
-                                await dbClearBalance(r.customer, companyId);
-                                toast("Balance written off");
-                                softRender();
+                                const result = await openCustomerBalanceSettleModal({
+                                    customer: r.customer,
+                                    companyId,
+                                    balance: owed,
+                                    mode: "writeoff",
+                                });
+                                if (result.action === "writtenoff") {
+                                    toast("Wrote off " + fmtPeso(result.amount) + " for " + (r.customer || ""));
+                                    softRender();
+                                }
                             });
-                            actions.appendChild(woBtn);
-                            block.appendChild(actions);
+                            actionRow.appendChild(settleBtn);
+                            actionRow.appendChild(woBtn);
+
+                            // Wrap main+amt in a top row, actions full width
+                            const top = el("div", {
+                                style: "display:flex;justify-content:space-between;align-items:flex-start;width:100%",
+                            });
+                            top.appendChild(main);
+                            top.appendChild(amtCol);
+                            const wrap = el("div", { style: "width:100%" });
+                            wrap.appendChild(top);
+                            wrap.appendChild(actionRow);
+                            block.appendChild(wrap);
                             card.appendChild(block);
                         });
                     }
 
-                    card.appendChild(el("div", { class: "flabel", style: "margin-top:12px" }, "Add customer balance"));
-                    card.appendChild(
-                        el(
-                            "div",
-                            { class: "help-text" },
-                            "Record an amount a customer already owes without creating a new sale.",
-                        ),
-                    );
-                    const addRow = el("div", { class: "addrow" });
+                    // Add form
+                    card.appendChild(el("div", { class: "section-title", style: "margin-top:18px" }, "ADD BALANCE"));
+                    card.appendChild(el("div", { class: "help-text" }, "Record an amount already owed without creating a sale (e.g. prior shortfall)."));
                     const nameInp = el("input", {
                         type: "text",
                         class: "finput",
@@ -10997,16 +11046,20 @@
                         const names = await dbGetNamesFromBalances(companyId);
                         (names || []).forEach((n) => nameList.appendChild(el("option", { value: n })));
                     } catch (e) {}
+                    card.appendChild(el("label", { class: "flabel" }, "Customer name"));
                     card.appendChild(nameList);
+                    card.appendChild(nameInp);
+                    card.appendChild(el("label", { class: "flabel" }, "Amount owed"));
                     const amtInp = el("input", {
                         type: "number",
-                        class: "finput",
-                        placeholder: "Amount owed",
+                        class: "finput famount",
+                        placeholder: "0.00",
                         min: "0.01",
                         step: "0.01",
-                        style: "max-width:110px",
+                        inputmode: "decimal",
                     });
-                    const addBtn = el("button", { type: "button", class: "smallbtn" }, "Add");
+                    card.appendChild(amtInp);
+                    const addBtn = el("button", { type: "button", class: "bigbtn sale small2" }, "Add customer balance");
                     addBtn.addEventListener("click", async () => {
                         const name = nameInp.value.trim();
                         const amt = Math.round((parseFloat(amtInp.value) || 0) * 100) / 100;
@@ -11032,10 +11085,7 @@
                             toast((result && result.message) || "Could not save balance");
                         }
                     });
-                    addRow.appendChild(nameInp);
-                    addRow.appendChild(amtInp);
-                    addRow.appendChild(addBtn);
-                    card.appendChild(addRow);
+                    card.appendChild(addBtn);
                     return card;
                 }
 
