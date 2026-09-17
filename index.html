@@ -1549,11 +1549,11 @@
                 let recordedPosSaleIds = null;
                 let recordedPosPromise = null;
 
-                async function loadRecordedPosSaleIds(force) {
-                    if (!isCostingLinkEnabled()) {
-                        recordedPosSaleIds = null; // link off — unknown, never flag as missing
-                        return recordedPosSaleIds;
-                    }
+                 async function loadRecordedPosSaleIds(force) {
+                     if (!isCostingLinkEnabled()) {
+                         recordedPosSaleIds = null; // link off — unknown, never flag as missing
+                         return recordedPosSaleIds;
+                     }
                     if (!force && recordedPosSaleIds) return recordedPosSaleIds;
                     if (!force && recordedPosPromise) return recordedPosPromise;
                     recordedPosPromise = (async () => {
@@ -1715,7 +1715,9 @@
 
                         // Direct material fallback: if a line is not a Costing product, match it
                         // against inventory material names and deduct the material directly.
-                        const materials = cdb.objectStoreNames.contains("materials") ? await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll()) : [];
+                        const materials = cdb.objectStoreNames.contains("materials")
+                            ? await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll())
+                            : [];
                         const matByName = {};
                         materials.forEach((mat) => {
                             const k = (mat.name || "").toLowerCase().trim();
@@ -2161,7 +2163,9 @@
                 /* Non-zero balances for one company, largest first — backs the Settings "Customer Balances" list. */
                 async function dbListBalancesForCompany(companyId) {
                     const all = await dbGetAll("customerBalances");
-                    return all.filter((r) => r.companyId === companyId && Math.abs(Number(r.balance) || 0) >= 0.01).sort((a, b) => Math.abs(Number(b.balance) || 0) - Math.abs(Number(a.balance) || 0));
+                    return all
+                        .filter((r) => r.companyId === companyId && Math.abs(Number(r.balance) || 0) >= 0.01)
+                        .sort((a, b) => Math.abs(Number(b.balance) || 0) - Math.abs(Number(a.balance) || 0));
                 }
 
                 /* ---------- Settings & company helpers ---------- */
@@ -3798,6 +3802,7 @@
                             qsa(".chip.pay", payRow).forEach((c) => c.classList.remove("active"));
                             chip.classList.add("active");
                             updateChangeDue();
+                            updateCustomerVisibility(p);
                             // Amount tendered only applies to cash-like payments
                             const tenderWrap = qs("#f-tendered-wrap");
                             if (tenderWrap) tenderWrap.style.display = p === "receivable" || p === "payable" ? "none" : "";
@@ -3826,9 +3831,9 @@
                         tenderWrap.appendChild(changeRow);
                         form.appendChild(tenderWrap);
                     }
-                    const haveCustomer = isSale && (t.payment === "receivable" || ((t.payment === "cash" || t.payment === "gcash" || t.payment === "bank") && false));
-                    if (isSale && ["cash", "gcash", "bank", "receivable"].includes(t.payment)) {
-                        form.appendChild(el("label", { class: "flabel" }, "Customer Name"));
+                    const custWrap = el("div", { id: "f-customer-wrap" });
+                    if (isSale) {
+                        custWrap.appendChild(el("label", { class: "flabel" }, "Customer Name"));
                         const custList = el("datalist", { id: "f-cust-names" });
                         try {
                             const names = await dbGetNamesFromBalances(await getActiveCompanyId());
@@ -3836,7 +3841,7 @@
                         } catch (err2) {
                             /* datalist is a soft enhancement — ignore fill errors */
                         }
-                        form.appendChild(custList);
+                        custWrap.appendChild(custList);
                         const custInp = el("input", {
                             type: "text",
                             class: "finput",
@@ -3845,8 +3850,15 @@
                             placeholder: "e.g. Aling Nena Store (optional)",
                             autocomplete: "off",
                         });
-                        form.appendChild(custInp);
-                        if (t.customerName) custInp.value = t.customerName;
+                        custWrap.appendChild(custInp);
+                        // Only cash/gcash/bank/receivable sales take a customer name; hidden for "other".
+                        // updateCustomerVisibility (below) keeps this in sync as the payment chip changes.
+                        custWrap.style.display = ["cash", "gcash", "bank", "receivable"].includes(paymentOptions[0]) ? "" : "none";
+                        form.appendChild(custWrap);
+                    }
+                    function updateCustomerVisibility(p) {
+                        if (!isSale) return;
+                        custWrap.style.display = ["cash", "gcash", "bank", "receivable"].includes(p) ? "" : "none";
                     }
                     function updateChangeDue() {
                         if (!isSale) return;
@@ -3932,15 +3944,8 @@
                         if (isSale && cashLike && tendered != null && tendered < total && customerName) {
                             const shortfall = +(total - tendered).toFixed(2);
                             const owe = confirm(
-                                "Customer " +
-                                    customerName +
-                                    " is short " +
-                                    fmtPeso(shortfall) +
-                                    " on this " +
-                                    fmtPeso(total) +
-                                    " sale.\n\nRecord " +
-                                    fmtPeso(shortfall) +
-                                    " as a customer balance they owe for later settlement?",
+                                "Customer " + customerName + " is short " + fmtPeso(shortfall) + " on this " + fmtPeso(total) +
+                                " sale.\n\nRecord " + fmtPeso(shortfall) + " as a customer balance they owe for later settlement?"
                             );
                             if (!owe) {
                                 toast("Not recorded — sale saved as under-collected");
@@ -4071,7 +4076,14 @@
                         filterCard.appendChild(crow);
                         if (App.historyFilters.from || App.historyFilters.to) {
                             filterCard.appendChild(
-                                el("div", { class: "help-text", style: "margin-top:6px" }, "Custom: " + (App.historyFilters.from || "…") + " → " + (App.historyFilters.to || "today")),
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:6px" },
+                                    "Custom: " +
+                                        (App.historyFilters.from || "…") +
+                                        " → " +
+                                        (App.historyFilters.to || "today"),
+                                ),
                             );
                         }
                     }
@@ -4331,7 +4343,11 @@
                             );
                         } else if (t.type === "expense" && t.payment === "payable" && !t.settledAt) {
                             modal.appendChild(
-                                el("div", { class: "help-text", style: "margin-top:8px" }, "This expense is on accounts payable. Use “Settle” below when you settle it from Cash, GCash, or Bank."),
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:8px" },
+                                    "This expense is on accounts payable. Use “Settle” below when you settle it from Cash, GCash, or Bank.",
+                                ),
                             );
                         } else if (t.type === "expense" && t.settledAt) {
                             modal.appendChild(
@@ -4376,8 +4392,15 @@
                         });
                         modal.appendChild(tenderedInp);
                         const changeNow = t.tendered != null ? +(t.tendered - t.amount).toFixed(2) : null;
-                        editChangeDisplay = el("span", { class: "val" }, changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow));
-                        editChangeRow = el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [el("span", {}, "Change Due"), editChangeDisplay]);
+                        editChangeDisplay = el(
+                            "span",
+                            { class: "val" },
+                            changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow),
+                        );
+                        editChangeRow = el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [
+                            el("span", {}, "Change Due"),
+                            editChangeDisplay,
+                        ]);
                         modal.appendChild(editChangeRow);
                         // Keep change due in sync when total amount is edited
                         amtInp.addEventListener("input", updateEditChangeDue);
@@ -4584,7 +4607,9 @@
                                 el(
                                     "div",
                                     { class: "help-text" },
-                                    custForBalance ? custForBalance + " currently owes " + fmtPeso(currentBalance) + "." : "No customer name on this transaction — partial pay unavailable.",
+                                    custForBalance
+                                        ? custForBalance + " currently owes " + fmtPeso(currentBalance) + "."
+                                        : "No customer name on this transaction — partial pay unavailable.",
                                 ),
                             );
                             const prow = el("div", { class: "inline" });
@@ -4713,7 +4738,9 @@
                     const overlay = el("div", { class: "overlay" });
                     const modal = el("div", { class: "modal" });
                     const copyIconBtn = el("button", { type: "button", class: "receipt-copy-icon", title: "Copy as text" }, "\u{1F4CB}");
-                    modal.appendChild(el("div", { class: "modal-title-row" }, [el("div", { class: "modal-title" }, "Generate Receipt"), copyIconBtn]));
+                    modal.appendChild(
+                        el("div", { class: "modal-title-row" }, [el("div", { class: "modal-title" }, "Generate Receipt"), copyIconBtn]),
+                    );
 
                     const paper = el("div", { class: "receipt-paper", id: "receiptPrintArea" });
                     paper.appendChild(
@@ -4726,9 +4753,15 @@
                     paper.appendChild(el("hr", { class: "receipt-divider" }));
 
                     if (t.type === "transfer") {
-                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Description"), el("span", {}, t.item || "")]));
-                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "From"), el("span", {}, accountLabel(t.fromAccount))]));
-                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "To"), el("span", {}, accountLabel(t.toAccount))]));
+                        paper.appendChild(
+                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Description"), el("span", {}, t.item || "")]),
+                        );
+                        paper.appendChild(
+                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "From"), el("span", {}, accountLabel(t.fromAccount))]),
+                        );
+                        paper.appendChild(
+                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "To"), el("span", {}, accountLabel(t.toAccount))]),
+                        );
                     } else if (lines.length) {
                         lines.forEach((ln) => {
                             const sub = [ln.category, ln.qty ? "qty " + ln.qty : null, ln.unitPrice ? "@ " + fmtPeso(ln.unitPrice) : null].filter(Boolean).join(" · ");
@@ -4745,9 +4778,13 @@
                     paper.appendChild(el("div", { class: "receipt-total" }, [el("span", {}, "Total"), el("span", {}, fmtPeso(t.amount))]));
 
                     if (t.type !== "transfer") {
-                        paper.appendChild(el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Payment"), el("span", {}, paymentLabel(t.payment))]));
+                        paper.appendChild(
+                            el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Payment"), el("span", {}, paymentLabel(t.payment))]),
+                        );
                         if (t.tendered != null) {
-                            paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Tendered"), el("span", {}, fmtPeso(t.tendered))]));
+                            paper.appendChild(
+                                el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Tendered"), el("span", {}, fmtPeso(t.tendered))]),
+                            );
                             paper.appendChild(
                                 el("div", { class: "receipt-line" }, [
                                     el("span", { class: "rl-label" }, t.change != null && t.change < 0 ? "Short" : "Change"),
@@ -4757,9 +4794,13 @@
                         }
                     }
                     if (t.note) {
-                        paper.appendChild(el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Note"), el("span", {}, t.note)]));
+                        paper.appendChild(
+                            el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Note"), el("span", {}, t.note)]),
+                        );
                     }
-                    paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Ref #"), el("span", {}, String(id))]));
+                    paper.appendChild(
+                        el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Ref #"), el("span", {}, String(id))]),
+                    );
                     paper.appendChild(el("div", { class: "receipt-footer" }, "Thank you!"));
 
                     modal.appendChild(paper);
@@ -5218,7 +5259,16 @@
                         crow.appendChild(apply);
                         rangeCard.appendChild(crow);
                         if (App.reportCustom && (App.reportCustom.from || App.reportCustom.to)) {
-                            rangeCard.appendChild(el("div", { class: "help-text", style: "margin-top:6px" }, "Custom: " + (App.reportCustom.from || "…") + " → " + (App.reportCustom.to || "today")));
+                            rangeCard.appendChild(
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:6px" },
+                                    "Custom: " +
+                                        (App.reportCustom.from || "…") +
+                                        " → " +
+                                        (App.reportCustom.to || "today"),
+                                ),
+                            );
                         }
                     }
                     wrap.appendChild(rangeCard);
@@ -10613,19 +10663,27 @@
 
                 async function customerBalancesCard(companyId) {
                     const card = el("div", { class: "card" });
-                    card.appendChild(el("div", { class: "help-text" }, "Amounts customers still owe from short-cash sales or partial settles, for this company only."));
+                    card.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Amounts customers still owe from short-cash sales or partial settles, for this company only.",
+                        ),
+                    );
                     const balances = await dbListBalancesForCompany(companyId);
                     if (balances.length === 0) {
                         card.appendChild(el("div", { class: "empty small" }, "No outstanding customer balances."));
                         return card;
                     }
                     balances.forEach((r) => {
-                        const row = el("div", { class: "totalsrow", style: "align-items:center" }, [el("span", {}, r.customer || "(unnamed)")]);
+                        const row = el("div", { class: "totalsrow", style: "align-items:center" }, [
+                            el("span", {}, r.customer || "(unnamed)"),
+                        ]);
                         const right = el("div", { style: "display:flex;align-items:center;gap:10px" });
                         right.appendChild(el("span", { class: "val" }, fmtPeso(r.balance)));
                         const woBtn = el("button", { type: "button", class: "chip-x", title: "Write off balance" }, "×");
                         woBtn.addEventListener("click", async () => {
-                            if (!confirm("Write off " + fmtPeso(r.balance) + ' owed by "' + (r.customer || "") + '"? This cannot be undone.')) return;
+                            if (!confirm('Write off ' + fmtPeso(r.balance) + ' owed by "' + (r.customer || "") + '"? This cannot be undone.')) return;
                             await dbClearBalance(r.customer, companyId);
                             toast("Balance written off");
                             render();
