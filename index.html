@@ -1549,11 +1549,11 @@
                 let recordedPosSaleIds = null;
                 let recordedPosPromise = null;
 
-                 async function loadRecordedPosSaleIds(force) {
-                     if (!isCostingLinkEnabled()) {
-                         recordedPosSaleIds = null; // link off — unknown, never flag as missing
-                         return recordedPosSaleIds;
-                     }
+                async function loadRecordedPosSaleIds(force) {
+                    if (!isCostingLinkEnabled()) {
+                        recordedPosSaleIds = null; // link off — unknown, never flag as missing
+                        return recordedPosSaleIds;
+                    }
                     if (!force && recordedPosSaleIds) return recordedPosSaleIds;
                     if (!force && recordedPosPromise) return recordedPosPromise;
                     recordedPosPromise = (async () => {
@@ -1715,9 +1715,7 @@
 
                         // Direct material fallback: if a line is not a Costing product, match it
                         // against inventory material names and deduct the material directly.
-                        const materials = cdb.objectStoreNames.contains("materials")
-                            ? await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll())
-                            : [];
+                        const materials = cdb.objectStoreNames.contains("materials") ? await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll()) : [];
                         const matByName = {};
                         materials.forEach((mat) => {
                             const k = (mat.name || "").toLowerCase().trim();
@@ -2171,13 +2169,7 @@
                         const modal = el("div", { class: "modal" });
                         modal.appendChild(el("div", { class: "modal-title" }, "New customer"));
                         modal.appendChild(
-                            el(
-                                "div",
-                                { class: "help-text" },
-                                "No existing balance matches “" +
-                                    name +
-                                    "” (names are case-sensitive). Create a new customer balance for this exact name?",
-                            ),
+                            el("div", { class: "help-text" }, "No existing balance matches “" + name + "” (names are case-sensitive). Create a new customer balance for this exact name?"),
                         );
                         const btnRow = el("div", { class: "modal-btnrow" });
                         const cancelBtn = el("button", { type: "button", class: "bigbtn ghost" }, "Cancel");
@@ -2228,9 +2220,7 @@
                 /* Non-zero balances for one company, largest first — backs the Settings "Customer Balances" list. */
                 async function dbListBalancesForCompany(companyId) {
                     const all = await dbGetAll("customerBalances");
-                    return all
-                        .filter((r) => r.companyId === companyId && Math.abs(Number(r.balance) || 0) >= 0.01)
-                        .sort((a, b) => Math.abs(Number(b.balance) || 0) - Math.abs(Number(a.balance) || 0));
+                    return all.filter((r) => r.companyId === companyId && Math.abs(Number(r.balance) || 0) >= 0.01).sort((a, b) => Math.abs(Number(b.balance) || 0) - Math.abs(Number(a.balance) || 0));
                 }
 
                 /* ---------- Settings & company helpers ---------- */
@@ -2619,11 +2609,7 @@
                         fromAccount: dir === "payout" ? paymentAccount : null,
                         toAccount: dir === "collect" ? paymentAccount : null,
                         date: new Date().toISOString(),
-                        note:
-                            note ||
-                            (dir === "collect"
-                                ? "Customer balance collection · " + name + " · " + paymentAccount
-                                : "Customer credit payout · " + name + " · " + paymentAccount),
+                        note: note || (dir === "collect" ? "Customer balance collection · " + name + " · " + paymentAccount : "Customer credit payout · " + name + " · " + paymentAccount),
                         createdAt: new Date().toISOString(),
                         source: dir === "collect" ? "customer-balance-collect" : "customer-balance-payout",
                         customerName: name,
@@ -2666,16 +2652,8 @@
                         if (mode === "writeoff") {
                             modal.appendChild(el("div", { class: "modal-title" }, "Write off balance"));
                             const woHelp = isCredit
-                                ? "Clear store credit of " +
-                                  fmtPeso(magnitude) +
-                                  " for " +
-                                  (customer || "this customer") +
-                                  " without paying out cash. This cannot be undone."
-                                : "Clear " +
-                                  fmtPeso(magnitude) +
-                                  " owed by " +
-                                  (customer || "this customer") +
-                                  " without collecting cash. This cannot be undone.";
+                                ? "Clear store credit of " + fmtPeso(magnitude) + " for " + (customer || "this customer") + " without paying out cash. This cannot be undone."
+                                : "Clear " + fmtPeso(magnitude) + " owed by " + (customer || "this customer") + " without collecting cash. This cannot be undone.";
                             modal.appendChild(el("div", { class: "help-text" }, woHelp));
                             const btnRow = el("div", { class: "modal-btnrow" });
                             const cancelBtn = el("button", { type: "button", class: "bigbtn ghost" }, "Cancel");
@@ -2706,26 +2684,17 @@
                             modal.appendChild(btnRow);
                         } else {
                             const dir = isCredit ? "payout" : "collect";
-                            modal.appendChild(
-                                el(
-                                    "div",
-                                    { class: "modal-title" },
-                                    dir === "collect" ? "Collect from customer" : "Pay out store credit",
-                                ),
-                            );
+                            modal.appendChild(el("div", { class: "modal-title" }, dir === "collect" ? "Collect from customer" : "Pay out store credit"));
                             modal.appendChild(
                                 el(
                                     "div",
                                     { class: "help-text" },
                                     dir === "collect"
-                                        ? (customer || "Customer") +
-                                          " owes you " +
-                                          fmtPeso(magnitude) +
-                                          ". Collect into Cash, GCash, or Bank — that account increases and the balance goes down."
+                                        ? (customer || "Customer") + " owes you " + fmtPeso(magnitude) + ". Collect into Cash, GCash, or Bank — that account increases and the balance goes down."
                                         : (customer || "Customer") +
-                                          " has " +
-                                          fmtPeso(magnitude) +
-                                          " store credit (you owe them). Pay out from Cash, GCash, or Bank — that account decreases and the credit is reduced.",
+                                              " has " +
+                                              fmtPeso(magnitude) +
+                                              " store credit (you owe them). Pay out from Cash, GCash, or Bank — that account decreases and the credit is reduced.",
                                 ),
                             );
 
@@ -2741,13 +2710,7 @@
                                 ),
                             );
 
-                            modal.appendChild(
-                                el(
-                                    "label",
-                                    { class: "flabel" },
-                                    dir === "collect" ? "Amount to collect" : "Amount to pay out",
-                                ),
-                            );
+                            modal.appendChild(el("label", { class: "flabel" }, dir === "collect" ? "Amount to collect" : "Amount to pay out"));
                             const amtInp = el("input", {
                                 type: "number",
                                 class: "finput famount",
@@ -2759,22 +2722,10 @@
                             });
                             modal.appendChild(amtInp);
                             modal.appendChild(
-                                el(
-                                    "div",
-                                    { class: "help-text", style: "margin-top:4px" },
-                                    "Leave as full amount, or enter less for a partial " +
-                                        (dir === "collect" ? "collection" : "payout") +
-                                        ".",
-                                ),
+                                el("div", { class: "help-text", style: "margin-top:4px" }, "Leave as full amount, or enter less for a partial " + (dir === "collect" ? "collection" : "payout") + "."),
                             );
 
-                            modal.appendChild(
-                                el(
-                                    "label",
-                                    { class: "flabel" },
-                                    dir === "collect" ? "Collect into" : "Pay out from",
-                                ),
-                            );
+                            modal.appendChild(el("label", { class: "flabel" }, dir === "collect" ? "Collect into" : "Pay out from"));
                             const payRow = el("div", { class: "chiprow" });
                             let payAcct = "cash";
                             ["cash", "gcash", "bank"].forEach((acct) => {
@@ -2797,11 +2748,7 @@
 
                             const quickRow = el("div", { class: "chiprow", style: "margin-top:8px" });
                             if (magnitude > 0) {
-                                const fullChip = el(
-                                    "button",
-                                    { type: "button", class: "chip preset" },
-                                    "Full " + fmtPeso(magnitude),
-                                );
+                                const fullChip = el("button", { type: "button", class: "chip preset" }, "Full " + fmtPeso(magnitude));
                                 fullChip.addEventListener("click", () => {
                                     amtInp.value = magnitude.toFixed(2);
                                 });
@@ -2831,34 +2778,18 @@
                                     return;
                                 }
                                 if (amt > magnitude + 0.001) {
-                                    toast(
-                                        "Amount is more than the " +
-                                            (dir === "collect" ? "balance owed" : "credit") +
-                                            " (" +
-                                            fmtPeso(magnitude) +
-                                            ")",
-                                    );
+                                    toast("Amount is more than the " + (dir === "collect" ? "balance owed" : "credit") + " (" + fmtPeso(magnitude) + ")");
                                     amtInp.focus();
                                     return;
                                 }
                                 confirmBtn.disabled = true;
-                                const result = await settleCustomerBalance(
-                                    customer,
-                                    companyId,
-                                    amt,
-                                    payAcct,
-                                    dir,
-                                    (dir === "collect" ? "Collect · " : "Pay out credit · ") + customer,
-                                );
+                                const result = await settleCustomerBalance(customer, companyId, amt, payAcct, dir, (dir === "collect" ? "Collect · " : "Pay out credit · ") + customer);
                                 if (!result.ok) {
                                     confirmBtn.disabled = false;
                                     toast(result.message || "Could not settle");
                                     return;
                                 }
-                                const newBal =
-                                    dir === "collect"
-                                        ? Math.round((balance - amt) * 100) / 100
-                                        : Math.round((balance + amt) * 100) / 100;
+                                const newBal = dir === "collect" ? Math.round((balance - amt) * 100) / 100 : Math.round((balance + amt) * 100) / 100;
                                 overlay.remove();
                                 resolve({
                                     action: dir === "collect" ? "settled" : "paidout",
@@ -3031,12 +2962,7 @@
                             // Full sale amount stays on the transaction for revenue; shortfall is tracked
                             // via customerBalances (or left as under-collection if the user skipped it).
                             const tendered = t.tendered != null ? Number(t.tendered) : null;
-                            if (
-                                tendered != null &&
-                                isFinite(tendered) &&
-                                ["cash", "gcash", "bank"].includes(t.payment) &&
-                                tendered < amt
-                            ) {
+                            if (tendered != null && isFinite(tendered) && ["cash", "gcash", "bank"].includes(t.payment) && tendered < amt) {
                                 bal[t.payment] += tendered;
                             } else {
                                 bal[t.payment] += amt;
@@ -4480,8 +4406,7 @@
                             tendered,
                             change,
                             // When short, amountReceived is the cash that actually hit the till.
-                            amountReceived:
-                                isSale && cashLike && tendered != null && tendered < total ? tendered : total,
+                            amountReceived: isSale && cashLike && tendered != null && tendered < total ? tendered : total,
                             customerName: isSale ? customerName || null : null,
                             shortfall: isSale && App._short ? App._short : null,
                             fromAccount: null,
@@ -4584,14 +4509,7 @@
                         filterCard.appendChild(crow);
                         if (App.historyFilters.from || App.historyFilters.to) {
                             filterCard.appendChild(
-                                el(
-                                    "div",
-                                    { class: "help-text", style: "margin-top:6px" },
-                                    "Custom: " +
-                                        (App.historyFilters.from || "…") +
-                                        " → " +
-                                        (App.historyFilters.to || "today"),
-                                ),
+                                el("div", { class: "help-text", style: "margin-top:6px" }, "Custom: " + (App.historyFilters.from || "…") + " → " + (App.historyFilters.to || "today")),
                             );
                         }
                     }
@@ -4851,11 +4769,7 @@
                             );
                         } else if (t.type === "expense" && t.payment === "payable" && !t.settledAt) {
                             modal.appendChild(
-                                el(
-                                    "div",
-                                    { class: "help-text", style: "margin-top:8px" },
-                                    "This expense is on accounts payable. Use “Settle” below when you settle it from Cash, GCash, or Bank.",
-                                ),
+                                el("div", { class: "help-text", style: "margin-top:8px" }, "This expense is on accounts payable. Use “Settle” below when you settle it from Cash, GCash, or Bank."),
                             );
                         } else if (t.type === "expense" && t.settledAt) {
                             modal.appendChild(
@@ -4900,15 +4814,8 @@
                         });
                         modal.appendChild(tenderedInp);
                         const changeNow = t.tendered != null ? +(t.tendered - t.amount).toFixed(2) : null;
-                        editChangeDisplay = el(
-                            "span",
-                            { class: "val" },
-                            changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow),
-                        );
-                        editChangeRow = el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [
-                            el("span", {}, "Change Due"),
-                            editChangeDisplay,
-                        ]);
+                        editChangeDisplay = el("span", { class: "val" }, changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow));
+                        editChangeRow = el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [el("span", {}, "Change Due"), editChangeDisplay]);
                         modal.appendChild(editChangeRow);
                         // Keep change due in sync when total amount is edited
                         amtInp.addEventListener("input", updateEditChangeDue);
@@ -4921,6 +4828,30 @@
                     modal.appendChild(el("label", { class: "flabel" }, "Note"));
                     const noteInp = el("input", { type: "text", class: "finput", value: t.note || "" });
                     modal.appendChild(noteInp);
+
+                    let customerNameInp = null;
+                    if (t.type === "sale") {
+                        modal.appendChild(el("label", { class: "flabel" }, "Customer name"));
+                        customerNameInp = el("input", {
+                            type: "text",
+                            class: "finput",
+                            id: "edit-customer-name",
+                            value: t.customerName || "",
+                            placeholder: "For short-cash / partial collect",
+                            list: "edit-cust-names",
+                            autocomplete: "off",
+                        });
+                        const editCustList = el("datalist", { id: "edit-cust-names" });
+                        modal.appendChild(customerNameInp);
+                        modal.appendChild(editCustList);
+                        getActiveCompanyId()
+                            .then((cid) => dbGetNamesFromBalances(cid))
+                            .then((names) => {
+                                (names || []).forEach((n) => editCustList.appendChild(el("option", { value: n })));
+                            })
+                            .catch(() => {});
+                        modal.appendChild(el("div", { class: "help-text", style: "margin-top:4px" }, "Names are case-sensitive. Required to Collect / Apply partial against a customer balance."));
+                    }
 
                     let excludeForecastChk = null;
                     if (t.type === "sale") {
@@ -5104,30 +5035,58 @@
                             // Full settle happens through the chips above (Cash/GCash/Bank settle the whole amount).
                             const partialRow = el("div", { style: "margin-top:9px;padding-top:9px;border-top:1px dotted var(--border)" });
                             partialRow.appendChild(el("div", { class: "flabel" }, "Partial pay"));
-                            const custForBalance = (t.customerName || "").trim();
                             const cidForBalance = await getActiveCompanyId();
-                            const balForPartial = custForBalance ? await dbGetBalance(custForBalance, cidForBalance) : null;
-                            const currentBalance = balForPartial ? Number(balForPartial.balance) || 0 : 0;
+                            const prefillCust = (t.customerName || "").trim() || (customerNameInp ? customerNameInp.value.trim() : "") || "";
                             partialRow.appendChild(
-                                el(
-                                    "div",
-                                    { class: "help-text" },
-                                    custForBalance
-                                        ? custForBalance +
-                                          " currently owes " +
-                                          fmtPeso(currentBalance) +
-                                          ". Choose Cash or GCash (or Bank) — that account increases and the customer balance is reduced."
-                                        : "No customer name on this transaction — partial pay unavailable.",
-                                ),
+                                el("div", { class: "help-text" }, "Collect part of what this customer owes into Cash, GCash, or Bank. You can set or fix the customer name here (case-sensitive)."),
                             );
+                            partialRow.appendChild(el("label", { class: "flabel" }, "Customer name"));
+                            const partialCustInp = el("input", {
+                                type: "text",
+                                class: "finput",
+                                id: "partial-settle-cust",
+                                value: prefillCust,
+                                placeholder: "Customer name",
+                                list: "partial-cust-names",
+                                autocomplete: "off",
+                            });
+                            const partialCustList = el("datalist", { id: "partial-cust-names" });
+                            partialRow.appendChild(partialCustInp);
+                            partialRow.appendChild(partialCustList);
+                            try {
+                                const names = await dbGetNamesFromBalances(cidForBalance);
+                                (names || []).forEach((n) => partialCustList.appendChild(el("option", { value: n })));
+                            } catch (e) {}
+                            const partialBalHint = el("div", { class: "help-text", id: "partial-bal-hint", style: "margin-top:4px" }, "");
+                            partialRow.appendChild(partialBalHint);
+                            async function refreshPartialBalHint() {
+                                const n = partialCustInp.value.trim();
+                                if (!n) {
+                                    partialBalHint.textContent = "Enter a customer name to see their balance.";
+                                    return;
+                                }
+                                const rec = await dbGetBalance(n, cidForBalance);
+                                if (!rec) {
+                                    partialBalHint.textContent = "No balance for “" + n + "” yet (exact name). Collect will create one after confirm.";
+                                    return;
+                                }
+                                const b = Number(rec.balance) || 0;
+                                if (b > 0.009) partialBalHint.textContent = n + " currently owes you " + fmtPeso(b) + ".";
+                                else if (b < -0.009) partialBalHint.textContent = n + " has " + fmtPeso(Math.abs(b)) + " store credit (use Pay out in Settings).";
+                                else partialBalHint.textContent = n + " is settled (zero balance).";
+                            }
+                            partialCustInp.addEventListener("input", () => {
+                                refreshPartialBalHint();
+                            });
+                            partialCustInp.addEventListener("change", () => {
+                                refreshPartialBalHint();
+                            });
+                            await refreshPartialBalHint();
+
                             const payMethodRow = el("div", { class: "chiprow", style: "margin-top:6px" });
                             let partialPayAcct = "cash";
                             ["cash", "gcash", "bank"].forEach((acct) => {
-                                const chip = el(
-                                    "button",
-                                    { type: "button", class: "chip pay" + (acct === partialPayAcct ? " active" : "") },
-                                    accountLabel(acct),
-                                );
+                                const chip = el("button", { type: "button", class: "chip pay" + (acct === partialPayAcct ? " active" : "") }, accountLabel(acct));
                                 chip.dataset.value = acct;
                                 chip.addEventListener("click", () => {
                                     partialPayAcct = acct;
@@ -5148,7 +5107,6 @@
                                 placeholder: "0.00",
                                 style: "flex:1",
                             });
-                            if (currentBalance > 0) pinp.max = String(currentBalance);
                             const pbtn = el("button", { type: "button", class: "chip pay" }, "Apply partial");
                             prow.appendChild(pinp);
                             prow.appendChild(pbtn);
@@ -5160,37 +5118,42 @@
                                     toast("Enter an amount");
                                     return;
                                 }
-                                const cust = (t.customerName || "").trim();
+                                const cust = partialCustInp.value.trim();
                                 if (!cust) {
-                                    toast("No customer name on this transaction");
+                                    toast("Enter a customer name");
+                                    partialCustInp.focus();
                                     return;
                                 }
                                 const cid = await getActiveCompanyId();
+                                if (!(await ensureCustomerBalanceAllowed(cust, cid))) {
+                                    toast("Cancelled");
+                                    return;
+                                }
                                 const balRec = await dbGetBalance(cust, cid);
                                 const owed = balRec ? Number(balRec.balance) || 0 : 0;
+                                if (owed < 0.01) {
+                                    toast(owed < -0.009 ? cust + " has store credit — use Pay out in Settings" : cust + " has nothing to collect");
+                                    return;
+                                }
                                 if (partial > owed + 0.001) {
                                     toast(cust + " only owes " + fmtPeso(owed));
                                     return;
                                 }
-                                const result = await collectCustomerBalance(
-                                    cust,
-                                    cid,
-                                    partial,
-                                    partialPayAcct,
-                                    "Partial settle · Sale #" + id + " · " + accountLabel(partialPayAcct),
-                                );
+                                const result = await settleCustomerBalance(cust, cid, partial, partialPayAcct, "collect", "Partial settle · Sale #" + id + " · " + accountLabel(partialPayAcct));
                                 if (!result.ok) {
                                     toast(result.message || "Could not apply partial");
                                     return;
                                 }
+                                // Persist name on the sale so next open is prefilled
+                                const latest = await dbGet("transactions", id);
+                                if (latest) {
+                                    latest.customerName = cust;
+                                    await dbPut("transactions", latest);
+                                }
+                                if (customerNameInp) customerNameInp.value = cust;
+                                t.customerName = cust;
                                 overlay.remove();
-                                toast(
-                                    "Partial " +
-                                        fmtPeso(partial) +
-                                        " → " +
-                                        accountLabel(partialPayAcct) +
-                                        " · balance reduced",
-                                );
+                                toast("Partial " + fmtPeso(partial) + " → " + accountLabel(partialPayAcct) + " · balance reduced");
                                 softRender();
                             });
                             modal.appendChild(picker);
@@ -5242,6 +5205,7 @@
                                 change,
                                 date: new Date(dateInp.value).toISOString(),
                                 note: noteInp.value.trim(),
+                                customerName: customerNameInp ? customerNameInp.value.trim() || null : t.customerName || null,
                                 excludeFromForecast: excludeForecastChk ? !!excludeForecastChk.checked : !!t.excludeFromForecast,
                             });
                             if (newLines.length === 1) {
@@ -5280,9 +5244,7 @@
                     const overlay = el("div", { class: "overlay" });
                     const modal = el("div", { class: "modal" });
                     const copyIconBtn = el("button", { type: "button", class: "receipt-copy-icon", title: "Copy as text" }, "\u{1F4CB}");
-                    modal.appendChild(
-                        el("div", { class: "modal-title-row" }, [el("div", { class: "modal-title" }, "Generate Receipt"), copyIconBtn]),
-                    );
+                    modal.appendChild(el("div", { class: "modal-title-row" }, [el("div", { class: "modal-title" }, "Generate Receipt"), copyIconBtn]));
 
                     const paper = el("div", { class: "receipt-paper", id: "receiptPrintArea" });
                     paper.appendChild(
@@ -5295,15 +5257,9 @@
                     paper.appendChild(el("hr", { class: "receipt-divider" }));
 
                     if (t.type === "transfer") {
-                        paper.appendChild(
-                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Description"), el("span", {}, t.item || "")]),
-                        );
-                        paper.appendChild(
-                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "From"), el("span", {}, accountLabel(t.fromAccount))]),
-                        );
-                        paper.appendChild(
-                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "To"), el("span", {}, accountLabel(t.toAccount))]),
-                        );
+                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Description"), el("span", {}, t.item || "")]));
+                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "From"), el("span", {}, accountLabel(t.fromAccount))]));
+                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "To"), el("span", {}, accountLabel(t.toAccount))]));
                     } else if (lines.length) {
                         lines.forEach((ln) => {
                             const sub = [ln.category, ln.qty ? "qty " + ln.qty : null, ln.unitPrice ? "@ " + fmtPeso(ln.unitPrice) : null].filter(Boolean).join(" · ");
@@ -5320,13 +5276,9 @@
                     paper.appendChild(el("div", { class: "receipt-total" }, [el("span", {}, "Total"), el("span", {}, fmtPeso(t.amount))]));
 
                     if (t.type !== "transfer") {
-                        paper.appendChild(
-                            el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Payment"), el("span", {}, paymentLabel(t.payment))]),
-                        );
+                        paper.appendChild(el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Payment"), el("span", {}, paymentLabel(t.payment))]));
                         if (t.tendered != null) {
-                            paper.appendChild(
-                                el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Tendered"), el("span", {}, fmtPeso(t.tendered))]),
-                            );
+                            paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Tendered"), el("span", {}, fmtPeso(t.tendered))]));
                             paper.appendChild(
                                 el("div", { class: "receipt-line" }, [
                                     el("span", { class: "rl-label" }, t.change != null && t.change < 0 ? "Short" : "Change"),
@@ -5336,13 +5288,9 @@
                         }
                     }
                     if (t.note) {
-                        paper.appendChild(
-                            el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Note"), el("span", {}, t.note)]),
-                        );
+                        paper.appendChild(el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Note"), el("span", {}, t.note)]));
                     }
-                    paper.appendChild(
-                        el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Ref #"), el("span", {}, String(id))]),
-                    );
+                    paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Ref #"), el("span", {}, String(id))]));
                     paper.appendChild(el("div", { class: "receipt-footer" }, "Thank you!"));
 
                     modal.appendChild(paper);
@@ -5801,16 +5749,7 @@
                         crow.appendChild(apply);
                         rangeCard.appendChild(crow);
                         if (App.reportCustom && (App.reportCustom.from || App.reportCustom.to)) {
-                            rangeCard.appendChild(
-                                el(
-                                    "div",
-                                    { class: "help-text", style: "margin-top:6px" },
-                                    "Custom: " +
-                                        (App.reportCustom.from || "…") +
-                                        " → " +
-                                        (App.reportCustom.to || "today"),
-                                ),
-                            );
+                            rangeCard.appendChild(el("div", { class: "help-text", style: "margin-top:6px" }, "Custom: " + (App.reportCustom.from || "…") + " → " + (App.reportCustom.to || "today")));
                         }
                     }
                     wrap.appendChild(rangeCard);
@@ -11228,26 +11167,14 @@
                         card.appendChild(
                             el("div", { class: "empty small" }, [
                                 el("div", { class: "empty-title" }, "No customer balances"),
-                                el(
-                                    "div",
-                                    { class: "empty-sub" },
-                                    "Short-cash sales add amounts customers owe. Use Add below for prior balances or store credit (enter a negative amount).",
-                                ),
+                                el("div", { class: "empty-sub" }, "Short-cash sales add amounts customers owe. Use Add below for prior balances or store credit (enter a negative amount)."),
                             ]),
                         );
                     } else {
                         const summary = el("div", { style: "margin:4px 0 12px" });
+                        summary.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Customers owe you"), el("span", { class: "val", style: "color:var(--rust)" }, fmtPeso(totalOwed))]));
                         summary.appendChild(
-                            el("div", { class: "totalsrow" }, [
-                                el("span", {}, "Customers owe you"),
-                                el("span", { class: "val", style: "color:var(--rust)" }, fmtPeso(totalOwed)),
-                            ]),
-                        );
-                        summary.appendChild(
-                            el("div", { class: "totalsrow" }, [
-                                el("span", {}, "Store credit (you owe)"),
-                                el("span", { class: "val", style: "color:var(--green)" }, fmtPeso(totalCredit)),
-                            ]),
+                            el("div", { class: "totalsrow" }, [el("span", {}, "Store credit (you owe)"), el("span", { class: "val", style: "color:var(--green)" }, fmtPeso(totalCredit))]),
                         );
                         card.appendChild(summary);
 
@@ -11261,9 +11188,7 @@
                             });
                             const main = el("div", { class: "txrow-main", style: "min-width:0;flex:1" });
                             main.appendChild(el("div", { class: "txrow-title" }, r.customer || "(unnamed)"));
-                            const statusNote = isCredit
-                                ? "Store credit · you owe them"
-                                : "Owes you";
+                            const statusNote = isCredit ? "Store credit · you owe them" : "Owes you";
                             const updated = r.updatedAt
                                 ? " · " +
                                   new Date(r.updatedAt).toLocaleDateString("en-PH", {
@@ -11290,11 +11215,7 @@
                                 class: "chiprow",
                                 style: "margin-top:8px;width:100%",
                             });
-                            const primaryBtn = el(
-                                "button",
-                                { type: "button", class: "chip pay active" },
-                                isCredit ? "Pay out" : "Collect",
-                            );
+                            const primaryBtn = el("button", { type: "button", class: "chip pay active" }, isCredit ? "Pay out" : "Collect");
                             primaryBtn.addEventListener("click", async () => {
                                 const result = await openCustomerBalanceSettleModal({
                                     customer: r.customer,
@@ -11303,30 +11224,12 @@
                                     mode: "settle",
                                 });
                                 if (result.action === "settled") {
-                                    const left =
-                                        Math.abs(result.remaining) > 0.009
-                                            ? " · still owes " + fmtPeso(result.remaining)
-                                            : " · paid in full";
-                                    toast(
-                                        "Collected " +
-                                            fmtPeso(result.amount) +
-                                            " → " +
-                                            accountLabel(result.paymentAccount) +
-                                            left,
-                                    );
+                                    const left = Math.abs(result.remaining) > 0.009 ? " · still owes " + fmtPeso(result.remaining) : " · paid in full";
+                                    toast("Collected " + fmtPeso(result.amount) + " → " + accountLabel(result.paymentAccount) + left);
                                     softRender();
                                 } else if (result.action === "paidout") {
-                                    const left =
-                                        Math.abs(result.remaining) > 0.009
-                                            ? " · credit left " + fmtPeso(Math.abs(result.remaining))
-                                            : " · credit cleared";
-                                    toast(
-                                        "Paid out " +
-                                            fmtPeso(result.amount) +
-                                            " from " +
-                                            accountLabel(result.paymentAccount) +
-                                            left,
-                                    );
+                                    const left = Math.abs(result.remaining) > 0.009 ? " · credit left " + fmtPeso(Math.abs(result.remaining)) : " · credit cleared";
+                                    toast("Paid out " + fmtPeso(result.amount) + " from " + accountLabel(result.paymentAccount) + left);
                                     softRender();
                                 }
                             });
@@ -11339,13 +11242,7 @@
                                     mode: "writeoff",
                                 });
                                 if (result.action === "writtenoff") {
-                                    toast(
-                                        "Wrote off " +
-                                            fmtPeso(result.amount) +
-                                            (result.wasCredit ? " credit" : "") +
-                                            " for " +
-                                            (r.customer || ""),
-                                    );
+                                    toast("Wrote off " + fmtPeso(result.amount) + (result.wasCredit ? " credit" : "") + " for " + (r.customer || ""));
                                     softRender();
                                 }
                             });
@@ -11400,11 +11297,7 @@
 
                     const holdWrap = el("div", { id: "credit-hold-wrap", style: "display:none" });
                     holdWrap.appendChild(
-                        el(
-                            "div",
-                            { class: "help-text", style: "margin-top:8px" },
-                            "You’re holding this money for the customer. Choose where it sits until they use or collect the credit.",
-                        ),
+                        el("div", { class: "help-text", style: "margin-top:8px" }, "You’re holding this money for the customer. Choose where it sits until they use or collect the credit."),
                     );
                     holdWrap.appendChild(el("label", { class: "flabel" }, "Hold in"));
                     const holdRow = el("div", { class: "chiprow" });
@@ -11489,16 +11382,7 @@
                                 source: "customer-balance-collect",
                                 customerName: name,
                             });
-                            toast(
-                                name +
-                                    " credit " +
-                                    fmtPeso(mag) +
-                                    " · " +
-                                    accountLabel(holdAcct) +
-                                    " +" +
-                                    fmtPeso(mag) +
-                                    " (holding)",
-                            );
+                            toast(name + " credit " + fmtPeso(mag) + " · " + accountLabel(holdAcct) + " +" + fmtPeso(mag) + " (holding)");
                             softRender();
                             return;
                         }
