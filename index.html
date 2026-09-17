@@ -2417,6 +2417,143 @@
                     }, 2200);
                 }
 
+                /**
+                 * Modal for short-cash sales: capture customer name + confirm shortfall to record
+                 * as a customer balance. Resolves { confirmed, customerName, shortfall }.
+                 */
+                function promptShortCashModal(opts) {
+                    opts = opts || {};
+                    const total = Number(opts.total) || 0;
+                    const tendered = Number(opts.tendered) || 0;
+                    const shortfall = +(total - tendered).toFixed(2);
+                    const prefill = (opts.customerName || "").trim();
+                    return new Promise((resolve) => {
+                        const existing = qs("#short-cash-overlay");
+                        if (existing) existing.remove();
+                        const overlay = el("div", { class: "overlay", id: "short-cash-overlay" });
+                        const modal = el("div", { class: "modal" });
+                        modal.appendChild(el("div", { class: "modal-title" }, "Customer short on payment"));
+                        modal.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "Sale total " +
+                                    fmtPeso(total) +
+                                    " · received " +
+                                    fmtPeso(tendered) +
+                                    ". Only " +
+                                    fmtPeso(tendered) +
+                                    " will be added to cash on hand. Record the remaining " +
+                                    fmtPeso(shortfall) +
+                                    " as what the customer still owes?",
+                            ),
+                        );
+                        modal.appendChild(el("label", { class: "flabel" }, "Amount still owed"));
+                        const shortInp = el("input", {
+                            type: "number",
+                            class: "finput famount",
+                            id: "short-cash-amount",
+                            min: "0.01",
+                            step: "0.01",
+                            value: shortfall.toFixed(2),
+                        });
+                        modal.appendChild(shortInp);
+                        modal.appendChild(el("label", { class: "flabel" }, "Customer name"));
+                        const nameInp = el("input", {
+                            type: "text",
+                            class: "finput",
+                            id: "short-cash-name",
+                            placeholder: "Who owes the balance?",
+                            value: prefill,
+                            list: "short-cash-names",
+                            autocomplete: "off",
+                        });
+                        const nameList = el("datalist", { id: "short-cash-names" });
+                        modal.appendChild(nameInp);
+                        modal.appendChild(nameList);
+                        getActiveCompanyId()
+                            .then((cid) => dbGetNamesFromBalances(cid))
+                            .then((names) => {
+                                (names || []).forEach((n) => nameList.appendChild(el("option", { value: n })));
+                            })
+                            .catch(() => {});
+
+                        const btnRow = el("div", { class: "modal-btnrow" });
+                        const skipBtn = el("button", { type: "button", class: "bigbtn ghost" }, "Skip — under-collected");
+                        const saveBtn = el("button", { type: "button", class: "bigbtn sale" }, "Record balance owed");
+                        skipBtn.addEventListener("click", () => {
+                            overlay.remove();
+                            resolve({ confirmed: false, customerName: "", shortfall: shortfall });
+                        });
+                        saveBtn.addEventListener("click", () => {
+                            const name = nameInp.value.trim();
+                            const owed = Math.round((parseFloat(shortInp.value) || 0) * 100) / 100;
+                            if (!name) {
+                                toast("Enter a customer name");
+                                nameInp.focus();
+                                return;
+                            }
+                            if (!(owed > 0)) {
+                                toast("Enter the amount still owed");
+                                shortInp.focus();
+                                return;
+                            }
+                            overlay.remove();
+                            resolve({ confirmed: true, customerName: name, shortfall: owed });
+                        });
+                        btnRow.appendChild(skipBtn);
+                        btnRow.appendChild(saveBtn);
+                        modal.appendChild(btnRow);
+                        overlay.appendChild(modal);
+                        overlay.addEventListener("click", (e) => {
+                            if (e.target === overlay) {
+                                overlay.remove();
+                                resolve({ confirmed: false, customerName: "", shortfall: shortfall });
+                            }
+                        });
+                        document.body.appendChild(overlay);
+                        setTimeout(() => {
+                            if (prefill) shortInp.focus();
+                            else nameInp.focus();
+                        }, 50);
+                    });
+                }
+
+                /**
+                 * Record a customer-balance collection: reduce what they owe and credit Cash/GCash/Bank.
+                 * Uses transfer from "owner" (not in balance map) → payment account so only the till increases.
+                 */
+                async function collectCustomerBalance(customer, companyId, amount, paymentAccount, note) {
+                    const amt = Math.round(Number(amount) * 100) / 100;
+                    if (!(amt > 0)) return { ok: false, message: "Enter an amount" };
+                    if (!customer || !String(customer).trim()) return { ok: false, message: "Enter a customer name" };
+                    if (!["cash", "gcash", "bank"].includes(paymentAccount)) {
+                        return { ok: false, message: "Pick Cash, GCash, or Bank" };
+                    }
+                    const cid = companyId != null ? companyId : await getActiveCompanyId();
+                    const name = String(customer).trim();
+                    await dbUpsertBalance(name, cid, -amt);
+                    const transfer = {
+                        type: "transfer",
+                        companyId: cid,
+                        category: "Transfer",
+                        item: "Customer balance · " + name,
+                        qty: null,
+                        unitPrice: null,
+                        amount: amt,
+                        payment: null,
+                        fromAccount: "owner",
+                        toAccount: paymentAccount,
+                        date: new Date().toISOString(),
+                        note: note || ("Customer balance collection · " + name),
+                        createdAt: new Date().toISOString(),
+                        source: "customer-balance-collect",
+                        customerName: name,
+                    };
+                    const transferId = await dbAdd("transactions", transfer);
+                    return { ok: true, transferId, amount: amt, paymentAccount };
+                }
+
                 /* ---------- App state ---------- */
                 const App = {
                     addType: "sale", // 'sale' | 'expense' | 'transfer'
@@ -2557,8 +2694,22 @@
                     };
                     for (const t of txs) {
                         const amt = Number(t.amount) || 0;
-                        if (t.type === "sale" && bal.hasOwnProperty(t.payment)) bal[t.payment] += amt;
-                        else if (t.type === "expense") {
+                        if (t.type === "sale" && bal.hasOwnProperty(t.payment)) {
+                            // Cash-like short tender: only the amount actually received hits the till.
+                            // Full sale amount stays on the transaction for revenue; shortfall is tracked
+                            // via customerBalances (or left as under-collection if the user skipped it).
+                            const tendered = t.tendered != null ? Number(t.tendered) : null;
+                            if (
+                                tendered != null &&
+                                isFinite(tendered) &&
+                                ["cash", "gcash", "bank"].includes(t.payment) &&
+                                tendered < amt
+                            ) {
+                                bal[t.payment] += tendered;
+                            } else {
+                                bal[t.payment] += amt;
+                            }
+                        } else if (t.type === "expense") {
                             // Payable expenses increase liability; cash-like payments decrease the asset account
                             if (t.payment === "payable") bal.payable += amt;
                             else if (bal.hasOwnProperty(t.payment)) bal[t.payment] -= amt;
@@ -3936,26 +4087,29 @@
                             }
                         }
 
-                        // Short-cash → the customer now owes the shortfall. Prompt first; only record a
-                        // customerBalances entry when a customer name is present AND the user confirms.
-                        // Partial settlements later only ever touch customerBalances — never this sale.
-                        const customerName = isSale ? (qs("#f-customer-name") ? qs("#f-customer-name").value.trim() : "") : "";
+                        // Short-cash → only tendered hits cash on hand (see computeAccountBalances).
+                        // Prompt for customer name + amount owed so the shortfall can be tracked in
+                        // customerBalances. Partial settlements later only touch customerBalances + till.
+                        let customerName = isSale ? (qs("#f-customer-name") ? qs("#f-customer-name").value.trim() : "") : "";
                         const cashLike = ["cash", "gcash", "bank"].includes(payment);
-                        if (isSale && cashLike && tendered != null && tendered < total && customerName) {
-                            const shortfall = +(total - tendered).toFixed(2);
-                            const owe = confirm(
-                                "Customer " + customerName + " is short " + fmtPeso(shortfall) + " on this " + fmtPeso(total) +
-                                " sale.\n\nRecord " + fmtPeso(shortfall) + " as a customer balance they owe for later settlement?"
-                            );
-                            if (!owe) {
-                                toast("Not recorded — sale saved as under-collected");
-                                // skip balance creation; sale still saves below
+                        let shortfallRecorded = 0;
+                        if (isSale && cashLike && tendered != null && tendered < total) {
+                            const shortResult = await promptShortCashModal({
+                                total,
+                                tendered,
+                                customerName,
+                            });
+                            if (shortResult && shortResult.confirmed) {
+                                customerName = shortResult.customerName;
+                                shortfallRecorded = shortResult.shortfall;
+                                await dbUpsertBalance(customerName, await getActiveCompanyId(), +shortfallRecorded);
+                                const custField = qs("#f-customer-name");
+                                if (custField && !custField.value.trim()) custField.value = customerName;
+                                toast("Customer owes " + fmtPeso(shortfallRecorded) + " · balance recorded");
                             } else {
-                                await dbUpsertBalance(customerName, await getActiveCompanyId(), +shortfall);
-                                toast("Customer owes " + fmtPeso(shortfall) + " · balance recorded");
+                                toast("Sale will save under-collected — only " + fmtPeso(tendered) + " to cash");
                             }
-                            // remember the intent in a per-modal var so the close/redo below can skip the balance
-                            App._short = owe ? shortfall : 0;
+                            App._short = shortfallRecorded;
                         } else {
                             App._short = 0;
                         }
@@ -3976,6 +4130,11 @@
                             payment,
                             tendered,
                             change,
+                            // When short, amountReceived is the cash that actually hit the till.
+                            amountReceived:
+                                isSale && cashLike && tendered != null && tendered < total ? tendered : total,
+                            customerName: isSale ? customerName || null : null,
+                            shortfall: isSale && App._short ? App._short : null,
                             fromAccount: null,
                             toAccount: null,
                             date: new Date(qs("#f-date").value || Date.now()).toISOString(),
@@ -4598,26 +4757,43 @@
                             partialRow.appendChild(el("div", { class: "flabel" }, "Partial pay"));
                             const custForBalance = (t.customerName || "").trim();
                             const cidForBalance = await getActiveCompanyId();
-                            let currentBalance = 0;
-                            if (custForBalance) {
-                                const balRec = await dbGetBalance(custForBalance, cidForBalance);
-                                currentBalance = balRec ? Number(balRec.balance) || 0 : 0;
-                            }
+                            const balForPartial = custForBalance ? await dbGetBalance(custForBalance, cidForBalance) : null;
+                            const currentBalance = balForPartial ? Number(balForPartial.balance) || 0 : 0;
                             partialRow.appendChild(
                                 el(
                                     "div",
                                     { class: "help-text" },
                                     custForBalance
-                                        ? custForBalance + " currently owes " + fmtPeso(currentBalance) + "."
+                                        ? custForBalance +
+                                          " currently owes " +
+                                          fmtPeso(currentBalance) +
+                                          ". Choose Cash or GCash (or Bank) — that account increases and the customer balance is reduced."
                                         : "No customer name on this transaction — partial pay unavailable.",
                                 ),
                             );
-                            const prow = el("div", { class: "inline" });
+                            const payMethodRow = el("div", { class: "chiprow", style: "margin-top:6px" });
+                            let partialPayAcct = "cash";
+                            ["cash", "gcash", "bank"].forEach((acct) => {
+                                const chip = el(
+                                    "button",
+                                    { type: "button", class: "chip pay" + (acct === partialPayAcct ? " active" : "") },
+                                    accountLabel(acct),
+                                );
+                                chip.dataset.value = acct;
+                                chip.addEventListener("click", () => {
+                                    partialPayAcct = acct;
+                                    qsa(".chip.pay", payMethodRow).forEach((c) => c.classList.remove("active"));
+                                    chip.classList.add("active");
+                                });
+                                payMethodRow.appendChild(chip);
+                            });
+                            partialRow.appendChild(payMethodRow);
+                            const prow = el("div", { class: "addrow", style: "margin-top:6px" });
                             const pinp = el("input", {
                                 type: "number",
                                 class: "finput",
                                 id: "partial-settle-amt",
-                                min: "0",
+                                min: "0.01",
                                 step: "0.01",
                                 inputmode: "decimal",
                                 placeholder: "0.00",
@@ -4646,9 +4822,25 @@
                                 if (partial > owed + 0.001) {
                                     if (!confirm(cust + " only owes " + fmtPeso(owed) + ". Apply " + fmtPeso(partial) + " anyway?")) return;
                                 }
-                                await dbUpsertBalance(cust, cid, -partial);
+                                const result = await collectCustomerBalance(
+                                    cust,
+                                    cid,
+                                    partial,
+                                    partialPayAcct,
+                                    "Partial settle · Sale #" + id + " · " + accountLabel(partialPayAcct),
+                                );
+                                if (!result.ok) {
+                                    toast(result.message || "Could not apply partial");
+                                    return;
+                                }
                                 overlay.remove();
-                                toast("Partial " + fmtPeso(partial) + " applied · balance reduced");
+                                toast(
+                                    "Partial " +
+                                        fmtPeso(partial) +
+                                        " → " +
+                                        accountLabel(partialPayAcct) +
+                                        " · balance reduced",
+                                );
                                 softRender();
                             });
                             modal.appendChild(picker);
@@ -10667,31 +10859,183 @@
                         el(
                             "div",
                             { class: "help-text" },
-                            "Amounts customers still owe from short-cash sales or partial settles, for this company only.",
+                            "Amounts customers still owe from short-cash sales or partial settles, for this company only. Settle with Cash or GCash to update running balances.",
                         ),
                     );
                     const balances = await dbListBalancesForCompany(companyId);
                     if (balances.length === 0) {
                         card.appendChild(el("div", { class: "empty small" }, "No outstanding customer balances."));
-                        return card;
-                    }
-                    balances.forEach((r) => {
-                        const row = el("div", { class: "totalsrow", style: "align-items:center" }, [
-                            el("span", {}, r.customer || "(unnamed)"),
-                        ]);
-                        const right = el("div", { style: "display:flex;align-items:center;gap:10px" });
-                        right.appendChild(el("span", { class: "val" }, fmtPeso(r.balance)));
-                        const woBtn = el("button", { type: "button", class: "chip-x", title: "Write off balance" }, "×");
-                        woBtn.addEventListener("click", async () => {
-                            if (!confirm('Write off ' + fmtPeso(r.balance) + ' owed by "' + (r.customer || "") + '"? This cannot be undone.')) return;
-                            await dbClearBalance(r.customer, companyId);
-                            toast("Balance written off");
-                            render();
+                    } else {
+                        balances.forEach((r) => {
+                            const block = el("div", {
+                                style: "border-bottom:1px dotted var(--border);padding:10px 0",
+                            });
+                            const row = el("div", { class: "totalsrow", style: "align-items:center;margin:0" }, [
+                                el("span", {}, r.customer || "(unnamed)"),
+                                el("span", { class: "val" }, fmtPeso(r.balance)),
+                            ]);
+                            block.appendChild(row);
+                            const actions = el("div", { class: "chiprow", style: "margin-top:6px" });
+                            let settleAcct = "cash";
+                            ["cash", "gcash"].forEach((acct) => {
+                                const chip = el(
+                                    "button",
+                                    { type: "button", class: "chip pay" + (acct === settleAcct ? " active" : "") },
+                                    accountLabel(acct),
+                                );
+                                chip.addEventListener("click", () => {
+                                    settleAcct = acct;
+                                    qsa(".chip.pay", actions).forEach((c) => {
+                                        if (c.dataset.role === "pay") c.classList.remove("active");
+                                    });
+                                    chip.classList.add("active");
+                                });
+                                chip.dataset.role = "pay";
+                                actions.appendChild(chip);
+                            });
+                            const settleBtn = el("button", { type: "button", class: "chip" }, "Settle full");
+                            settleBtn.addEventListener("click", async () => {
+                                const owed = Math.abs(Number(r.balance) || 0);
+                                if (!(owed > 0)) {
+                                    toast("Nothing to settle");
+                                    return;
+                                }
+                                if (
+                                    !confirm(
+                                        "Collect " +
+                                            fmtPeso(owed) +
+                                            " from " +
+                                            (r.customer || "") +
+                                            " into " +
+                                            accountLabel(settleAcct) +
+                                            "?",
+                                    )
+                                )
+                                    return;
+                                const result = await collectCustomerBalance(
+                                    r.customer,
+                                    companyId,
+                                    owed,
+                                    settleAcct,
+                                    "Settle customer balance · " + (r.customer || ""),
+                                );
+                                if (!result.ok) {
+                                    toast(result.message || "Settle failed");
+                                    return;
+                                }
+                                toast("Settled " + fmtPeso(owed) + " → " + accountLabel(settleAcct));
+                                softRender();
+                            });
+                            actions.appendChild(settleBtn);
+                            const partialBtn = el("button", { type: "button", class: "chip" }, "Partial…");
+                            partialBtn.addEventListener("click", async () => {
+                                const raw = prompt(
+                                    "Amount to collect from " + (r.customer || "") + " into " + accountLabel(settleAcct) + ":",
+                                    String(Math.abs(Number(r.balance) || 0)),
+                                );
+                                if (raw == null) return;
+                                const partial = Math.round((parseFloat(raw) || 0) * 100) / 100;
+                                if (!(partial > 0)) {
+                                    toast("Enter an amount");
+                                    return;
+                                }
+                                const result = await collectCustomerBalance(
+                                    r.customer,
+                                    companyId,
+                                    partial,
+                                    settleAcct,
+                                    "Partial customer balance · " + (r.customer || ""),
+                                );
+                                if (!result.ok) {
+                                    toast(result.message || "Partial settle failed");
+                                    return;
+                                }
+                                toast("Collected " + fmtPeso(partial) + " → " + accountLabel(settleAcct));
+                                softRender();
+                            });
+                            actions.appendChild(partialBtn);
+                            const woBtn = el("button", { type: "button", class: "chip-x", title: "Write off balance" }, "×");
+                            woBtn.addEventListener("click", async () => {
+                                if (
+                                    !confirm(
+                                        'Write off ' +
+                                            fmtPeso(r.balance) +
+                                            ' owed by "' +
+                                            (r.customer || "") +
+                                            '"? This cannot be undone.',
+                                    )
+                                )
+                                    return;
+                                await dbClearBalance(r.customer, companyId);
+                                toast("Balance written off");
+                                softRender();
+                            });
+                            actions.appendChild(woBtn);
+                            block.appendChild(actions);
+                            card.appendChild(block);
                         });
-                        right.appendChild(woBtn);
-                        row.appendChild(right);
-                        card.appendChild(row);
+                    }
+
+                    card.appendChild(el("div", { class: "flabel", style: "margin-top:12px" }, "Add customer balance"));
+                    card.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Record an amount a customer already owes without creating a new sale.",
+                        ),
+                    );
+                    const addRow = el("div", { class: "addrow" });
+                    const nameInp = el("input", {
+                        type: "text",
+                        class: "finput",
+                        placeholder: "Customer name",
+                        list: "settings-cust-names",
+                        autocomplete: "off",
                     });
+                    const nameList = el("datalist", { id: "settings-cust-names" });
+                    try {
+                        const names = await dbGetNamesFromBalances(companyId);
+                        (names || []).forEach((n) => nameList.appendChild(el("option", { value: n })));
+                    } catch (e) {}
+                    card.appendChild(nameList);
+                    const amtInp = el("input", {
+                        type: "number",
+                        class: "finput",
+                        placeholder: "Amount owed",
+                        min: "0.01",
+                        step: "0.01",
+                        style: "max-width:110px",
+                    });
+                    const addBtn = el("button", { type: "button", class: "smallbtn" }, "Add");
+                    addBtn.addEventListener("click", async () => {
+                        const name = nameInp.value.trim();
+                        const amt = Math.round((parseFloat(amtInp.value) || 0) * 100) / 100;
+                        if (!name) {
+                            toast("Enter a customer name");
+                            nameInp.focus();
+                            return;
+                        }
+                        if (!(amt > 0)) {
+                            toast("Enter an amount greater than zero");
+                            amtInp.focus();
+                            return;
+                        }
+                        if (companyId == null) {
+                            toast("No active company");
+                            return;
+                        }
+                        const result = await dbUpsertBalance(name, companyId, amt);
+                        if (result && result.ok) {
+                            toast(name + " now owes " + fmtPeso(result.balance));
+                            softRender();
+                        } else {
+                            toast((result && result.message) || "Could not save balance");
+                        }
+                    });
+                    addRow.appendChild(nameInp);
+                    addRow.appendChild(amtInp);
+                    addRow.appendChild(addBtn);
+                    card.appendChild(addRow);
                     return card;
                 }
 
