@@ -1549,11 +1549,11 @@
                 let recordedPosSaleIds = null;
                 let recordedPosPromise = null;
 
-                async function loadRecordedPosSaleIds(force) {
-                    if (!isCostingLinkEnabled()) {
-                        recordedPosSaleIds = null; // link off — unknown, never flag as missing
-                        return recordedPosSaleIds;
-                    }
+                 async function loadRecordedPosSaleIds(force) {
+                     if (!isCostingLinkEnabled()) {
+                         recordedPosSaleIds = null; // link off — unknown, never flag as missing
+                         return recordedPosSaleIds;
+                     }
                     if (!force && recordedPosSaleIds) return recordedPosSaleIds;
                     if (!force && recordedPosPromise) return recordedPosPromise;
                     recordedPosPromise = (async () => {
@@ -1715,7 +1715,9 @@
 
                         // Direct material fallback: if a line is not a Costing product, match it
                         // against inventory material names and deduct the material directly.
-                        const materials = cdb.objectStoreNames.contains("materials") ? await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll()) : [];
+                        const materials = cdb.objectStoreNames.contains("materials")
+                            ? await costingReq(cdb.transaction("materials", "readonly").objectStore("materials").getAll())
+                            : [];
                         const matByName = {};
                         materials.forEach((mat) => {
                             const k = (mat.name || "").toLowerCase().trim();
@@ -2082,55 +2084,68 @@
                 }
 
                 /* ---------- customerBalances helpers (per-customer running balance, scoped per company) ---------- */
-                // Balances are keyed by "companyId|customerLower" (see DB v7 migration above) so two companies
-                // or branches can each have their own "Juan" without sharing a balance.
-                function balanceKeyFor(companyId, customerLower) {
+                // Keys are case-SENSITIVE: "companyId|ExactName". "Juan" and "juan" are different customers.
+                // Legacy rows may still use a lowercase key; lookup matches exact key first, then exact customer field.
+                function balanceKeyFor(companyId, customerExact) {
                     const cidPart = companyId != null ? companyId : "unassigned";
-                    return cidPart + "|" + customerLower;
+                    return cidPart + "|" + customerExact;
+                }
+                function normalizeCustomerName(customer) {
+                    return (customer || "").trim();
                 }
                 async function dbGetBalance(customer, companyId) {
-                    const key = (customer || "").trim().toLowerCase();
-                    if (!key) return null;
-                    return (await dbGet("customerBalances", balanceKeyFor(companyId, key))) || null;
+                    const name = normalizeCustomerName(customer);
+                    if (!name) return null;
+                    const byKey = await dbGet("customerBalances", balanceKeyFor(companyId, name));
+                    if (byKey) return byKey;
+                    // Legacy / re-key: same company + exact customer string (case-sensitive), any balanceKey
+                    const all = await dbGetAll("customerBalances");
+                    for (let i = 0; i < all.length; i++) {
+                        const r = all[i];
+                        if (companyId != null && r.companyId !== companyId) continue;
+                        if (normalizeCustomerName(r.customer) === name) return r;
+                    }
+                    return null;
                 }
                 async function dbUpsertBalance(customer, companyId, deltaNum) {
-                    const key = (customer || "").trim().toLowerCase();
-                    if (!key) return { ok: false, message: "Enter a customer name first" };
+                    const name = normalizeCustomerName(customer);
+                    if (!name) return { ok: false, message: "Enter a customer name first" };
                     const delta = Math.round(Number(deltaNum) * 100) / 100;
-                    const existing = await dbGetBalance(customer, companyId);
+                    const existing = await dbGetBalance(name, companyId);
                     if (existing) {
                         existing.balance = Math.round((Number(existing.balance) + delta) * 100) / 100;
-                        existing.customer = (customer || "").trim();
+                        existing.customer = name; // keep exact spelling
                         existing.updatedAt = new Date().toISOString();
                         await dbPut("customerBalances", existing);
-                        return { ok: true, balance: existing.balance };
+                        return { ok: true, balance: existing.balance, isNew: false };
                     }
                     const rec = {
-                        balanceKey: balanceKeyFor(companyId, key),
-                        customerLower: key,
-                        customer: (customer || "").trim(),
+                        balanceKey: balanceKeyFor(companyId, name),
+                        customerLower: name.toLowerCase(), // legacy field only; matching is case-sensitive on customer
+                        customer: name,
                         companyId: companyId || null,
                         balance: delta,
                         updatedAt: new Date().toISOString(),
                     };
                     await dbAdd("customerBalances", rec);
-                    return { ok: true, balance: delta };
+                    return { ok: true, balance: delta, isNew: true };
                 }
                 async function dbSetBalance(customer, companyId, valueNum) {
                     const value = Math.round(Number(valueNum) * 100) / 100;
-                    const key = (customer || "").trim().toLowerCase();
-                    if (!key) return 0;
-                    const existing = await dbGetBalance(customer, companyId);
+                    const name = normalizeCustomerName(customer);
+                    if (!name) return 0;
+                    const existing = await dbGetBalance(name, companyId);
                     if (existing) {
                         existing.balance = value;
+                        existing.customer = name;
                         existing.updatedAt = new Date().toISOString();
                         await dbPut("customerBalances", existing);
                         return existing.balance;
                     }
                     await dbAdd("customerBalances", {
-                        balanceKey: balanceKeyFor(companyId, key),
-                        customerLower: key,
-                        customer: (customer || "").trim(),
+                        balanceKey: balanceKeyFor(companyId, name),
+                        customerLower: name.toLowerCase(),
+                        customer: name,
                         companyId: companyId || null,
                         balance: value,
                         updatedAt: new Date().toISOString(),
@@ -2144,6 +2159,58 @@
                         existing.updatedAt = new Date().toISOString();
                         await dbPut("customerBalances", existing);
                     }
+                }
+
+                /** Confirm before creating a brand-new customer balance row (case-sensitive name). */
+                function confirmNewCustomerModal(customerName) {
+                    const name = normalizeCustomerName(customerName);
+                    return new Promise((resolve) => {
+                        const existing = qs("#new-cust-overlay");
+                        if (existing) existing.remove();
+                        const overlay = el("div", { class: "overlay", id: "new-cust-overlay" });
+                        const modal = el("div", { class: "modal" });
+                        modal.appendChild(el("div", { class: "modal-title" }, "New customer"));
+                        modal.appendChild(
+                            el(
+                                "div",
+                                { class: "help-text" },
+                                "No existing balance matches “" +
+                                    name +
+                                    "” (names are case-sensitive). Create a new customer balance for this exact name?",
+                            ),
+                        );
+                        const btnRow = el("div", { class: "modal-btnrow" });
+                        const cancelBtn = el("button", { type: "button", class: "bigbtn ghost" }, "Cancel");
+                        const okBtn = el("button", { type: "button", class: "bigbtn sale" }, "Create “" + name + "”");
+                        cancelBtn.addEventListener("click", () => {
+                            overlay.remove();
+                            resolve(false);
+                        });
+                        okBtn.addEventListener("click", () => {
+                            overlay.remove();
+                            resolve(true);
+                        });
+                        btnRow.appendChild(cancelBtn);
+                        btnRow.appendChild(okBtn);
+                        modal.appendChild(btnRow);
+                        overlay.appendChild(modal);
+                        overlay.addEventListener("click", (e) => {
+                            if (e.target === overlay) {
+                                overlay.remove();
+                                resolve(false);
+                            }
+                        });
+                        document.body.appendChild(overlay);
+                    });
+                }
+
+                /** Returns true if OK to proceed (existing customer, or user confirmed new). */
+                async function ensureCustomerBalanceAllowed(customer, companyId) {
+                    const name = normalizeCustomerName(customer);
+                    if (!name) return false;
+                    const existing = await dbGetBalance(name, companyId);
+                    if (existing) return true;
+                    return confirmNewCustomerModal(name);
                 }
 
                 /* Returns the de-duplicated list of saved customer names for ONE company (sale-form datalist suggestions). */
@@ -2161,7 +2228,9 @@
                 /* Non-zero balances for one company, largest first — backs the Settings "Customer Balances" list. */
                 async function dbListBalancesForCompany(companyId) {
                     const all = await dbGetAll("customerBalances");
-                    return all.filter((r) => r.companyId === companyId && Math.abs(Number(r.balance) || 0) >= 0.01).sort((a, b) => Math.abs(Number(b.balance) || 0) - Math.abs(Number(a.balance) || 0));
+                    return all
+                        .filter((r) => r.companyId === companyId && Math.abs(Number(r.balance) || 0) >= 0.01)
+                        .sort((a, b) => Math.abs(Number(b.balance) || 0) - Math.abs(Number(a.balance) || 0));
                 }
 
                 /* ---------- Settings & company helpers ---------- */
@@ -2550,7 +2619,11 @@
                         fromAccount: dir === "payout" ? paymentAccount : null,
                         toAccount: dir === "collect" ? paymentAccount : null,
                         date: new Date().toISOString(),
-                        note: note || (dir === "collect" ? "Customer balance collection · " + name + " · " + paymentAccount : "Customer credit payout · " + name + " · " + paymentAccount),
+                        note:
+                            note ||
+                            (dir === "collect"
+                                ? "Customer balance collection · " + name + " · " + paymentAccount
+                                : "Customer credit payout · " + name + " · " + paymentAccount),
                         createdAt: new Date().toISOString(),
                         source: dir === "collect" ? "customer-balance-collect" : "customer-balance-payout",
                         customerName: name,
@@ -2593,8 +2666,16 @@
                         if (mode === "writeoff") {
                             modal.appendChild(el("div", { class: "modal-title" }, "Write off balance"));
                             const woHelp = isCredit
-                                ? "Clear store credit of " + fmtPeso(magnitude) + " for " + (customer || "this customer") + " without paying out cash. This cannot be undone."
-                                : "Clear " + fmtPeso(magnitude) + " owed by " + (customer || "this customer") + " without collecting cash. This cannot be undone.";
+                                ? "Clear store credit of " +
+                                  fmtPeso(magnitude) +
+                                  " for " +
+                                  (customer || "this customer") +
+                                  " without paying out cash. This cannot be undone."
+                                : "Clear " +
+                                  fmtPeso(magnitude) +
+                                  " owed by " +
+                                  (customer || "this customer") +
+                                  " without collecting cash. This cannot be undone.";
                             modal.appendChild(el("div", { class: "help-text" }, woHelp));
                             const btnRow = el("div", { class: "modal-btnrow" });
                             const cancelBtn = el("button", { type: "button", class: "bigbtn ghost" }, "Cancel");
@@ -2625,17 +2706,26 @@
                             modal.appendChild(btnRow);
                         } else {
                             const dir = isCredit ? "payout" : "collect";
-                            modal.appendChild(el("div", { class: "modal-title" }, dir === "collect" ? "Collect from customer" : "Pay out store credit"));
+                            modal.appendChild(
+                                el(
+                                    "div",
+                                    { class: "modal-title" },
+                                    dir === "collect" ? "Collect from customer" : "Pay out store credit",
+                                ),
+                            );
                             modal.appendChild(
                                 el(
                                     "div",
                                     { class: "help-text" },
                                     dir === "collect"
-                                        ? (customer || "Customer") + " owes you " + fmtPeso(magnitude) + ". Collect into Cash, GCash, or Bank — that account increases and the balance goes down."
+                                        ? (customer || "Customer") +
+                                          " owes you " +
+                                          fmtPeso(magnitude) +
+                                          ". Collect into Cash, GCash, or Bank — that account increases and the balance goes down."
                                         : (customer || "Customer") +
-                                              " has " +
-                                              fmtPeso(magnitude) +
-                                              " store credit (you owe them). Pay out from Cash, GCash, or Bank — that account decreases and the credit is reduced.",
+                                          " has " +
+                                          fmtPeso(magnitude) +
+                                          " store credit (you owe them). Pay out from Cash, GCash, or Bank — that account decreases and the credit is reduced.",
                                 ),
                             );
 
@@ -2651,7 +2741,13 @@
                                 ),
                             );
 
-                            modal.appendChild(el("label", { class: "flabel" }, dir === "collect" ? "Amount to collect" : "Amount to pay out"));
+                            modal.appendChild(
+                                el(
+                                    "label",
+                                    { class: "flabel" },
+                                    dir === "collect" ? "Amount to collect" : "Amount to pay out",
+                                ),
+                            );
                             const amtInp = el("input", {
                                 type: "number",
                                 class: "finput famount",
@@ -2663,10 +2759,22 @@
                             });
                             modal.appendChild(amtInp);
                             modal.appendChild(
-                                el("div", { class: "help-text", style: "margin-top:4px" }, "Leave as full amount, or enter less for a partial " + (dir === "collect" ? "collection" : "payout") + "."),
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:4px" },
+                                    "Leave as full amount, or enter less for a partial " +
+                                        (dir === "collect" ? "collection" : "payout") +
+                                        ".",
+                                ),
                             );
 
-                            modal.appendChild(el("label", { class: "flabel" }, dir === "collect" ? "Collect into" : "Pay out from"));
+                            modal.appendChild(
+                                el(
+                                    "label",
+                                    { class: "flabel" },
+                                    dir === "collect" ? "Collect into" : "Pay out from",
+                                ),
+                            );
                             const payRow = el("div", { class: "chiprow" });
                             let payAcct = "cash";
                             ["cash", "gcash", "bank"].forEach((acct) => {
@@ -2689,7 +2797,11 @@
 
                             const quickRow = el("div", { class: "chiprow", style: "margin-top:8px" });
                             if (magnitude > 0) {
-                                const fullChip = el("button", { type: "button", class: "chip preset" }, "Full " + fmtPeso(magnitude));
+                                const fullChip = el(
+                                    "button",
+                                    { type: "button", class: "chip preset" },
+                                    "Full " + fmtPeso(magnitude),
+                                );
                                 fullChip.addEventListener("click", () => {
                                     amtInp.value = magnitude.toFixed(2);
                                 });
@@ -2719,18 +2831,34 @@
                                     return;
                                 }
                                 if (amt > magnitude + 0.001) {
-                                    toast("Amount is more than the " + (dir === "collect" ? "balance owed" : "credit") + " (" + fmtPeso(magnitude) + ")");
+                                    toast(
+                                        "Amount is more than the " +
+                                            (dir === "collect" ? "balance owed" : "credit") +
+                                            " (" +
+                                            fmtPeso(magnitude) +
+                                            ")",
+                                    );
                                     amtInp.focus();
                                     return;
                                 }
                                 confirmBtn.disabled = true;
-                                const result = await settleCustomerBalance(customer, companyId, amt, payAcct, dir, (dir === "collect" ? "Collect · " : "Pay out credit · ") + customer);
+                                const result = await settleCustomerBalance(
+                                    customer,
+                                    companyId,
+                                    amt,
+                                    payAcct,
+                                    dir,
+                                    (dir === "collect" ? "Collect · " : "Pay out credit · ") + customer,
+                                );
                                 if (!result.ok) {
                                     confirmBtn.disabled = false;
                                     toast(result.message || "Could not settle");
                                     return;
                                 }
-                                const newBal = dir === "collect" ? Math.round((balance - amt) * 100) / 100 : Math.round((balance + amt) * 100) / 100;
+                                const newBal =
+                                    dir === "collect"
+                                        ? Math.round((balance - amt) * 100) / 100
+                                        : Math.round((balance + amt) * 100) / 100;
                                 overlay.remove();
                                 resolve({
                                     action: dir === "collect" ? "settled" : "paidout",
@@ -2903,7 +3031,12 @@
                             // Full sale amount stays on the transaction for revenue; shortfall is tracked
                             // via customerBalances (or left as under-collection if the user skipped it).
                             const tendered = t.tendered != null ? Number(t.tendered) : null;
-                            if (tendered != null && isFinite(tendered) && ["cash", "gcash", "bank"].includes(t.payment) && tendered < amt) {
+                            if (
+                                tendered != null &&
+                                isFinite(tendered) &&
+                                ["cash", "gcash", "bank"].includes(t.payment) &&
+                                tendered < amt
+                            ) {
                                 bal[t.payment] += tendered;
                             } else {
                                 bal[t.payment] += amt;
@@ -4309,14 +4442,23 @@
                             if (shortResult && shortResult.confirmed) {
                                 customerName = shortResult.customerName;
                                 shortfallRecorded = shortResult.shortfall;
-                                await dbUpsertBalance(customerName, await getActiveCompanyId(), +shortfallRecorded);
-                                const custField = qs("#f-customer-name");
-                                if (custField && !custField.value.trim()) custField.value = customerName;
-                                toast("Customer owes " + fmtPeso(shortfallRecorded) + " · balance recorded");
+                                const cidShort = await getActiveCompanyId();
+                                const allowed = await ensureCustomerBalanceAllowed(customerName, cidShort);
+                                if (!allowed) {
+                                    toast("Sale will save under-collected — only " + fmtPeso(tendered) + " to cash");
+                                    App._short = 0;
+                                    // fall through without balance
+                                } else {
+                                    await dbUpsertBalance(customerName, cidShort, +shortfallRecorded);
+                                    const custField = qs("#f-customer-name");
+                                    if (custField && !custField.value.trim()) custField.value = customerName;
+                                    toast("Customer owes " + fmtPeso(shortfallRecorded) + " · balance recorded");
+                                    App._short = shortfallRecorded;
+                                }
                             } else {
                                 toast("Sale will save under-collected — only " + fmtPeso(tendered) + " to cash");
+                                App._short = 0;
                             }
-                            App._short = shortfallRecorded;
                         } else {
                             App._short = 0;
                         }
@@ -4338,7 +4480,8 @@
                             tendered,
                             change,
                             // When short, amountReceived is the cash that actually hit the till.
-                            amountReceived: isSale && cashLike && tendered != null && tendered < total ? tendered : total,
+                            amountReceived:
+                                isSale && cashLike && tendered != null && tendered < total ? tendered : total,
                             customerName: isSale ? customerName || null : null,
                             shortfall: isSale && App._short ? App._short : null,
                             fromAccount: null,
@@ -4441,7 +4584,14 @@
                         filterCard.appendChild(crow);
                         if (App.historyFilters.from || App.historyFilters.to) {
                             filterCard.appendChild(
-                                el("div", { class: "help-text", style: "margin-top:6px" }, "Custom: " + (App.historyFilters.from || "…") + " → " + (App.historyFilters.to || "today")),
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:6px" },
+                                    "Custom: " +
+                                        (App.historyFilters.from || "…") +
+                                        " → " +
+                                        (App.historyFilters.to || "today"),
+                                ),
                             );
                         }
                     }
@@ -4701,7 +4851,11 @@
                             );
                         } else if (t.type === "expense" && t.payment === "payable" && !t.settledAt) {
                             modal.appendChild(
-                                el("div", { class: "help-text", style: "margin-top:8px" }, "This expense is on accounts payable. Use “Settle” below when you settle it from Cash, GCash, or Bank."),
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:8px" },
+                                    "This expense is on accounts payable. Use “Settle” below when you settle it from Cash, GCash, or Bank.",
+                                ),
                             );
                         } else if (t.type === "expense" && t.settledAt) {
                             modal.appendChild(
@@ -4746,8 +4900,15 @@
                         });
                         modal.appendChild(tenderedInp);
                         const changeNow = t.tendered != null ? +(t.tendered - t.amount).toFixed(2) : null;
-                        editChangeDisplay = el("span", { class: "val" }, changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow));
-                        editChangeRow = el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [el("span", {}, "Change Due"), editChangeDisplay]);
+                        editChangeDisplay = el(
+                            "span",
+                            { class: "val" },
+                            changeNow == null ? fmtPeso(0) : changeNow < 0 ? "Short " + fmtPeso(Math.abs(changeNow)) : fmtPeso(changeNow),
+                        );
+                        editChangeRow = el("div", { class: "totalsrow change" + (changeNow != null && changeNow < 0 ? " short" : "") }, [
+                            el("span", {}, "Change Due"),
+                            editChangeDisplay,
+                        ]);
                         modal.appendChild(editChangeRow);
                         // Keep change due in sync when total amount is edited
                         amtInp.addEventListener("input", updateEditChangeDue);
@@ -4953,16 +5114,20 @@
                                     { class: "help-text" },
                                     custForBalance
                                         ? custForBalance +
-                                              " currently owes " +
-                                              fmtPeso(currentBalance) +
-                                              ". Choose Cash or GCash (or Bank) — that account increases and the customer balance is reduced."
+                                          " currently owes " +
+                                          fmtPeso(currentBalance) +
+                                          ". Choose Cash or GCash (or Bank) — that account increases and the customer balance is reduced."
                                         : "No customer name on this transaction — partial pay unavailable.",
                                 ),
                             );
                             const payMethodRow = el("div", { class: "chiprow", style: "margin-top:6px" });
                             let partialPayAcct = "cash";
                             ["cash", "gcash", "bank"].forEach((acct) => {
-                                const chip = el("button", { type: "button", class: "chip pay" + (acct === partialPayAcct ? " active" : "") }, accountLabel(acct));
+                                const chip = el(
+                                    "button",
+                                    { type: "button", class: "chip pay" + (acct === partialPayAcct ? " active" : "") },
+                                    accountLabel(acct),
+                                );
                                 chip.dataset.value = acct;
                                 chip.addEventListener("click", () => {
                                     partialPayAcct = acct;
@@ -5007,13 +5172,25 @@
                                     toast(cust + " only owes " + fmtPeso(owed));
                                     return;
                                 }
-                                const result = await collectCustomerBalance(cust, cid, partial, partialPayAcct, "Partial settle · Sale #" + id + " · " + accountLabel(partialPayAcct));
+                                const result = await collectCustomerBalance(
+                                    cust,
+                                    cid,
+                                    partial,
+                                    partialPayAcct,
+                                    "Partial settle · Sale #" + id + " · " + accountLabel(partialPayAcct),
+                                );
                                 if (!result.ok) {
                                     toast(result.message || "Could not apply partial");
                                     return;
                                 }
                                 overlay.remove();
-                                toast("Partial " + fmtPeso(partial) + " → " + accountLabel(partialPayAcct) + " · balance reduced");
+                                toast(
+                                    "Partial " +
+                                        fmtPeso(partial) +
+                                        " → " +
+                                        accountLabel(partialPayAcct) +
+                                        " · balance reduced",
+                                );
                                 softRender();
                             });
                             modal.appendChild(picker);
@@ -5103,7 +5280,9 @@
                     const overlay = el("div", { class: "overlay" });
                     const modal = el("div", { class: "modal" });
                     const copyIconBtn = el("button", { type: "button", class: "receipt-copy-icon", title: "Copy as text" }, "\u{1F4CB}");
-                    modal.appendChild(el("div", { class: "modal-title-row" }, [el("div", { class: "modal-title" }, "Generate Receipt"), copyIconBtn]));
+                    modal.appendChild(
+                        el("div", { class: "modal-title-row" }, [el("div", { class: "modal-title" }, "Generate Receipt"), copyIconBtn]),
+                    );
 
                     const paper = el("div", { class: "receipt-paper", id: "receiptPrintArea" });
                     paper.appendChild(
@@ -5116,9 +5295,15 @@
                     paper.appendChild(el("hr", { class: "receipt-divider" }));
 
                     if (t.type === "transfer") {
-                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Description"), el("span", {}, t.item || "")]));
-                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "From"), el("span", {}, accountLabel(t.fromAccount))]));
-                        paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "To"), el("span", {}, accountLabel(t.toAccount))]));
+                        paper.appendChild(
+                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Description"), el("span", {}, t.item || "")]),
+                        );
+                        paper.appendChild(
+                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "From"), el("span", {}, accountLabel(t.fromAccount))]),
+                        );
+                        paper.appendChild(
+                            el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "To"), el("span", {}, accountLabel(t.toAccount))]),
+                        );
                     } else if (lines.length) {
                         lines.forEach((ln) => {
                             const sub = [ln.category, ln.qty ? "qty " + ln.qty : null, ln.unitPrice ? "@ " + fmtPeso(ln.unitPrice) : null].filter(Boolean).join(" · ");
@@ -5135,9 +5320,13 @@
                     paper.appendChild(el("div", { class: "receipt-total" }, [el("span", {}, "Total"), el("span", {}, fmtPeso(t.amount))]));
 
                     if (t.type !== "transfer") {
-                        paper.appendChild(el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Payment"), el("span", {}, paymentLabel(t.payment))]));
+                        paper.appendChild(
+                            el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Payment"), el("span", {}, paymentLabel(t.payment))]),
+                        );
                         if (t.tendered != null) {
-                            paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Tendered"), el("span", {}, fmtPeso(t.tendered))]));
+                            paper.appendChild(
+                                el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Tendered"), el("span", {}, fmtPeso(t.tendered))]),
+                            );
                             paper.appendChild(
                                 el("div", { class: "receipt-line" }, [
                                     el("span", { class: "rl-label" }, t.change != null && t.change < 0 ? "Short" : "Change"),
@@ -5147,9 +5336,13 @@
                         }
                     }
                     if (t.note) {
-                        paper.appendChild(el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Note"), el("span", {}, t.note)]));
+                        paper.appendChild(
+                            el("div", { class: "receipt-line", style: "margin-top:8px" }, [el("span", { class: "rl-label" }, "Note"), el("span", {}, t.note)]),
+                        );
                     }
-                    paper.appendChild(el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Ref #"), el("span", {}, String(id))]));
+                    paper.appendChild(
+                        el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Ref #"), el("span", {}, String(id))]),
+                    );
                     paper.appendChild(el("div", { class: "receipt-footer" }, "Thank you!"));
 
                     modal.appendChild(paper);
@@ -5608,7 +5801,16 @@
                         crow.appendChild(apply);
                         rangeCard.appendChild(crow);
                         if (App.reportCustom && (App.reportCustom.from || App.reportCustom.to)) {
-                            rangeCard.appendChild(el("div", { class: "help-text", style: "margin-top:6px" }, "Custom: " + (App.reportCustom.from || "…") + " → " + (App.reportCustom.to || "today")));
+                            rangeCard.appendChild(
+                                el(
+                                    "div",
+                                    { class: "help-text", style: "margin-top:6px" },
+                                    "Custom: " +
+                                        (App.reportCustom.from || "…") +
+                                        " → " +
+                                        (App.reportCustom.to || "today"),
+                                ),
+                            );
                         }
                     }
                     wrap.appendChild(rangeCard);
@@ -11026,14 +11228,26 @@
                         card.appendChild(
                             el("div", { class: "empty small" }, [
                                 el("div", { class: "empty-title" }, "No customer balances"),
-                                el("div", { class: "empty-sub" }, "Short-cash sales add amounts customers owe. Use Add below for prior balances or store credit (enter a negative amount)."),
+                                el(
+                                    "div",
+                                    { class: "empty-sub" },
+                                    "Short-cash sales add amounts customers owe. Use Add below for prior balances or store credit (enter a negative amount).",
+                                ),
                             ]),
                         );
                     } else {
                         const summary = el("div", { style: "margin:4px 0 12px" });
-                        summary.appendChild(el("div", { class: "totalsrow" }, [el("span", {}, "Customers owe you"), el("span", { class: "val", style: "color:var(--rust)" }, fmtPeso(totalOwed))]));
                         summary.appendChild(
-                            el("div", { class: "totalsrow" }, [el("span", {}, "Store credit (you owe)"), el("span", { class: "val", style: "color:var(--green)" }, fmtPeso(totalCredit))]),
+                            el("div", { class: "totalsrow" }, [
+                                el("span", {}, "Customers owe you"),
+                                el("span", { class: "val", style: "color:var(--rust)" }, fmtPeso(totalOwed)),
+                            ]),
+                        );
+                        summary.appendChild(
+                            el("div", { class: "totalsrow" }, [
+                                el("span", {}, "Store credit (you owe)"),
+                                el("span", { class: "val", style: "color:var(--green)" }, fmtPeso(totalCredit)),
+                            ]),
                         );
                         card.appendChild(summary);
 
@@ -11047,7 +11261,9 @@
                             });
                             const main = el("div", { class: "txrow-main", style: "min-width:0;flex:1" });
                             main.appendChild(el("div", { class: "txrow-title" }, r.customer || "(unnamed)"));
-                            const statusNote = isCredit ? "Store credit · you owe them" : "Owes you";
+                            const statusNote = isCredit
+                                ? "Store credit · you owe them"
+                                : "Owes you";
                             const updated = r.updatedAt
                                 ? " · " +
                                   new Date(r.updatedAt).toLocaleDateString("en-PH", {
@@ -11074,7 +11290,11 @@
                                 class: "chiprow",
                                 style: "margin-top:8px;width:100%",
                             });
-                            const primaryBtn = el("button", { type: "button", class: "chip pay active" }, isCredit ? "Pay out" : "Collect");
+                            const primaryBtn = el(
+                                "button",
+                                { type: "button", class: "chip pay active" },
+                                isCredit ? "Pay out" : "Collect",
+                            );
                             primaryBtn.addEventListener("click", async () => {
                                 const result = await openCustomerBalanceSettleModal({
                                     customer: r.customer,
@@ -11083,12 +11303,30 @@
                                     mode: "settle",
                                 });
                                 if (result.action === "settled") {
-                                    const left = Math.abs(result.remaining) > 0.009 ? " · still owes " + fmtPeso(result.remaining) : " · paid in full";
-                                    toast("Collected " + fmtPeso(result.amount) + " → " + accountLabel(result.paymentAccount) + left);
+                                    const left =
+                                        Math.abs(result.remaining) > 0.009
+                                            ? " · still owes " + fmtPeso(result.remaining)
+                                            : " · paid in full";
+                                    toast(
+                                        "Collected " +
+                                            fmtPeso(result.amount) +
+                                            " → " +
+                                            accountLabel(result.paymentAccount) +
+                                            left,
+                                    );
                                     softRender();
                                 } else if (result.action === "paidout") {
-                                    const left = Math.abs(result.remaining) > 0.009 ? " · credit left " + fmtPeso(Math.abs(result.remaining)) : " · credit cleared";
-                                    toast("Paid out " + fmtPeso(result.amount) + " from " + accountLabel(result.paymentAccount) + left);
+                                    const left =
+                                        Math.abs(result.remaining) > 0.009
+                                            ? " · credit left " + fmtPeso(Math.abs(result.remaining))
+                                            : " · credit cleared";
+                                    toast(
+                                        "Paid out " +
+                                            fmtPeso(result.amount) +
+                                            " from " +
+                                            accountLabel(result.paymentAccount) +
+                                            left,
+                                    );
                                     softRender();
                                 }
                             });
@@ -11101,7 +11339,13 @@
                                     mode: "writeoff",
                                 });
                                 if (result.action === "writtenoff") {
-                                    toast("Wrote off " + fmtPeso(result.amount) + (result.wasCredit ? " credit" : "") + " for " + (r.customer || ""));
+                                    toast(
+                                        "Wrote off " +
+                                            fmtPeso(result.amount) +
+                                            (result.wasCredit ? " credit" : "") +
+                                            " for " +
+                                            (r.customer || ""),
+                                    );
                                     softRender();
                                 }
                             });
@@ -11123,7 +11367,11 @@
 
                     card.appendChild(el("div", { class: "section-title", style: "margin-top:18px" }, "ADD OR ADJUST"));
                     card.appendChild(
-                        el("div", { class: "help-text" }, "Positive amount = customer owes you. Negative amount = store credit (you owe them). Does not move Cash/GCash until you Collect or Pay out."),
+                        el(
+                            "div",
+                            { class: "help-text" },
+                            "Positive = customer owes you (ledger only — no till change until Collect). Negative = store credit you’re holding — Cash/GCash/Bank increases now; Pay out later decreases it.",
+                        ),
                     );
                     card.appendChild(el("label", { class: "flabel" }, "Customer name"));
                     const nameInp = el("input", {
@@ -11140,7 +11388,7 @@
                     } catch (e) {}
                     card.appendChild(nameList);
                     card.appendChild(nameInp);
-                    card.appendChild(el("label", { class: "flabel" }, "Amount (+ owes you / − credit)"));
+                    card.appendChild(el("label", { class: "flabel" }, "Amount (+ owes you / − credit held)"));
                     const amtInp = el("input", {
                         type: "number",
                         class: "finput famount",
@@ -11149,6 +11397,45 @@
                         inputmode: "decimal",
                     });
                     card.appendChild(amtInp);
+
+                    const holdWrap = el("div", { id: "credit-hold-wrap", style: "display:none" });
+                    holdWrap.appendChild(
+                        el(
+                            "div",
+                            { class: "help-text", style: "margin-top:8px" },
+                            "You’re holding this money for the customer. Choose where it sits until they use or collect the credit.",
+                        ),
+                    );
+                    holdWrap.appendChild(el("label", { class: "flabel" }, "Hold in"));
+                    const holdRow = el("div", { class: "chiprow" });
+                    let holdAcct = "cash";
+                    ["cash", "gcash", "bank"].forEach((acct) => {
+                        const chip = el(
+                            "button",
+                            {
+                                type: "button",
+                                class: "chip pay" + (acct === holdAcct ? " active" : ""),
+                            },
+                            accountLabel(acct),
+                        );
+                        chip.addEventListener("click", () => {
+                            holdAcct = acct;
+                            qsa(".chip.pay", holdRow).forEach((c) => c.classList.remove("active"));
+                            chip.classList.add("active");
+                        });
+                        holdRow.appendChild(chip);
+                    });
+                    holdWrap.appendChild(holdRow);
+                    card.appendChild(holdWrap);
+
+                    function refreshHoldVisibility() {
+                        const v = parseFloat(amtInp.value);
+                        const show = isFinite(v) && v < -0.009;
+                        holdWrap.style.display = show ? "" : "none";
+                    }
+                    amtInp.addEventListener("input", refreshHoldVisibility);
+                    amtInp.addEventListener("change", refreshHoldVisibility);
+
                     const addBtn = el("button", { type: "button", class: "bigbtn sale small2" }, "Save adjustment");
                     addBtn.addEventListener("click", async () => {
                         const name = nameInp.value.trim();
@@ -11167,10 +11454,64 @@
                             toast("No active company");
                             return;
                         }
+
+                        // Negative = issue store credit while holding funds → till goes UP
+                        if (amt < -0.009) {
+                            const mag = Math.abs(amt);
+                            if (!["cash", "gcash", "bank"].includes(holdAcct)) {
+                                toast("Pick Cash, GCash, or Bank to hold the credit");
+                                return;
+                            }
+                            if (!(await ensureCustomerBalanceAllowed(name, companyId))) {
+                                toast("Cancelled");
+                                return;
+                            }
+                            const result = await dbUpsertBalance(name, companyId, amt);
+                            if (!(result && result.ok)) {
+                                toast((result && result.message) || "Could not save balance");
+                                return;
+                            }
+                            // Same till effect as a collection: only credit the chosen account
+                            await dbAdd("transactions", {
+                                type: "transfer",
+                                companyId: companyId,
+                                category: "Transfer",
+                                item: "Store credit held · " + name,
+                                qty: null,
+                                unitPrice: null,
+                                amount: mag,
+                                payment: null,
+                                fromAccount: null,
+                                toAccount: holdAcct,
+                                date: new Date().toISOString(),
+                                note: "Customer deposit / credit held · " + name + " · " + holdAcct,
+                                createdAt: new Date().toISOString(),
+                                source: "customer-balance-collect",
+                                customerName: name,
+                            });
+                            toast(
+                                name +
+                                    " credit " +
+                                    fmtPeso(mag) +
+                                    " · " +
+                                    accountLabel(holdAcct) +
+                                    " +" +
+                                    fmtPeso(mag) +
+                                    " (holding)",
+                            );
+                            softRender();
+                            return;
+                        }
+
+                        // Positive = they owe you — ledger only
+                        if (!(await ensureCustomerBalanceAllowed(name, companyId))) {
+                            toast("Cancelled");
+                            return;
+                        }
                         const result = await dbUpsertBalance(name, companyId, amt);
                         if (result && result.ok) {
                             const b = result.balance;
-                            if (b > 0.009) toast(name + " owes you " + fmtPeso(b));
+                            if (b > 0.009) toast(name + " owes you " + fmtPeso(b) + " (collect later)");
                             else if (b < -0.009) toast(name + " has " + fmtPeso(Math.abs(b)) + " store credit");
                             else toast(name + " is settled");
                             softRender();
