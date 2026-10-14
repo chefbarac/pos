@@ -1274,8 +1274,11 @@
             }
             .receipt-item .ri-name,
             .receipt-item .ri-amount,
-            .receipt-item .ri-qty {
+            .receipt-item .ri-slot {
                 cursor: pointer;
+            }
+            .receipt-item .ri-slot-empty {
+                opacity: 0.5;
             }
             .receipt-item.ri-hidden {
                 opacity: 0.4;
@@ -1319,6 +1322,49 @@
                 color: var(--ink);
                 border-color: var(--ink-soft);
             }
+            .ri-input {
+                font-family: inherit;
+                font-size: inherit;
+                font-weight: inherit;
+                color: var(--ink);
+                border: 1px solid var(--green);
+                border-radius: 4px;
+                padding: 0 5px;
+                background: #fff;
+                outline: none;
+                min-width: 52px;
+                max-width: 100%;
+            }
+            .ri-input::placeholder {
+                color: var(--ink-soft);
+                opacity: 0.7;
+                font-weight: 400;
+            }
+            .receipt-item .ri-top .ri-input.name {
+                flex: 1;
+                min-width: 0;
+                margin-right: 8px;
+            }
+            .receipt-item .ri-top .ri-input.amt {
+                width: 92px;
+                flex-shrink: 0;
+                text-align: right;
+            }
+            .receipt-item.ri-draft {
+                outline: 1px dashed var(--border);
+                outline-offset: 5px;
+                border-radius: 4px;
+            }
+            .ri-draft-sub {
+                display: flex;
+                align-items: center;
+                gap: 5px;
+            }
+            .ri-draft-sub .ri-input {
+                font-size: 12px;
+                width: 68px;
+                min-width: 0;
+            }
             @media print {
                 body * {
                     visibility: hidden;
@@ -1339,7 +1385,8 @@
                 .ri-hidden,
                 .ri-actions,
                 .receipt-add-row,
-                .receipt-edit-hint {
+                .receipt-edit-hint,
+                .ri-draft {
                     display: none !important;
                 }
             }
@@ -5628,6 +5675,70 @@
                     document.body.appendChild(overlay);
                 }
 
+                /* Inline click-to-edit for receipt fields — replaces native prompt() dialogs.
+                   opts: { value, numeric?, allowEmpty?, onCommit(v), onCancel? } */
+                function receiptInlineEdit(span, opts) {
+                    const input = el("input", {
+                        class: "ri-input",
+                        type: "text",
+                        value: String(opts.value == null ? "" : opts.value),
+                    });
+                    if (opts.numeric) input.setAttribute("inputmode", "decimal");
+                    span.replaceWith(input);
+                    input.focus();
+                    input.select();
+                    let done = false;
+                    const revert = () => {
+                        if (opts.onCancel) opts.onCancel();
+                    };
+                    const validate = (raw) => {
+                        if (!opts.numeric) {
+                            if (!raw) return { ok: false, msg: "Name required" };
+                            return { ok: true, value: raw };
+                        }
+                        if (!raw) {
+                            if (opts.allowEmpty) return { ok: true, value: null };
+                            return { ok: false, msg: "Amount required" };
+                        }
+                        const n = parseFloat(raw);
+                        if (isNaN(n)) return { ok: false, msg: "Invalid number" };
+                        return { ok: true, value: n };
+                    };
+                    const finish = (commit, fromBlur) => {
+                        if (done) return;
+                        if (!commit) {
+                            done = true;
+                            revert();
+                            return;
+                        }
+                        const res = validate(input.value.trim());
+                        if (!res.ok) {
+                            if (fromBlur) {
+                                done = true;
+                                toast(res.msg + " · reverted");
+                                revert();
+                            } else {
+                                toast(res.msg);
+                                input.focus();
+                                input.select();
+                            }
+                            return;
+                        }
+                        done = true;
+                        opts.onCommit(res.value);
+                    };
+                    input.addEventListener("keydown", (e) => {
+                        if (e.key === "Enter") {
+                            e.preventDefault();
+                            finish(true, false);
+                        } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            finish(false, false);
+                        }
+                    });
+                    input.addEventListener("blur", () => finish(true, true));
+                }
+
                 /* ---------- Receipt ---------- */
                 async function openReceiptModal(t, lines) {
                     const company = await getActiveCompany();
@@ -5673,6 +5784,7 @@
                     paper.appendChild(el("hr", { class: "receipt-divider" }));
 
                     let itemsWrap = null;
+                    let draft = false;
                     const totalValEl = el("span", {}, fmtPeso(computedTotal()));
 
                     if (t.type === "transfer") {
@@ -5687,7 +5799,7 @@
                         );
                     } else {
                         paper.appendChild(
-                            el("div", { class: "receipt-edit-hint" }, "Tap a name, amount or qty to edit · edits apply to this copy only"),
+                            el("div", { class: "receipt-edit-hint" }, "Tap any name, amount, qty or @ price to edit · edits apply to this copy only"),
                         );
                         itemsWrap = el("div", {});
                         paper.appendChild(itemsWrap);
@@ -5736,47 +5848,67 @@
                             const row = el("div", { class: "receipt-item" + (ln.hidden ? " ri-hidden" : "") });
                             const nameEl = el("span", { class: "ri-name", title: "Rename item" }, ln.item || t.category || "Item");
                             nameEl.addEventListener("click", () => {
-                                const v = prompt("Item name", ln.item || "");
-                                if (v == null) return;
-                                ln.item = v.trim();
-                                renderItems();
+                                receiptInlineEdit(nameEl, {
+                                    value: ln.item,
+                                    onCommit: (v) => {
+                                        ln.item = v;
+                                        renderItems();
+                                    },
+                                    onCancel: () => renderItems(),
+                                });
                             });
                             const amtEl = el("span", { class: "ri-amount", title: "Edit amount" }, fmtPeso(ln.amount));
                             amtEl.addEventListener("click", () => {
-                                const v = prompt("Amount", String(ln.amount));
-                                if (v == null) return;
-                                const n = parseFloat(v);
-                                if (isNaN(n)) {
-                                    toast("Invalid amount");
-                                    return;
-                                }
-                                ln.amount = n;
-                                renderItems();
+                                receiptInlineEdit(amtEl, {
+                                    value: ln.amount,
+                                    numeric: true,
+                                    onCommit: (v) => {
+                                        ln.amount = v;
+                                        renderItems();
+                                    },
+                                    onCancel: () => renderItems(),
+                                });
                             });
                             row.appendChild(el("div", { class: "ri-top" }, [nameEl, amtEl]));
 
                             const subParts = [];
                             if (ln.category) subParts.push(el("span", {}, ln.category));
-                            if (ln.qty) {
-                                const qEl = el("span", { class: "ri-qty", title: "Edit quantity" }, "qty " + ln.qty);
-                                qEl.addEventListener("click", () => {
-                                    const v = prompt("Quantity", String(ln.qty));
-                                    if (v == null) return;
-                                    const n = parseFloat(v);
-                                    ln.qty = isNaN(n) ? null : n;
-                                    renderItems();
+                            const qtyEmpty = ln.qty == null || ln.qty === "";
+                            const qEl = el("span", { class: "ri-slot" + (qtyEmpty ? " ri-slot-empty" : ""), title: "Edit quantity" }, qtyEmpty ? "qty —" : "qty " + ln.qty);
+                            qEl.addEventListener("click", () => {
+                                receiptInlineEdit(qEl, {
+                                    value: ln.qty != null ? ln.qty : "",
+                                    numeric: true,
+                                    allowEmpty: true,
+                                    onCommit: (v) => {
+                                        ln.qty = v;
+                                        renderItems();
+                                    },
+                                    onCancel: () => renderItems(),
                                 });
-                                subParts.push(qEl);
-                            }
-                            if (ln.unitPrice) subParts.push(el("span", {}, "@ " + fmtPeso(ln.unitPrice)));
-                            if (subParts.length) {
-                                const sub = el("div", { class: "ri-sub" });
-                                subParts.forEach((p, i) => {
-                                    if (i) sub.appendChild(document.createTextNode(" · "));
-                                    sub.appendChild(p);
+                            });
+                            subParts.push(qEl);
+                            const priceEmpty = ln.unitPrice == null || ln.unitPrice === "";
+                            const pEl = el("span", { class: "ri-slot" + (priceEmpty ? " ri-slot-empty" : ""), title: "Edit unit price" }, priceEmpty ? "@ —" : "@ " + fmtPeso(ln.unitPrice));
+                            pEl.addEventListener("click", () => {
+                                receiptInlineEdit(pEl, {
+                                    value: ln.unitPrice != null ? ln.unitPrice : "",
+                                    numeric: true,
+                                    allowEmpty: true,
+                                    onCommit: (v) => {
+                                        ln.unitPrice = v;
+                                        renderItems();
+                                    },
+                                    onCancel: () => renderItems(),
                                 });
-                                row.appendChild(sub);
-                            }
+                            });
+                            subParts.push(pEl);
+                            const sub = el("div", { class: "ri-sub" });
+                            subParts.forEach((p, i) => {
+                                if (i) sub.appendChild(document.createTextNode(" · "));
+                                sub.appendChild(p);
+                            });
+                            row.appendChild(sub);
 
                             const hideBtn = el("button", { type: "button", title: ln.hidden ? "Show on receipt" : "Hide from receipt" }, ln.hidden ? "Show" : "Hide");
                             hideBtn.addEventListener("click", () => {
@@ -5792,21 +5924,130 @@
                             itemsWrap.appendChild(row);
                         });
                         if (editable) {
-                            const addBtn = el("button", { type: "button" }, "＋ Add item");
+                            if (draft) {
+                                const dRow = el("div", { class: "receipt-item ri-draft" });
+                                const nameInput = el("input", { class: "ri-input name", type: "text", placeholder: "Item name" });
+                                const amtInput = el("input", { class: "ri-input amt", type: "text", placeholder: "₱ 0.00" });
+                                amtInput.setAttribute("inputmode", "decimal");
+                                dRow.appendChild(el("div", { class: "ri-top" }, [nameInput, amtInput]));
+                                const qtyInput = el("input", { class: "ri-input", type: "text", placeholder: "0" });
+                                qtyInput.setAttribute("inputmode", "decimal");
+                                const priceInput = el("input", { class: "ri-input", type: "text", placeholder: "0.00" });
+                                priceInput.setAttribute("inputmode", "decimal");
+                                dRow.appendChild(
+                                    el("div", { class: "ri-sub ri-draft-sub" }, [
+                                        el("span", {}, "qty"),
+                                        qtyInput,
+                                        document.createTextNode(" · "),
+                                        el("span", {}, "@"),
+                                        priceInput,
+                                    ]),
+                                );
+                                const addDraftBtn = el("button", { type: "button" }, "Add");
+                                const cancelDraftBtn = el("button", { type: "button" }, "Cancel");
+                                dRow.appendChild(el("div", { class: "ri-actions" }, [addDraftBtn, cancelDraftBtn]));
+                                itemsWrap.appendChild(dRow);
+
+                                const syncDraftAmount = () => {
+                                    const q = parseFloat(qtyInput.value);
+                                    const p = parseFloat(priceInput.value);
+                                    if (!isNaN(q) && !isNaN(p)) amtInput.value = String(Math.round(q * p * 100) / 100);
+                                };
+                                qtyInput.addEventListener("input", syncDraftAmount);
+                                priceInput.addEventListener("input", syncDraftAmount);
+                                const commitDraft = () => {
+                                    const name = nameInput.value.trim();
+                                    const rawAmt = amtInput.value.trim();
+                                    const rawQty = qtyInput.value.trim();
+                                    const rawPrice = priceInput.value.trim();
+                                    const qty = rawQty ? parseFloat(rawQty) : null;
+                                    const price = rawPrice ? parseFloat(rawPrice) : null;
+                                    let amt = rawAmt ? parseFloat(rawAmt) : NaN;
+                                    if (qty != null && price != null && (!rawAmt || isNaN(amt))) {
+                                        amt = Math.round(qty * price * 100) / 100;
+                                    }
+                                    if (!name) {
+                                        toast("Name required");
+                                        nameInput.focus();
+                                        return;
+                                    }
+                                    if (qty != null && isNaN(qty)) {
+                                        toast("Invalid qty");
+                                        qtyInput.focus();
+                                        return;
+                                    }
+                                    if (price != null && isNaN(price)) {
+                                        toast("Invalid price");
+                                        priceInput.focus();
+                                        return;
+                                    }
+                                    if (isNaN(amt)) {
+                                        toast("Amount or qty × price required");
+                                        amtInput.focus();
+                                        return;
+                                    }
+                                    editLines.push({ category: "", item: name, qty: qty, unitPrice: price, amount: amt, hidden: false });
+                                    draft = false;
+                                    renderItems();
+                                };
+                                const cancelDraft = () => {
+                                    draft = false;
+                                    renderItems();
+                                };
+                                nameInput.addEventListener("keydown", (e) => {
+                                    if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        qtyInput.focus();
+                                    } else if (e.key === "Escape") {
+                                        e.preventDefault();
+                                        cancelDraft();
+                                    }
+                                });
+                                qtyInput.addEventListener("keydown", (e) => {
+                                    if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        priceInput.focus();
+                                    } else if (e.key === "Escape") {
+                                        e.preventDefault();
+                                        cancelDraft();
+                                    }
+                                });
+                                priceInput.addEventListener("keydown", (e) => {
+                                    if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        amtInput.focus();
+                                        amtInput.select();
+                                    } else if (e.key === "Escape") {
+                                        e.preventDefault();
+                                        cancelDraft();
+                                    }
+                                });
+                                amtInput.addEventListener("keydown", (e) => {
+                                    if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        commitDraft();
+                                    } else if (e.key === "Escape") {
+                                        e.preventDefault();
+                                        cancelDraft();
+                                    }
+                                });
+                                addDraftBtn.addEventListener("click", commitDraft);
+                                cancelDraftBtn.addEventListener("click", cancelDraft);
+                                nameInput.focus();
+                            }
+                            const addRow = el("div", { class: "receipt-add-row" });
+                            const addBtn = el("button", { type: "button" }, draft ? "＋ Add another item" : "＋ Add item");
                             addBtn.addEventListener("click", () => {
-                                const name = prompt("Item name");
-                                if (name == null || !name.trim()) return;
-                                const amtRaw = prompt("Amount");
-                                if (amtRaw == null) return;
-                                const amt = parseFloat(amtRaw);
-                                if (isNaN(amt)) {
-                                    toast("Invalid amount");
-                                    return;
+                                if (!draft) {
+                                    draft = true;
+                                    renderItems();
+                                } else {
+                                    const existing = qs(".ri-draft .ri-input.name", itemsWrap);
+                                    if (existing) existing.focus();
                                 }
-                                editLines.push({ category: "", item: name.trim(), qty: null, unitPrice: null, amount: amt, hidden: false });
-                                renderItems();
                             });
-                            itemsWrap.appendChild(el("div", { class: "receipt-add-row" }, addBtn));
+                            addRow.appendChild(addBtn);
+                            itemsWrap.appendChild(addRow);
                         }
                         totalValEl.textContent = fmtPeso(computedTotal());
                     }
