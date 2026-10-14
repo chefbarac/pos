@@ -1265,6 +1265,60 @@
                 color: var(--muted);
                 margin-top: 14px;
             }
+            .receipt-edit-hint {
+                font-size: 11px;
+                color: var(--ink-soft);
+                text-align: center;
+                margin-bottom: 10px;
+                line-height: 1.4;
+            }
+            .receipt-item .ri-name,
+            .receipt-item .ri-amount,
+            .receipt-item .ri-qty {
+                cursor: pointer;
+            }
+            .receipt-item.ri-hidden {
+                opacity: 0.4;
+            }
+            .receipt-item.ri-hidden .ri-name {
+                text-decoration: line-through;
+            }
+            .ri-actions {
+                display: flex;
+                gap: 6px;
+                margin-top: 4px;
+            }
+            .ri-actions button {
+                border: 1px solid var(--border);
+                background: #fff;
+                border-radius: 6px;
+                font-size: 11px;
+                font-weight: 600;
+                line-height: 1;
+                padding: 4px 8px;
+                cursor: pointer;
+                color: var(--ink-soft);
+                font-family: var(--sans);
+            }
+            .ri-actions button:hover {
+                color: var(--ink);
+                border-color: var(--ink-soft);
+            }
+            .receipt-add-row button {
+                border: 1px dashed var(--border);
+                background: none;
+                border-radius: 8px;
+                padding: 7px 12px;
+                font-size: 12.5px;
+                font-family: inherit;
+                color: var(--ink-soft);
+                cursor: pointer;
+                width: 100%;
+            }
+            .receipt-add-row button:hover {
+                color: var(--ink);
+                border-color: var(--ink-soft);
+            }
             @media print {
                 body * {
                     visibility: hidden;
@@ -1281,6 +1335,12 @@
                     padding: 0;
                     margin: 0;
                     border: none;
+                }
+                .ri-hidden,
+                .ri-actions,
+                .receipt-add-row,
+                .receipt-edit-hint {
+                    display: none !important;
                 }
             }
 
@@ -5579,6 +5639,22 @@
                     const dateStr = dt.toLocaleDateString("en-PH", { year: "numeric", month: "short", day: "numeric" });
                     const timeStr = dt.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit" });
 
+                    // Image-only working copy of the lines — edits here never touch the saved transaction.
+                    const editable = t.type !== "transfer";
+                    const editLines = editable
+                        ? (Array.isArray(lines) ? lines : []).map((ln) => ({
+                              category: ln.category || "",
+                              item: ln.item || "",
+                              qty: ln.qty != null && ln.qty !== "" ? Number(ln.qty) || null : null,
+                              unitPrice: ln.unitPrice != null && ln.unitPrice !== "" ? Number(ln.unitPrice) || null : null,
+                              amount: Number(ln.amount) || 0,
+                              hidden: false,
+                          }))
+                        : [];
+                    const visibleLines = () => editLines.filter((l) => !l.hidden);
+                    const computedTotal = () =>
+                        editable ? visibleLines().reduce((s, l) => s + (Number(l.amount) || 0), 0) : Number(t.amount) || 0;
+
                     const overlay = el("div", { class: "overlay" });
                     const modal = el("div", { class: "modal" });
                     const copyIconBtn = el("button", { type: "button", class: "receipt-copy-icon", title: "Copy as text" }, "\u{1F4CB}");
@@ -5596,6 +5672,9 @@
                     );
                     paper.appendChild(el("hr", { class: "receipt-divider" }));
 
+                    let itemsWrap = null;
+                    const totalValEl = el("span", {}, fmtPeso(computedTotal()));
+
                     if (t.type === "transfer") {
                         paper.appendChild(
                             el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "Description"), el("span", {}, t.item || "")]),
@@ -5606,20 +5685,16 @@
                         paper.appendChild(
                             el("div", { class: "receipt-line" }, [el("span", { class: "rl-label" }, "To"), el("span", {}, accountLabel(t.toAccount))]),
                         );
-                    } else if (lines.length) {
-                        lines.forEach((ln) => {
-                            const sub = [ln.category, ln.qty ? "qty " + ln.qty : null, ln.unitPrice ? "@ " + fmtPeso(ln.unitPrice) : null].filter(Boolean).join(" · ");
-                            paper.appendChild(
-                                el("div", { class: "receipt-item" }, [
-                                    el("div", { class: "ri-top" }, [el("span", {}, ln.item || t.category || "Item"), el("span", {}, fmtPeso(ln.amount))]),
-                                    sub ? el("div", { class: "ri-sub" }, sub) : null,
-                                ]),
-                            );
-                        });
+                    } else {
+                        paper.appendChild(
+                            el("div", { class: "receipt-edit-hint" }, "Tap a name, amount or qty to edit · edits apply to this copy only"),
+                        );
+                        itemsWrap = el("div", {});
+                        paper.appendChild(itemsWrap);
                     }
 
                     paper.appendChild(el("hr", { class: "receipt-divider" }));
-                    paper.appendChild(el("div", { class: "receipt-total" }, [el("span", {}, "Total"), el("span", {}, fmtPeso(t.amount))]));
+                    paper.appendChild(el("div", { class: "receipt-total" }, [el("span", {}, "Total"), totalValEl]));
 
                     if (t.type !== "transfer") {
                         paper.appendChild(
@@ -5647,16 +5722,147 @@
                     );
                     paper.appendChild(el("div", { class: "receipt-footer" }, "Thank you!"));
 
+                    function renderItems() {
+                        if (!itemsWrap) return;
+                        itemsWrap.textContent = "";
+                        if (!editLines.length) {
+                            itemsWrap.appendChild(
+                                el("div", { class: "receipt-item" }, [
+                                    el("div", { class: "ri-top" }, [el("span", {}, "No items"), el("span", {}, fmtPeso(0))]),
+                                ]),
+                            );
+                        }
+                        editLines.forEach((ln, idx) => {
+                            const row = el("div", { class: "receipt-item" + (ln.hidden ? " ri-hidden" : "") });
+                            const nameEl = el("span", { class: "ri-name", title: "Rename item" }, ln.item || t.category || "Item");
+                            nameEl.addEventListener("click", () => {
+                                const v = prompt("Item name", ln.item || "");
+                                if (v == null) return;
+                                ln.item = v.trim();
+                                renderItems();
+                            });
+                            const amtEl = el("span", { class: "ri-amount", title: "Edit amount" }, fmtPeso(ln.amount));
+                            amtEl.addEventListener("click", () => {
+                                const v = prompt("Amount", String(ln.amount));
+                                if (v == null) return;
+                                const n = parseFloat(v);
+                                if (isNaN(n)) {
+                                    toast("Invalid amount");
+                                    return;
+                                }
+                                ln.amount = n;
+                                renderItems();
+                            });
+                            row.appendChild(el("div", { class: "ri-top" }, [nameEl, amtEl]));
+
+                            const subParts = [];
+                            if (ln.category) subParts.push(el("span", {}, ln.category));
+                            if (ln.qty) {
+                                const qEl = el("span", { class: "ri-qty", title: "Edit quantity" }, "qty " + ln.qty);
+                                qEl.addEventListener("click", () => {
+                                    const v = prompt("Quantity", String(ln.qty));
+                                    if (v == null) return;
+                                    const n = parseFloat(v);
+                                    ln.qty = isNaN(n) ? null : n;
+                                    renderItems();
+                                });
+                                subParts.push(qEl);
+                            }
+                            if (ln.unitPrice) subParts.push(el("span", {}, "@ " + fmtPeso(ln.unitPrice)));
+                            if (subParts.length) {
+                                const sub = el("div", { class: "ri-sub" });
+                                subParts.forEach((p, i) => {
+                                    if (i) sub.appendChild(document.createTextNode(" · "));
+                                    sub.appendChild(p);
+                                });
+                                row.appendChild(sub);
+                            }
+
+                            const hideBtn = el("button", { type: "button", title: ln.hidden ? "Show on receipt" : "Hide from receipt" }, ln.hidden ? "Show" : "Hide");
+                            hideBtn.addEventListener("click", () => {
+                                ln.hidden = !ln.hidden;
+                                renderItems();
+                            });
+                            const delBtn = el("button", { type: "button", title: "Remove from this receipt copy" }, "Remove");
+                            delBtn.addEventListener("click", () => {
+                                editLines.splice(idx, 1);
+                                renderItems();
+                            });
+                            row.appendChild(el("div", { class: "ri-actions" }, [hideBtn, delBtn]));
+                            itemsWrap.appendChild(row);
+                        });
+                        if (editable) {
+                            const addBtn = el("button", { type: "button" }, "＋ Add item");
+                            addBtn.addEventListener("click", () => {
+                                const name = prompt("Item name");
+                                if (name == null || !name.trim()) return;
+                                const amtRaw = prompt("Amount");
+                                if (amtRaw == null) return;
+                                const amt = parseFloat(amtRaw);
+                                if (isNaN(amt)) {
+                                    toast("Invalid amount");
+                                    return;
+                                }
+                                editLines.push({ category: "", item: name.trim(), qty: null, unitPrice: null, amount: amt, hidden: false });
+                                renderItems();
+                            });
+                            itemsWrap.appendChild(el("div", { class: "receipt-add-row" }, addBtn));
+                        }
+                        totalValEl.textContent = fmtPeso(computedTotal());
+                    }
+                    renderItems();
+
                     modal.appendChild(paper);
 
                     const btnRow = el("div", { class: "modal-btnrow" }, [
                         el("button", { type: "button", class: "bigbtn ghost" }, "Close"),
-                        el("button", { type: "button", class: "bigbtn sale" }, "\u{1F5A8}\uFE0F Print / Save PDF"),
+                        el("button", { type: "button", class: "bigbtn sale", style: "flex:1.6" }, "\u{1F5BC}\uFE0F Copy as image"),
+                        el("button", { type: "button", class: "bigbtn ghost" }, "\u{1F5A8}\uFE0F Print"),
                     ]);
                     modal.appendChild(btnRow);
 
+                    function buildCanvasData() {
+                        const infoRows = [];
+                        if (t.type !== "transfer") {
+                            infoRows.push(["Payment", paymentLabel(t.payment)]);
+                            if (t.tendered != null) {
+                                infoRows.push(["Tendered", fmtPeso(t.tendered)]);
+                                infoRows.push([t.change != null && t.change < 0 ? "Short" : "Change", fmtPeso(Math.abs(t.change || 0))]);
+                            }
+                        }
+                        if (t.note) infoRows.push(["Note", t.note]);
+                        infoRows.push(["Ref #", String(id)]);
+                        const topRows =
+                            t.type === "transfer"
+                                ? [
+                                      ["Description", t.item || ""],
+                                      ["From", accountLabel(t.fromAccount)],
+                                      ["To", accountLabel(t.toAccount)],
+                                  ]
+                                : [];
+                        return {
+                            businessName,
+                            kindLabel,
+                            dateStr,
+                            timeStr,
+                            lines:
+                                t.type === "transfer"
+                                    ? []
+                                    : visibleLines().map((l) => ({
+                                          item: l.item || t.category || "Item",
+                                          category: l.category,
+                                          qty: l.qty,
+                                          unitPrice: l.unitPrice,
+                                          amount: l.amount,
+                                      })),
+                            topRows,
+                            infoRows,
+                            total: computedTotal(),
+                        };
+                    }
+
                     copyIconBtn.addEventListener("click", async () => {
-                        const text = receiptAsText(t, lines, businessName, kindLabel, dateStr, timeStr);
+                        const text = receiptAsText(t, visibleLines(), businessName, kindLabel, dateStr, timeStr, computedTotal());
                         try {
                             await navigator.clipboard.writeText(text);
                             toast("Receipt copied · paste it in Messenger");
@@ -5675,18 +5881,185 @@
                     });
 
                     const closeBtn = btnRow.children[0];
-                    const printBtn = btnRow.children[1];
+                    const imageBtn = btnRow.children[1];
+                    const printBtn = btnRow.children[2];
                     closeBtn.addEventListener("click", () => overlay.remove());
                     overlay.addEventListener("click", (e) => {
                         if (e.target === overlay) overlay.remove();
                     });
                     printBtn.addEventListener("click", () => window.print());
+                    imageBtn.addEventListener("click", async () => {
+                        const canvas = drawReceiptCanvas(buildCanvasData());
+                        try {
+                            const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+                            if (!blob) throw new Error("no blob");
+                            if (!navigator.clipboard || !window.ClipboardItem) throw new Error("clipboard unsupported");
+                            await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+                            toast("Image copied · paste it in Messenger");
+                        } catch (e) {
+                            try {
+                                const a = document.createElement("a");
+                                a.href = canvas.toDataURL("image/png");
+                                a.download = "receipt-" + id + ".png";
+                                document.body.appendChild(a);
+                                a.click();
+                                a.remove();
+                                toast("Clipboard blocked — image downloaded instead");
+                            } catch (e2) {
+                                toast("Couldn't copy image");
+                            }
+                        }
+                    });
 
                     overlay.appendChild(modal);
                     document.body.appendChild(overlay);
                 }
 
-                function receiptAsText(t, lines, businessName, kindLabel, dateStr, timeStr) {
+                function drawReceiptCanvas(data) {
+                    const scale = 2;
+                    const W = 340;
+                    const padX = 16;
+                    const padTop = 18;
+                    const padBottom = 16;
+                    const fontMono = '"Courier New", Courier, monospace';
+                    const ink = "#23302a";
+                    const muted = "#6b7268";
+                    const borderCol = "#dfd5bc";
+                    const contentW = W - padX * 2;
+
+                    function clipText(ctx, text, maxW) {
+                        const s = String(text == null ? "" : text);
+                        if (ctx.measureText(s).width <= maxW) return s;
+                        let out = s;
+                        while (out.length > 1 && ctx.measureText(out.slice(0, -1) + "…").width > maxW) out = out.slice(0, -1);
+                        return out + "…";
+                    }
+
+                    function dashedLine(ctx, y) {
+                        ctx.save();
+                        ctx.strokeStyle = borderCol;
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([4, 4]);
+                        ctx.beginPath();
+                        ctx.moveTo(padX, y + 0.5);
+                        ctx.lineTo(W - padX, y + 0.5);
+                        ctx.stroke();
+                        ctx.restore();
+                    }
+
+                    function paint(ctx) {
+                        let y = padTop;
+                        ctx.textBaseline = "top";
+                        ctx.textAlign = "center";
+                        ctx.font = "700 16px " + fontMono;
+                        ctx.fillStyle = ink;
+                        ctx.fillText(clipText(ctx, data.businessName, contentW), W / 2, y);
+                        y += 20;
+                        ctx.font = "12px " + fontMono;
+                        ctx.fillStyle = muted;
+                        ctx.fillText(clipText(ctx, data.kindLabel, contentW), W / 2, y);
+                        y += 16;
+                        ctx.fillText(clipText(ctx, data.dateStr + " · " + data.timeStr, contentW), W / 2, y);
+                        y += 16;
+
+                        y += 8;
+                        dashedLine(ctx, y);
+                        y += 12;
+
+                        if (data.lines.length) {
+                            data.lines.forEach((ln) => {
+                                ctx.font = "700 13.5px " + fontMono;
+                                ctx.fillStyle = ink;
+                                const amt = fmtPeso(ln.amount);
+                                ctx.textAlign = "right";
+                                ctx.fillText(amt, W - padX, y);
+                                const amtW = ctx.measureText(amt).width;
+                                ctx.textAlign = "left";
+                                ctx.fillText(clipText(ctx, ln.item, contentW - amtW - 10), padX, y);
+                                y += 18;
+                                const sub = [ln.category, ln.qty ? "qty " + ln.qty : null, ln.unitPrice ? "@ " + fmtPeso(ln.unitPrice) : null]
+                                    .filter(Boolean)
+                                    .join(" · ");
+                                if (sub) {
+                                    ctx.font = "12px " + fontMono;
+                                    ctx.fillStyle = muted;
+                                    ctx.fillText(clipText(ctx, sub, contentW), padX, y);
+                                    y += 16;
+                                }
+                                y += 4;
+                            });
+                        } else if (data.topRows.length) {
+                            data.topRows.forEach(([label, val]) => {
+                                ctx.font = "13px " + fontMono;
+                                ctx.textAlign = "left";
+                                ctx.fillStyle = muted;
+                                ctx.fillText(label, padX, y);
+                                const lw = ctx.measureText(label).width;
+                                ctx.textAlign = "right";
+                                ctx.fillStyle = ink;
+                                ctx.fillText(clipText(ctx, val, contentW - lw - 10), W - padX, y);
+                                y += 18;
+                            });
+                        }
+
+                        y += 4;
+                        dashedLine(ctx, y);
+                        y += 10;
+
+                        ctx.font = "700 16px " + fontMono;
+                        ctx.fillStyle = ink;
+                        ctx.textAlign = "left";
+                        ctx.fillText("Total", padX, y);
+                        ctx.textAlign = "right";
+                        ctx.fillText(fmtPeso(data.total), W - padX, y);
+                        y += 24;
+
+                        data.infoRows.forEach(([label, val], i) => {
+                            if (i === 0) y += 4;
+                            ctx.font = "13px " + fontMono;
+                            ctx.textAlign = "left";
+                            ctx.fillStyle = muted;
+                            const clipLabel = clipText(ctx, label, contentW * 0.4);
+                            ctx.fillText(clipLabel, padX, y);
+                            const lw = ctx.measureText(clipLabel).width;
+                            ctx.textAlign = "right";
+                            ctx.fillStyle = ink;
+                            ctx.fillText(clipText(ctx, val, contentW - lw - 10), W - padX, y);
+                            y += 18;
+                        });
+
+                        ctx.font = "12px " + fontMono;
+                        ctx.fillStyle = muted;
+                        ctx.textAlign = "center";
+                        y += 6;
+                        ctx.fillText("Thank you!", W / 2, y);
+                        y += 14;
+
+                        ctx.strokeStyle = borderCol;
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([5, 4]);
+                        ctx.strokeRect(2.5, 2.5, W - 5, y + padBottom - 4);
+                        ctx.setLineDash([]);
+
+                        return Math.ceil(y + padBottom);
+                    }
+
+                    // Measure pass (on a throwaway context), then draw for real at 2x scale.
+                    const mctx = document.createElement("canvas").getContext("2d");
+                    const height = paint(mctx);
+
+                    const canvas = document.createElement("canvas");
+                    canvas.width = W * scale;
+                    canvas.height = height * scale;
+                    const ctx = canvas.getContext("2d");
+                    ctx.scale(scale, scale);
+                    ctx.fillStyle = "#ffffff";
+                    ctx.fillRect(0, 0, W, height);
+                    paint(ctx);
+                    return canvas;
+                }
+
+                function receiptAsText(t, lines, businessName, kindLabel, dateStr, timeStr, total) {
                     const rows = [];
                     rows.push(businessName);
                     rows.push(kindLabel + " · " + dateStr + " " + timeStr);
@@ -5697,7 +6070,7 @@
                         lines.forEach((ln) => rows.push(fmtPeso(ln.amount) + (ln.qty > 1 ? " (qty " + ln.qty + ")" : "") + " - " + (ln.item || t.category || "Item")));
                     }
                     rows.push("------------------------------");
-                    rows.push("Total: " + fmtPeso(t.amount));
+                    rows.push("Total: " + fmtPeso(total != null ? total : t.amount));
                     if (t.type !== "transfer") rows.push("Payment: " + paymentLabel(t.payment));
                     if (t.note) rows.push("Note: " + t.note);
                     rows.push("Ref #" + t.id);
